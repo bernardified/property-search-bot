@@ -151,7 +151,7 @@ async def fuzzy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         # User confirmed — run the search with the matched name
         development_name = data[len("fuzzy_yes:"):]
         await query.edit_message_reply_markup(reply_markup=None)
-        await handle_property_search(update, development_name, message=query.message)
+        await handle_property_search(update, context, development_name, message=query.message)
 
     elif data.startswith("fuzzy_no:"):
         # User said no — show alternatives
