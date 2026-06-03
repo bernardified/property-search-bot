@@ -39,6 +39,41 @@ def _get_db():
     except Exception as e:
         logger.error(f"[Schools Cache] MongoDB connection failed: {e}")
         return None
+    
+def _get_schools_config(db) -> dict:
+    """Fetch legacy school names and junk filters from MongoDB, or seed if missing."""
+    default_config = {
+        "_id": "schools_config",
+        "legacy_names": [
+            "ROSYTH SCHOOL", "CATHOLIC HIGH SCHOOL", "CHIJ ST. NICHOLAS GIRLS' SCHOOL",
+            "MAHA BODHI SCHOOL", "RED SWASTIKA SCHOOL", "TAO NAN SCHOOL", 
+            "MEE TOH SCHOOL", "KONG HWA SCHOOL", "MARIS STELLA HIGH SCHOOL", 
+            "METHODIST GIRLS' SCHOOL", "SINGAPORE CHINESE GIRLS' SCHOOL", 
+            "ST. JOSEPH'S INSTITUTION JUNIOR", "ST. STEPHEN'S SCHOOL", 
+            "MARYMOUNT CONVENT SCHOOL", "CANOSSA CATHOLIC PRIMARY SCHOOL", 
+            "DE LA SALLE SCHOOL", "MONTFORT JUNIOR SCHOOL", "CHONGFU SCHOOL",
+            "AI TONG SCHOOL", "POI CHING SCHOOL", "HONG WEN SCHOOL", 
+            "PEI CHUN PUBLIC SCHOOL", "ANGLO-CHINESE SCHOOL (JUNIOR)"
+        ],
+        "junk_words": ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "ACE", "MORNING STAR"]
+    }
+
+    if db is None:
+        return default_config
+
+    try:
+        config_coll = db['app_config']
+        config = config_coll.find_one({"_id": "schools_config"})
+        
+        if not config:
+            config_coll.insert_one(default_config)
+            logger.info("[Schools Cache] Seeded default schools config to MongoDB.")
+            return default_config
+            
+        return config
+    except Exception as e:
+        logger.error(f"[Schools Cache] Failed to load config from DB: {e}")
+        return default_config
 
 
 # ── Haversine ─────────────────────────────────────────────────────────────────
@@ -138,18 +173,12 @@ def _fetch_all_schools(token: str) -> list:
             logger.error(f"[Schools Cache] Bulk fetch failed on page {page}: {e}")
             break
 
-    # 2. The Legacy Exceptions: Exact names + Junk Filtering
-    exceptions = [
-        "ROSYTH SCHOOL", "CATHOLIC HIGH SCHOOL", "CHIJ ST. NICHOLAS GIRLS' SCHOOL",
-        "MAHA BODHI SCHOOL", "RED SWASTIKA SCHOOL", "TAO NAN SCHOOL", 
-        "MEE TOH SCHOOL", "KONG HWA SCHOOL", "MARIS STELLA HIGH SCHOOL", 
-        "METHODIST GIRLS' SCHOOL", "SINGAPORE CHINESE GIRLS' SCHOOL", 
-        "ST. JOSEPH'S INSTITUTION JUNIOR", "ST. STEPHEN'S SCHOOL", 
-        "MARYMOUNT CONVENT SCHOOL", "CANOSSA CATHOLIC PRIMARY SCHOOL", 
-        "DE LA SALLE SCHOOL", "MONTFORT JUNIOR SCHOOL", "CHONGFU SCHOOL",
-        "AI TONG SCHOOL", "POI CHING SCHOOL", "HONG WEN SCHOOL", 
-        "PEI CHUN PUBLIC SCHOOL", "ANGLO-CHINESE SCHOOL (JUNIOR)"
-    ]
+    # 2. The Legacy Exceptions: Fetched dynamically from MongoDB app_config
+    db = _get_db()
+    config = _get_schools_config(db)
+    
+    exceptions = config.get("legacy_names", [])
+    junk_words = config.get("junk_words", [])
 
     for school_name in exceptions:
         try:
@@ -170,9 +199,7 @@ def _fetch_all_schools(token: str) -> list:
             if results:
                 valid_results = []
                 
-                # Filter out the student care centers, businesses, and old historical sites
-                junk_words = ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "ACE", "MORNING STAR"]
-                
+                # Filter out the junk using the dynamic MongoDB list
                 for item in results:
                     name_upper = item.get("SEARCHVAL", "").upper()
                     if any(junk in name_upper for junk in junk_words):
@@ -180,13 +207,9 @@ def _fetch_all_schools(token: str) -> list:
                     valid_results.append(item)
 
                 if valid_results:
-                    # The actual MOE school is almost always the shortest name string
-                    # e.g., "ROSYTH SCHOOL" (13 chars) beats "ROSYTH SCHOOL TENNIS COURT" (26 chars)
                     best_match = min(valid_results, key=lambda x: len(x.get("SEARCHVAL", "")))
-                    
                     final_name = best_match.get("SEARCHVAL", "").title()
                     
-                    # Prevent duplicates
                     if not any(school_name.lower() in s['name'].lower() for s in schools):
                         schools.append({
                             "name": final_name,
@@ -196,6 +219,7 @@ def _fetch_all_schools(token: str) -> list:
                         print(f"✅ Successfully injected legacy school: {final_name}")
         except Exception as e:
             logger.error(f"[Schools Cache] Failed to fetch exception {school_name}: {e}")
+
     return schools
 
 
