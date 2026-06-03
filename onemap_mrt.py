@@ -33,7 +33,13 @@ def _get_db():
     if not MONGO_URI:
         return None
     try:
-        client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
+        client = MongoClient(
+            MONGO_URI,
+            server_api=ServerApi('1'),
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=10000,
+        )
         _db = client['property_bot']
         return _db
     except Exception as e:
