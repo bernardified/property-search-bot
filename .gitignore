@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.env
+ura_cache.json
+mrt_cache.json
+search_history.json
