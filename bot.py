@@ -382,13 +382,18 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if schools:
                 lines = ["🏫 *Nearest Primary Schools*"]
                 for i, school in enumerate(schools, 1):
-                # Convert the raw meters to a clean display string
-                    dist_str = f"{int(school['dist'])}m" if school['dist'] < 1000 else f"{school['dist']/1000:.1f}km"
-                    lines.append(f"  {i}. {school['name']} ({dist_str})")
+                    # 1. Calculate the clean MOE straight-line string
+                    moe_dist = f"{int(school['dist'])}m" if school['dist'] < 1000 else f"{school['dist']/1000:.1f}km"
+                
+                    # 2. Display both MOE distance and Walking distance
+                    lines.append(
+                        f"  {i}. {school['name']} (MOE: {moe_dist})\n"
+                        f"     🚶 {school['duration']} walk ({school['distance']})\n"
+                        f"     [Walking directions]({school['maps_link']})"
+                    )
             
                 lines.append("")
-                # 🛑 Add the crucial legal/UX disclaimer here
-                lines.append("⚠️ *Note:* Distances are estimates based on center-points. For borderline cases (~1km), always verify the official boundary distance on the OneMap SchoolQuery website.")
+                lines.append("⚠️ *Note:* MOE distances are estimates based on center-points. For borderline cases (~1km), always verify on the OneMap SchoolQuery website.")
             
                 text = "\n".join(lines)
             
@@ -415,7 +420,6 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "Unknown amenity type."
 
         await loading.delete()
-        await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Amenity callback failed: {e}", exc_info=True)

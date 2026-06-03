@@ -138,7 +138,7 @@ def _fetch_all_schools(token: str) -> list:
             logger.error(f"[Schools Cache] Bulk fetch failed on page {page}: {e}")
             break
 
-    # 2. The Legacy Exceptions: Schools without "Primary" in their OneMap registry
+    # 2. The Legacy Exceptions: Exact names + Junk Filtering
     exceptions = [
         "ROSYTH SCHOOL", "CATHOLIC HIGH SCHOOL", "CHIJ ST. NICHOLAS GIRLS' SCHOOL",
         "MAHA BODHI SCHOOL", "RED SWASTIKA SCHOOL", "TAO NAN SCHOOL", 
@@ -168,20 +168,34 @@ def _fetch_all_schools(token: str) -> list:
             results = data.get("results", [])
             
             if results:
-                # OneMap sorts best matches first. Take the top result.
-                item = results[0]
-                name = item.get("SEARCHVAL", "")
+                valid_results = []
                 
-                # Prevent duplicates in case OneMap eventually updates their naming
-                if not any(school_name.lower() in s['name'].lower() for s in schools):
-                    schools.append({
-                        "name": name.title(),
-                        "lat": float(item["LATITUDE"]),
-                        "lng": float(item["LONGITUDE"])
-                    })
+                # Filter out the student care centers, businesses, and old historical sites
+                junk_words = ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "ACE", "MORNING STAR"]
+                
+                for item in results:
+                    name_upper = item.get("SEARCHVAL", "").upper()
+                    if any(junk in name_upper for junk in junk_words):
+                        continue
+                    valid_results.append(item)
+
+                if valid_results:
+                    # The actual MOE school is almost always the shortest name string
+                    # e.g., "ROSYTH SCHOOL" (13 chars) beats "ROSYTH SCHOOL TENNIS COURT" (26 chars)
+                    best_match = min(valid_results, key=lambda x: len(x.get("SEARCHVAL", "")))
+                    
+                    final_name = best_match.get("SEARCHVAL", "").title()
+                    
+                    # Prevent duplicates
+                    if not any(school_name.lower() in s['name'].lower() for s in schools):
+                        schools.append({
+                            "name": final_name,
+                            "lat": float(best_match["LATITUDE"]),
+                            "lng": float(best_match["LONGITUDE"])
+                        })
+                        print(f"✅ Successfully injected legacy school: {final_name}")
         except Exception as e:
             logger.error(f"[Schools Cache] Failed to fetch exception {school_name}: {e}")
-
     return schools
 
 
