@@ -15,6 +15,8 @@ from ura import search_property, format_transactions
 from maps import get_nearby_info, format_nearby
 from storage import record_search, get_recent_searches
 from cache_ura import force_refresh, cache_status
+from onemap_mrt import build_mrt_cache
+from schools_cache import get_schools_cache
 
 load_dotenv()
 
@@ -55,24 +57,51 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /refresh — manually refresh URA data cache."""
-    status = cache_status()
-    msg = await update.message.reply_text(
-        f"🔄 Refreshing URA data cache...\n"
-        f"Current cache: {status.get('status', 'unknown')} "
-        f"({status.get('age_hours', '?')}h old, {status.get('projects', '?')} projects)\n"
-        f"This takes ~15 seconds...",
-    )
-    success = force_refresh()
-    new_status = cache_status()
-    if success:
-        await msg.edit_text(
-            f"✅ Cache refreshed successfully\n"
-            f"{new_status.get('projects', '?')} projects loaded "
-            f"({new_status.get('size_mb', '?')}MB)"
-        )
+    """Handle /refresh — refresh all caches."""
+    msg = await update.message.reply_text("🔄 Refreshing all caches...\nThis may take ~1 minute.")
+
+    lines = []
+
+    # 1. URA transactions
+    ura_ok = force_refresh()
+    ura_status = cache_status()
+    if ura_ok:
+        lines.append(f"✅ URA transactions — {ura_status.get('projects', '?')} projects")
     else:
-        await msg.edit_text("❌ Cache refresh failed. URA API may be unavailable.")
+        lines.append("❌ URA transactions — refresh failed")
+
+    await msg.edit_text("🔄 Refreshing all caches...\n" + "\n".join(lines))
+
+    # 2. MRT stations (force by clearing cache meta then rebuilding)
+    try:
+        from pymongo import MongoClient
+        from pymongo.server_api import ServerApi
+        import os
+        mongo_uri = os.getenv("MONGO_URI")
+        if mongo_uri:
+            client = MongoClient(mongo_uri, server_api=ServerApi("1"),
+                                 serverSelectionTimeoutMS=10000)
+            db = client["property_bot"]
+            db["mrt_cache"].delete_many({})  # clear to force rebuild
+        stations = build_mrt_cache()
+        lines.append(f"✅ MRT stations — {len(stations)} stations")
+    except Exception as e:
+        logger.error(f"MRT refresh failed: {e}")
+        lines.append("❌ MRT stations — refresh failed")
+
+    await msg.edit_text("🔄 Refreshing all caches...\n" + "\n".join(lines))
+
+    # 3. Primary schools (force by clearing cache meta then rebuilding)
+    try:
+        if mongo_uri:
+            db["schools_cache"].delete_many({})  # clear to force rebuild
+        schools = get_schools_cache()
+        lines.append(f"✅ Primary schools — {len(schools)} schools")
+    except Exception as e:
+        logger.error(f"Schools refresh failed: {e}")
+        lines.append("❌ Primary schools — refresh failed")
+
+    await msg.edit_text("🔄 All caches refreshed\n\n" + "\n".join(lines))
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,6 +122,9 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"{i}. {item['name']}", callback_data=f"search:{item['name']}")]
         for i, item in enumerate(results, 1)
     ]
+    # Add a search button at the bottom
+    keyboard.append([InlineKeyboardButton("🔍 Search a new property", callback_data="new_search")])
+
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode="Markdown",
@@ -179,6 +211,15 @@ async def fuzzy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Search cancelled.")
 
 
+async def new_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Search another property' button tap."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("🏠 Please enter the property or development name:")
+    context.user_data["awaiting_search"] = True
+
+
 # ─── Core Search Logic ───────────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,6 +227,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     development_name = update.message.text.strip()
     if not development_name:
         return
+    # Clear awaiting flag if set
+    context.user_data.pop("awaiting_search", None)
     await handle_property_search(update, context, development_name)
 
 
@@ -245,11 +288,18 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
         maps_result = get_nearby_info(address)
         nearby_text = format_nearby(maps_result)
 
-        # 5. Send
+        # 5. Send results
         full_message = f"{transaction_text}\n\n{nearby_text}"
         await loading_msg.delete()
         await msg.reply_text(
             full_message, parse_mode="Markdown", disable_web_page_preview=True
+        )
+
+        # 6. Prompt to search again
+        keyboard = [[InlineKeyboardButton("🔍 Search another property", callback_data="new_search")]]
+        await msg.reply_text(
+            "Search for another property?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     except Exception as e:
@@ -287,6 +337,7 @@ def main():
     app.add_handler(search_conv)
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
+    app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot is running...")

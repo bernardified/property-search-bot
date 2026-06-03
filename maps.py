@@ -326,6 +326,14 @@ def build_google_maps_link(origin_name, dest_lat, dest_lng) -> str:
     )
 
 
+# ── Primary schools via cached OneMap data ───────────────────────────────────
+
+def find_nearest_primary_schools(lat: float, lng: float, radius_m: float = 1000) -> list:
+    """Find nearest primary schools using MongoDB-cached OneMap data."""
+    from schools_cache import find_nearest_primary_schools as cached_schools
+    return cached_schools(lat, lng, radius_m=radius_m, top_n=3)
+
+
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def get_nearby_info(address: str) -> dict:
@@ -370,7 +378,22 @@ def get_nearby_info(address: str) -> dict:
                 "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
             })
 
-    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results}
+    # ── Primary schools via OneMap ───────────────────────────────────────────
+    school_results = []
+    schools = find_nearest_primary_schools(lat, lng, radius_m=1000)
+    if schools:
+        dest_list = [{"lat": s["lat"], "lng": s["lng"]} for s in schools]
+        distances = get_walking_distances_bulk(lat, lng, dest_list)
+        for school, dist in zip(schools, distances):
+            if dist:
+                school_results.append({
+                    "name": school["name"],
+                    "distance": dist["distance_text"],
+                    "duration": dist["duration_text"],
+                    "maps_link": build_google_maps_link(address, school["lat"], school["lng"]),
+                })
+
+    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results}
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -406,5 +429,19 @@ def format_nearby(result: dict) -> str:
             )
     else:
         lines += ["🛍️ *Nearest Shopping Malls*", "  None found within 2km"]
+
+    lines.append("")
+
+    schools = result.get("schools", [])
+    if schools:
+        lines.append("🏫 *Nearest Primary Schools* _(within 1km)_")
+        for i, school in enumerate(schools, 1):
+            lines.append(
+                f"  {i}. {school['name']}\n"
+                f"     🚶 {school['duration']} ({school['distance']})\n"
+                f"     [Walking directions]({school['maps_link']})"
+            )
+    else:
+        lines += ["🏫 *Nearest Primary Schools*", "  None found within 1km"]
 
     return "\n".join(lines)
