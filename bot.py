@@ -396,9 +396,6 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append("⚠️ *Note:* MOE distances are estimates based on center-points. For borderline cases (~1km), always verify on the OneMap SchoolQuery website.")
             
                 text = "\n".join(lines)
-            
-                # Send the updated text back to the user
-                await query.message.reply_text(text, parse_mode="Markdown")
                 
             else:
                 text = "🏫 No primary schools found within 1km"
@@ -420,6 +417,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "Unknown amenity type."
 
         await loading.delete()
+        await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Amenity callback failed: {e}", exc_info=True)
