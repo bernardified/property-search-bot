@@ -285,16 +285,27 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             project = ura_result.get("development", "")
             address = f"{project} {street}".strip() if street else project or development_name
 
-        # 5. Send prices only
+        # 5. Send prices (or the 'No transactions found' error text)
         await loading_msg.delete()
         await msg.reply_text(
             transaction_text, parse_mode="Markdown", disable_web_page_preview=True
         )
 
-        # 6. Action buttons — embed address in callback data (max 64 chars)
-        # Use resolved project name as key, truncated to fit Telegram limit
-        resolved = ura_result.get("development", development_name) if "error" not in ura_result else development_name
-        addr_key = resolved[:40]  # truncate to leave room for prefix
+        # 6. Handle Error State vs Success State for buttons
+        if "error" in ura_result:
+            # Property not found: Show ONLY the "Search another" button and prompt /list
+            error_keyboard = [
+                [InlineKeyboardButton("🔍 Search another property", callback_data="new_search")]
+            ]
+            await msg.reply_text(
+                "💡 Tip: You can also use /list to see popular searches.",
+                reply_markup=InlineKeyboardMarkup(error_keyboard)
+            )
+            return
+
+        # Success State: Show all amenity buttons
+        resolved = ura_result.get("development", development_name)
+        addr_key = resolved[:40] 
 
         keyboard = [
             [
@@ -403,10 +414,14 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading.delete()
         await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
-
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle unknown commands by showing help."""
-    await start(update, context)
+    """Handle unknown slash commands by suggesting valid ones."""
+    await update.message.reply_text(
+        "⚠️ Unrecognized command.\n\n"
+        "Try using:\n"
+        "• /search — to find a property\n"
+        "• /list — to see popular searches"
+    )
 
 
 def main():
