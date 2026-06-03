@@ -106,28 +106,25 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /list — show most searched developments with clickable buttons."""
-    results = get_recent_searches(limit=10)
-    if not results:
-        await update.message.reply_text(
-            "📋 No searches recorded yet. Try searching for a development first!"
-        )
+    """Show the leaderboard as a clean menu of buttons."""
+    # 1. Fetch the data
+    searches = get_recent_searches(limit=10)
+    
+    if not searches:
+        await update.message.reply_text("No search history found.")
         return
 
-    lines = ["📋 *Most Searched Developments*", "_Tap any to search again_", "─────────────────────"]
-    for i, item in enumerate(results, 1):
-        count_str = f"{item['count']} search" if item['count'] == 1 else f"{item['count']} searches"
-        lines.append(f"{i}. *{item['name']}*\n   {count_str} · last {item['last_searched']}")
+    # 2. Build the buttons (Leaderboard)
+    # We create a list of lists: each inner list is one button row
+    keyboard = []
+    for search in searches:
+        # Button text = just the name (no count!)
+        # Callback data = to be handled by your property_search function
+        keyboard.append([InlineKeyboardButton(search['name'], callback_data=f"search:{search['name']}")])
 
-    keyboard = [
-        [InlineKeyboardButton(f"{i}. {item['name']}", callback_data=f"search:{item['name']}")]
-        for i, item in enumerate(results, 1)
-    ]
-    # Add a search button at the bottom
-    keyboard.append([InlineKeyboardButton("🔍 Search a new property", callback_data="new_search")])
-
+    # 3. Send one single message with the buttons attached
     await update.message.reply_text(
-        "\n".join(lines),
+        "🏆 *Leaderboard*\nClick a property to quickly reload it:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
