@@ -43,33 +43,32 @@ def record_search(user_id, username, query, resolved_name):
 
 
 def get_recent_searches(limit=10):
-    """Fetch the most searched properties for the /list command."""
+    """Fetch the top N most searched properties for the /list command."""
     if searches is None:
         return []
 
-    # Aggregation pipeline to group by property name and count them
+    # The Aggregation Pipeline
     pipeline = [
         {
             "$group": {
-                "_id": "$resolved_name",            # Group by the resolved property name
-                "count": {"$sum": 1},               # Count how many times it was searched
-                "last_timestamp": {"$max": "$timestamp"} # Get the most recent search time
+                "_id": "$resolved_name",            # Group all identical property searches together
+                "count": {"$sum": 1},               # Add 1 to the count for every match
+                "last_timestamp": {"$max": "$timestamp"} # Keep the most recent timestamp
             }
         },
-        {"$sort": {"count": -1}},                   # Sort by highest count first
-        {"$limit": limit}                           # Limit to top N results
+        {"$sort": {"count": -1}},                   # 🛑 Sort by count: -1 means DESCENDING order
+        {"$limit": limit}                           # 🛑 Stop grabbing data once we hit 10 results
     ]
 
     try:
         results = list(searches.aggregate(pipeline))
         
-        # Format the output to exactly match what your bot.py expects
+        # Format the output for bot.py
         formatted_results = []
         for r in results:
             formatted_results.append({
                 "name": r["_id"],
                 "count": r["count"],
-                # Format the raw datetime object into a clean string (e.g., '2026-06-03')
                 "last_searched": r["last_timestamp"].strftime("%Y-%m-%d") if r.get("last_timestamp") else "Unknown"
             })
             

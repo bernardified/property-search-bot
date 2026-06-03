@@ -39,8 +39,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏠 *Singapore Private Property Search*\n\n"
         "Search for any non-landed private residential development to get:\n"
         "• Latest transacted prices by unit size\n"
-        "• Walking distance to nearest MRT\n"
-        "• Walking distance to nearest shopping mall\n\n"
+        "• Distance to nearest MRT\n"
+        "• Primary schools within 1km\n"
+        "• Distance to nearest shopping mall\n\n"
         "Just type a development name to get started.\n"
         "Example: `Marina One Residences` or `The Garden Residences`\n\n"
         "Commands:\n"
@@ -379,14 +380,21 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif amenity == "schools":
             schools = maps_result.get("schools", [])
             if schools:
-                lines = ["🏫 *Nearest Primary Schools* _(within 1km)_", "─────────────────────"]
-                for i, s in enumerate(schools, 1):
-                    lines.append(
-                        f"  {i}. {s['name']}\n"
-                        f"     🚶 {s['duration']} ({s['distance']})\n"
-                        f"     [Walking directions]({s['maps_link']})"
-                    )
+                lines = ["🏫 *Nearest Primary Schools*"]
+                for i, school in enumerate(schools, 1):
+                # Convert the raw meters to a clean display string
+                    dist_str = f"{int(school['dist'])}m" if school['dist'] < 1000 else f"{school['dist']/1000:.1f}km"
+                    lines.append(f"  {i}. {school['name']} ({dist_str})")
+            
+                lines.append("")
+                # 🛑 Add the crucial legal/UX disclaimer here
+                lines.append("⚠️ *Note:* Distances are estimates based on center-points. For borderline cases (~1km), always verify the official boundary distance on the OneMap SchoolQuery website.")
+            
                 text = "\n".join(lines)
+            
+                # Send the updated text back to the user
+                await query.message.reply_text(text, parse_mode="Markdown")
+                
             else:
                 text = "🏫 No primary schools found within 1km"
 

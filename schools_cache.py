@@ -102,14 +102,12 @@ def _save_cache(schools: list):
 
 # ── OneMap school fetching ─────────────────────────────────────────────────────
 def _fetch_all_schools(token: str) -> list:
-    """
-    Fetch all primary schools from OneMap by paginating through results.
-    Deduplicates by school name.
-    """
-    all_schools = []
+    """Fetch primary schools via keyword and append legacy/non-standard schools."""
+    schools = []
     seen = set()
 
-    for page in range(1, 20):  # max 20 pages (~200 results — more than enough)
+    # 1. Bulk Search: Catch all standard "... Primary School" names
+    for page in range(1, 10):
         try:
             r = requests.get(
                 ONEMAP_SEARCH_URL,
@@ -123,55 +121,68 @@ def _fetch_all_schools(token: str) -> list:
                 timeout=10
             )
             data = r.json()
-            results = data.get("results", [])
-            total_pages = int(data.get("totalNumPages", 1))
-
-            for item in results:
-                name = item.get("BUILDING", "") or item.get("SEARCHVAL", "")
-                if not name:
-                    continue
-
-                name_upper = name.upper()
-
-                # Must be a primary school
-                if "PRIMARY" not in name_upper and "PRI SCH" not in name_upper:
-                    continue
-
-                # Deduplicate — normalise name by removing block/unit info
-                base = re.sub(r'\s+(BLOCK|BLK)\s+\w+', '', name_upper).strip()
-                base = re.sub(r'\s+#\S+', '', base).strip()
-                if base in seen:
-                    continue
-                seen.add(base)
-
-                try:
-                    lat = float(item["LATITUDE"])
-                    lng = float(item["LONGITUDE"])
-                except (KeyError, ValueError):
-                    continue
-
-                # Clean up name for display
-                display_name = name.title()
-                display_name = re.sub(r'\bPri\b', 'Primary', display_name)
-
-                all_schools.append({
-                    "name": display_name,
-                    "lat": lat,
-                    "lng": lng,
-                })
-
-            logger.info(f"[Schools Cache] Page {page}/{total_pages}: {len(results)} results")
-
-            if page >= total_pages:
+            if not data.get("results"):
                 break
-
-            time.sleep(0.2)  # be polite to OneMap
-
+            
+            for item in data["results"]:
+                name = item.get("SEARCHVAL", "")
+                if name in seen:
+                    continue
+                seen.add(name)
+                schools.append({
+                    "name": name.title(),
+                    "lat": float(item["LATITUDE"]),
+                    "lng": float(item["LONGITUDE"])
+                })
         except Exception as e:
-            logger.error(f"[Schools Cache] Page {page} failed: {e}")
+            logger.error(f"[Schools Cache] Bulk fetch failed on page {page}: {e}")
             break
 
-    return all_schools
+    # 2. The Legacy Exceptions: Schools without "Primary" in their OneMap registry
+    exceptions = [
+        "ROSYTH SCHOOL", "CATHOLIC HIGH SCHOOL", "CHIJ ST. NICHOLAS GIRLS' SCHOOL",
+        "MAHA BODHI SCHOOL", "RED SWASTIKA SCHOOL", "TAO NAN SCHOOL", 
+        "MEE TOH SCHOOL", "KONG HWA SCHOOL", "MARIS STELLA HIGH SCHOOL", 
+        "METHODIST GIRLS' SCHOOL", "SINGAPORE CHINESE GIRLS' SCHOOL", 
+        "ST. JOSEPH'S INSTITUTION JUNIOR", "ST. STEPHEN'S SCHOOL", 
+        "MARYMOUNT CONVENT SCHOOL", "CANOSSA CATHOLIC PRIMARY SCHOOL", 
+        "DE LA SALLE SCHOOL", "MONTFORT JUNIOR SCHOOL", "CHONGFU SCHOOL",
+        "AI TONG SCHOOL", "POI CHING SCHOOL", "HONG WEN SCHOOL", 
+        "PEI CHUN PUBLIC SCHOOL", "ANGLO-CHINESE SCHOOL (JUNIOR)"
+    ]
+
+    for school_name in exceptions:
+        try:
+            r = requests.get(
+                ONEMAP_SEARCH_URL,
+                params={
+                    "searchVal": school_name,
+                    "returnGeom": "Y",
+                    "getAddrDetails": "Y",
+                    "pageNum": 1
+                },
+                headers={"Authorization": token},
+                timeout=10
+            )
+            data = r.json()
+            results = data.get("results", [])
+            
+            if results:
+                # OneMap sorts best matches first. Take the top result.
+                item = results[0]
+                name = item.get("SEARCHVAL", "")
+                
+                # Prevent duplicates in case OneMap eventually updates their naming
+                if not any(school_name.lower() in s['name'].lower() for s in schools):
+                    schools.append({
+                        "name": name.title(),
+                        "lat": float(item["LATITUDE"]),
+                        "lng": float(item["LONGITUDE"])
+                    })
+        except Exception as e:
+            logger.error(f"[Schools Cache] Failed to fetch exception {school_name}: {e}")
+
+    return schools
 
 
 # ── Main public function ──────────────────────────────────────────────────────
@@ -199,21 +210,24 @@ def get_schools_cache() -> list:
     return schools
 
 
-def find_nearest_primary_schools(origin_lat: float, origin_lng: float,
-                                  radius_m: float = 1000, top_n: int = 3) -> list:
+def find_nearest_primary_schools(origin_lat: float, origin_lng: float, top_n: int = 5) -> list:
     """
-    Find the nearest primary schools within radius_m of origin.
-    Returns up to top_n schools sorted by straight-line distance.
+    Find nearest primary schools. 
+    Uses a 1200m radius to account for center-to-boundary polygon offsets.
     """
     schools = get_schools_cache()
     if not schools:
         return []
 
+    # Buffer radius to catch schools where the boundary is <1km but center is >1km
+    MAX_RADIUS_M = 1200 
+    
     nearby = []
     for school in schools:
         dist = haversine_m(origin_lat, origin_lng, school["lat"], school["lng"])
-        if dist <= radius_m:
+        if dist <= MAX_RADIUS_M:
             nearby.append({**school, "dist": dist})
-
+            
+    # Sort by straight-line distance
     nearby.sort(key=lambda x: x["dist"])
     return nearby[:top_n]
