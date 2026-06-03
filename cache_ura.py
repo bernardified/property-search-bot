@@ -118,36 +118,75 @@ def _is_cache_fresh() -> bool:
 
 
 def _load_cache() -> tuple[list, list]:
+    """Load transactions from chunked documents + pipeline from single doc."""
     db = _get_db()
     if db is None:
         return [], []
     try:
-        doc = db['ura_cache'].find_one({"_id": "data"})
-        if not doc:
-            return [], []
-        return doc.get("transactions", []), doc.get("pipeline", [])
+        # Load transactions from chunks
+        transactions = []
+        chunk = 0
+        while True:
+            doc = db['ura_cache'].find_one({"_id": f"data_chunk_{chunk}"})
+            if not doc:
+                break
+            transactions.extend(doc.get("transactions", []))
+            chunk += 1
+
+        # Load pipeline
+        pipeline_doc = db['ura_cache'].find_one({"_id": "pipeline"})
+        pipeline = pipeline_doc.get("pipeline", []) if pipeline_doc else []
+
+        return transactions, pipeline
     except Exception as e:
         logger.error(f"[URA Cache] Load failed: {e}")
         return [], []
 
 
 def _save_cache(transactions: list, pipeline: list):
+    """
+    Save transactions in chunks of 500 projects each (~4MB per chunk)
+    to stay well under MongoDB's 16MB document limit.
+    """
     db = _get_db()
     if db is None:
         return
     try:
-        # Store metadata separately to avoid huge document reads for freshness checks
+        CHUNK_SIZE = 500
+
+        # Delete old chunks first
+        db['ura_cache'].delete_many({"_id": {"$regex": "^data_chunk_"}})
+
+        # Save transactions in chunks
+        chunks = [transactions[i:i+CHUNK_SIZE] for i in range(0, len(transactions), CHUNK_SIZE)]
+        for i, chunk in enumerate(chunks):
+            db['ura_cache'].replace_one(
+                {"_id": f"data_chunk_{i}"},
+                {"_id": f"data_chunk_{i}", "transactions": chunk},
+                upsert=True
+            )
+        logger.info(f"[URA Cache] Saved {len(transactions)} projects in {len(chunks)} chunks")
+
+        # Save pipeline separately (small, fits in one doc)
+        db['ura_cache'].replace_one(
+            {"_id": "pipeline"},
+            {"_id": "pipeline", "pipeline": pipeline},
+            upsert=True
+        )
+
+        # Save metadata last (signals cache is complete)
         db['ura_cache'].replace_one(
             {"_id": "meta"},
-            {"_id": "meta", "timestamp": time.time(), "project_count": len(transactions), "updated_at": datetime.now(timezone.utc)},
+            {
+                "_id": "meta",
+                "timestamp": time.time(),
+                "project_count": len(transactions),
+                "chunk_count": len(chunks),
+                "updated_at": datetime.now(timezone.utc)
+            },
             upsert=True
         )
-        db['ura_cache'].replace_one(
-            {"_id": "data"},
-            {"_id": "data", "transactions": transactions, "pipeline": pipeline},
-            upsert=True
-        )
-        logger.info(f"[URA Cache] Saved {len(transactions)} projects to MongoDB")
+        logger.info(f"[URA Cache] Metadata saved — cache complete")
     except Exception as e:
         logger.error(f"[URA Cache] Save failed: {e}")
 

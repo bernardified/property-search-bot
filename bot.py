@@ -285,25 +285,24 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             project = ura_result.get("development", "")
             address = f"{project} {street}".strip() if street else project or development_name
 
-        # Store address in user_data so amenity buttons can use it
-        if update.effective_user:
-            context.user_data[f"addr_{development_name}"] = address
-            context.user_data[f"addr_last"] = address
-
         # 5. Send prices only
         await loading_msg.delete()
         await msg.reply_text(
             transaction_text, parse_mode="Markdown", disable_web_page_preview=True
         )
 
-        # 6. Action buttons
+        # 6. Action buttons — embed address in callback data (max 64 chars)
+        # Use resolved project name as key, truncated to fit Telegram limit
+        resolved = ura_result.get("development", development_name) if "error" not in ura_result else development_name
+        addr_key = resolved[:40]  # truncate to leave room for prefix
+
         keyboard = [
             [
-                InlineKeyboardButton("🚇 Nearest MRT", callback_data="amenity:mrt"),
-                InlineKeyboardButton("🏫 Primary Schools", callback_data="amenity:schools"),
+                InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{addr_key}"),
+                InlineKeyboardButton("🏫 Primary Schools", callback_data=f"amenity:schools:{addr_key}"),
             ],
             [
-                InlineKeyboardButton("🛍️ Shopping Malls", callback_data="amenity:malls"),
+                InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{addr_key}"),
                 InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
             ],
         ]
@@ -327,13 +326,25 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle MRT / Schools / Malls button taps — fetch and send that section."""
     query = update.callback_query
     await query.answer()
-    amenity = query.data.split(":")[1]  # mrt, schools, malls
 
-    # Get the stored address
-    address = context.user_data.get("addr_last")
-    if not address:
-        await query.message.reply_text("⚠️ Session expired. Please search again.")
+    parts = query.data.split(":", 2)  # amenity:type:addr_key
+    amenity = parts[1]
+    addr_key = parts[2] if len(parts) > 2 else None
+
+    if not addr_key:
+        await query.message.reply_text("⚠️ Could not identify property. Please search again.")
         return
+
+    # Resolve full address from URA cache using the development name key
+    from cache_ura import get_ura_data
+    all_results, _ = get_ura_data()
+    address = addr_key  # fallback
+    for project in all_results:
+        pname = project.get("project", "").upper()
+        if addr_key.upper() in pname or pname in addr_key.upper():
+            street = project.get("street", "")
+            address = f"{project.get('project', '')} {street}".strip()
+            break
 
     loading = await query.message.reply_text("🔍 Fetching...")
 
