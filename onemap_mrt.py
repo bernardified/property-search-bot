@@ -1,32 +1,49 @@
-"""
-OneMap MRT station lookup.
-We maintain a local cache of all MRT station coordinates fetched from OneMap,
-then find the nearest stations to any given location purely by distance.
-This avoids relying on OneMap's non-proximity-sorted search results.
-"""
 import os
 import re
-import json
 import time
+import logging
 import requests
 from math import radians, sin, cos, sqrt, atan2
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
 ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-DISTANCE_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
+MONGO_URI = os.getenv("MONGO_URI")
+
 ONEMAP_AUTH_URL = "https://www.onemap.gov.sg/api/auth/post/getToken"
 ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
-CACHE_FILE = "mrt_cache.json"
+DISTANCE_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
+
 CACHE_MAX_AGE_DAYS = 30
 
-# ── Token management ──────────────────────────────────────────────────────────
+# ── MongoDB setup ─────────────────────────────────────────────────────────────
+_db = None
+
+def _get_db():
+    global _db
+    if _db is not None:
+        return _db
+    if not MONGO_URI:
+        return None
+    try:
+        client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
+        _db = client['property_bot']
+        return _db
+    except Exception as e:
+        logger.error(f"[MRT Cache] MongoDB connection failed: {e}")
+        return None
+
+
+# ── OneMap token ──────────────────────────────────────────────────────────────
 _token = None
 _token_expiry = 0
-
 
 def get_token() -> str | None:
     global _token, _token_expiry
@@ -47,7 +64,7 @@ def get_token() -> str | None:
             return _token
         return None
     except Exception as e:
-        print(f"[OneMap] Auth error: {e}")
+        logger.error(f"[OneMap] Auth error: {e}")
         return None
 
 
@@ -100,34 +117,59 @@ SG_MRT_STATIONS = [
 ]
 
 
-# ── Cache management ──────────────────────────────────────────────────────────
+# ── MongoDB cache read/write ───────────────────────────────────────────────────
+
+def _is_cache_fresh() -> bool:
+    db = _get_db()
+    if db is None:
+        return False
+    try:
+        doc = db['mrt_cache'].find_one({"_id": "meta"})
+        if not doc:
+            return False
+        age_days = (time.time() - doc.get("timestamp", 0)) / 86400
+        return age_days < CACHE_MAX_AGE_DAYS
+    except Exception:
+        return False
+
+
 def _load_cache() -> dict:
-    if not os.path.exists(CACHE_FILE):
+    db = _get_db()
+    if db is None:
         return {}
     try:
-        with open(CACHE_FILE) as f:
-            data = json.load(f)
-        age_days = (time.time() - data.get("timestamp", 0)) / 86400
-        if age_days > CACHE_MAX_AGE_DAYS:
+        doc = db['mrt_cache'].find_one({"_id": "data"})
+        if not doc:
             return {}
-        return data.get("stations", {})
-    except Exception:
+        return doc.get("stations", {})
+    except Exception as e:
+        logger.error(f"[MRT Cache] Load failed: {e}")
         return {}
 
 
 def _save_cache(stations: dict):
+    db = _get_db()
+    if db is None:
+        return
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump({"timestamp": time.time(), "stations": stations}, f)
+        db['mrt_cache'].replace_one(
+            {"_id": "meta"},
+            {"_id": "meta", "timestamp": time.time(), "station_count": len(stations)},
+            upsert=True
+        )
+        db['mrt_cache'].replace_one(
+            {"_id": "data"},
+            {"_id": "data", "stations": stations},
+            upsert=True
+        )
+        logger.info(f"[MRT Cache] Saved {len(stations)} stations to MongoDB")
     except Exception as e:
-        print(f"[MRT Cache] Save failed: {e}")
+        logger.error(f"[MRT Cache] Save failed: {e}")
 
+
+# ── OneMap station fetching ───────────────────────────────────────────────────
 
 def _fetch_station_data(station_name: str, token: str) -> dict | None:
-    """
-    Fetch station + exit coordinates from OneMap for a given station name.
-    Returns dict with station coords and list of exits.
-    """
     query = f"{station_name} MRT Station"
     try:
         r = requests.get(
@@ -143,7 +185,7 @@ def _fetch_station_data(station_name: str, token: str) -> dict | None:
         )
         results = r.json().get("results", [])
     except Exception as e:
-        print(f"[OneMap] Fetch failed for {station_name}: {e}")
+        logger.error(f"[OneMap] Fetch failed for {station_name}: {e}")
         return None
 
     station_coords = None
@@ -170,8 +212,6 @@ def _fetch_station_data(station_name: str, token: str) -> dict | None:
 
     if not station_coords and not exits:
         return None
-
-    # Fall back to first exit coords if no main station entry
     if not station_coords and exits:
         station_coords = {"lat": exits[0]["lat"], "lng": exits[0]["lng"]}
 
@@ -184,38 +224,34 @@ def _fetch_station_data(station_name: str, token: str) -> dict | None:
 
 
 def build_mrt_cache() -> dict:
-    """Build or load the full MRT station coordinate cache."""
-    cached = _load_cache()
-    if len(cached) >= len(SG_MRT_STATIONS) * 0.8:
-        return cached
+    """Build or load the full MRT station coordinate cache from MongoDB."""
+    if _is_cache_fresh():
+        logger.info("[MRT Cache] Using cached data from MongoDB")
+        return _load_cache()
 
-    print("[MRT Cache] Building cache from OneMap...")
+    logger.info("[MRT Cache] Building MRT cache from OneMap...")
     token = get_token()
     if not token:
-        print("[MRT Cache] No token available")
-        return cached
+        logger.warning("[MRT Cache] No token — using stale cache")
+        return _load_cache()
 
-    stations = dict(cached)
+    stations = {}
     for name in SG_MRT_STATIONS:
-        if name.upper() in stations:
-            continue
         data = _fetch_station_data(name, token)
         if data:
             stations[name.upper()] = data
-            print(f"[MRT Cache] Cached {name}")
-        time.sleep(0.15)  # be polite to OneMap API
+            logger.info(f"[MRT Cache] Cached {name}")
+        time.sleep(0.15)
 
-    _save_cache(stations)
-    print(f"[MRT Cache] Done — {len(stations)} stations cached")
+    if stations:
+        _save_cache(stations)
+    logger.info(f"[MRT Cache] Done — {len(stations)} stations cached")
     return stations
 
 
 # ── Walking distance for exit precision ──────────────────────────────────────
-def get_best_exit_by_walking(origin_lat: float, origin_lng: float, exits: list) -> dict | None:
-    """
-    Given a list of exit dicts (letter, lat, lng), call Google Distance Matrix
-    once with all exits as destinations and return the exit with shortest walking duration.
-    """
+
+def get_best_exit_by_walking(origin_lat, origin_lng, exits) -> dict | None:
     if not exits:
         return None
     if len(exits) == 1:
@@ -232,13 +268,13 @@ def get_best_exit_by_walking(origin_lat: float, origin_lng: float, exits: list) 
         r = requests.get(DISTANCE_URL, params=params, timeout=10)
         data = r.json()
         if data["status"] != "OK":
-            return exits[0]  # fallback to first exit
+            return exits[0]
         elements = data["rows"][0]["elements"]
         best_duration = float("inf")
         best_exits = []
         for i, el in enumerate(elements):
             if el["status"] == "OK":
-                duration = el["duration"]["value"]  # seconds
+                duration = el["duration"]["value"]
                 if duration < best_duration:
                     best_duration = duration
                     best_exits = [exits[i]]
@@ -246,32 +282,26 @@ def get_best_exit_by_walking(origin_lat: float, origin_lng: float, exits: list) 
                     best_exits.append(exits[i])
         if not best_exits:
             return exits[0]
-        # Return a synthetic exit combining all tied letters e.g. "A/B"
         if len(best_exits) == 1:
             return best_exits[0]
         combined_letter = "/".join(ex["letter"] for ex in best_exits)
         return {"letter": combined_letter, "lat": best_exits[0]["lat"], "lng": best_exits[0]["lng"]}
     except Exception as e:
-        print(f"[MRT Exit] Distance call failed: {e}")
+        logger.error(f"[MRT Exit] Distance call failed: {e}")
         return exits[0]
 
 
 # ── Main public function ──────────────────────────────────────────────────────
+
 def find_nearest_mrts(origin_lat: float, origin_lng: float, top_n: int = 3, radius_m: float = 2500) -> list:
-    """
-    Find the top_n nearest MRT stations to origin, with nearest exit.
-    Returns list of dicts: name, exit_label, dest_lat, dest_lng, straight_dist
-    """
     stations = build_mrt_cache()
     if not stations:
         return []
 
-    # Step 1: Filter stations within radius by straight-line distance
     candidates = []
     for key, station in stations.items():
         exits = station.get("exits", [])
         if exits:
-            # Use nearest exit by straight-line to check if station is in range
             nearest_straight = min(
                 haversine_m(origin_lat, origin_lng, ex["lat"], ex["lng"])
                 for ex in exits
@@ -283,11 +313,9 @@ def find_nearest_mrts(origin_lat: float, origin_lng: float, top_n: int = 3, radi
             if station_dist <= radius_m:
                 candidates.append((station_dist, station))
 
-    # Sort by straight-line distance, take top candidates to evaluate
     candidates.sort(key=lambda x: x[0])
-    top_candidates = candidates[:max(top_n * 2, 6)]  # evaluate more than needed
+    top_candidates = candidates[:max(top_n * 2, 6)]
 
-    # Step 2: For each candidate, use Google Distance Matrix to find best exit
     results = []
     for straight_dist, station in top_candidates:
         exits = station.get("exits", [])

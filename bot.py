@@ -186,7 +186,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     development_name = update.message.text.strip()
     if not development_name:
         return
-    await handle_property_search(update, development_name)
+    await handle_property_search(update, context, development_name)
 
 
 async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_TYPE, development_name: str, message=None):

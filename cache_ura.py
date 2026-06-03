@@ -1,19 +1,44 @@
 import os
-import json
 import time
+import logging
 import requests
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 URA_API_KEY = os.getenv("URA_API_KEY")
+MONGO_URI = os.getenv("MONGO_URI")
 URA_TOKEN_URL = "https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1"
 URA_TRANSACTIONS_BASE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Transaction&batch="
 URA_PIPELINE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Pipeline"
 
-CACHE_FILE = "ura_cache.json"
-CACHE_MAX_AGE_HOURS = 48  # URA updates Tue/Fri so 48h is safe
+CACHE_MAX_AGE_HOURS = 48
 
+# ── MongoDB setup ─────────────────────────────────────────────────────────────
+_db = None
+
+def _get_db():
+    global _db
+    if _db is not None:
+        return _db
+    if not MONGO_URI:
+        logger.warning("[URA Cache] No MONGO_URI set")
+        return None
+    try:
+        client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
+        _db = client['property_bot']
+        return _db
+    except Exception as e:
+        logger.error(f"[URA Cache] MongoDB connection failed: {e}")
+        return None
+
+
+# ── URA API helpers ───────────────────────────────────────────────────────────
 
 def _get_token() -> str | None:
     headers = {"AccessKey": URA_API_KEY, "User-Agent": "PropertyBot/1.0"}
@@ -22,10 +47,10 @@ def _get_token() -> str | None:
         data = r.json()
         if data.get("Status") == "Success":
             return data["Result"]
-        print(f"[URA Cache] Token error: {data}")
+        logger.error(f"[URA Cache] Token error: {data}")
         return None
     except Exception as e:
-        print(f"[URA Cache] Token failed: {e}")
+        logger.error(f"[URA Cache] Token failed: {e}")
         return None
 
 
@@ -44,11 +69,11 @@ def _fetch_all_transactions(token: str) -> list:
             if data.get("Status") == "Success":
                 results = data.get("Result", [])
                 all_results.extend(results)
-                print(f"[URA Cache] Batch {batch}: {len(results)} projects")
+                logger.info(f"[URA Cache] Batch {batch}: {len(results)} projects")
             else:
-                print(f"[URA Cache] Batch {batch} error: {data}")
+                logger.error(f"[URA Cache] Batch {batch} error: {data}")
         except Exception as e:
-            print(f"[URA Cache] Batch {batch} failed: {e}")
+            logger.error(f"[URA Cache] Batch {batch} failed: {e}")
     return all_results
 
 
@@ -65,64 +90,78 @@ def _fetch_pipeline(token: str) -> list:
             return data.get("Result", [])
         return []
     except Exception as e:
-        print(f"[URA Cache] Pipeline failed: {e}")
+        logger.error(f"[URA Cache] Pipeline failed: {e}")
         return []
 
 
+# ── Cache read/write ──────────────────────────────────────────────────────────
+
 def _is_cache_fresh() -> bool:
-    if not os.path.exists(CACHE_FILE):
+    db = _get_db()
+    if db is None:
         return False
     try:
-        with open(CACHE_FILE) as f:
-            data = json.load(f)
-        age_hours = (time.time() - data.get("timestamp", 0)) / 3600
+        doc = db['ura_cache'].find_one({"_id": "meta"})
+        if not doc:
+            return False
+        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
         return age_hours < CACHE_MAX_AGE_HOURS
-    except Exception:
+    except Exception as e:
+        logger.error(f"[URA Cache] Freshness check failed: {e}")
         return False
 
 
-def _load_cache() -> dict:
+def _load_cache() -> tuple[list, list]:
+    db = _get_db()
+    if db is None:
+        return [], []
     try:
-        with open(CACHE_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        doc = db['ura_cache'].find_one({"_id": "data"})
+        if not doc:
+            return [], []
+        return doc.get("transactions", []), doc.get("pipeline", [])
+    except Exception as e:
+        logger.error(f"[URA Cache] Load failed: {e}")
+        return [], []
 
 
 def _save_cache(transactions: list, pipeline: list):
-    data = {
-        "timestamp": time.time(),
-        "transactions": transactions,
-        "pipeline": pipeline,
-    }
+    db = _get_db()
+    if db is None:
+        return
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(data, f)
-        size_mb = os.path.getsize(CACHE_FILE) / 1024 / 1024
-        print(f"[URA Cache] Saved — {len(transactions)} projects, {size_mb:.1f}MB")
+        # Store metadata separately to avoid huge document reads for freshness checks
+        db['ura_cache'].replace_one(
+            {"_id": "meta"},
+            {"_id": "meta", "timestamp": time.time(), "project_count": len(transactions), "updated_at": datetime.now(timezone.utc)},
+            upsert=True
+        )
+        db['ura_cache'].replace_one(
+            {"_id": "data"},
+            {"_id": "data", "transactions": transactions, "pipeline": pipeline},
+            upsert=True
+        )
+        logger.info(f"[URA Cache] Saved {len(transactions)} projects to MongoDB")
     except Exception as e:
-        print(f"[URA Cache] Save failed: {e}")
+        logger.error(f"[URA Cache] Save failed: {e}")
 
+
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def get_ura_data() -> tuple[list, list]:
     """
-    Return (transactions, pipeline) from local cache.
+    Return (transactions, pipeline) from MongoDB cache.
     Refreshes automatically if cache is stale or missing.
     """
     if _is_cache_fresh():
-        data = _load_cache()
-        print("[URA Cache] Using cached data")
-        return data.get("transactions", []), data.get("pipeline", [])
+        logger.info("[URA Cache] Using cached data")
+        return _load_cache()
 
-    print("[URA Cache] Cache stale or missing — refreshing from URA API...")
+    logger.info("[URA Cache] Cache stale or missing — refreshing from URA API...")
     token = _get_token()
     if not token:
-        # If we can't refresh, try to use stale cache rather than failing
-        if os.path.exists(CACHE_FILE):
-            print("[URA Cache] Using stale cache as fallback")
-            data = _load_cache()
-            return data.get("transactions", []), data.get("pipeline", [])
-        return [], []
+        logger.warning("[URA Cache] No token — falling back to stale cache")
+        return _load_cache()
 
     transactions = _fetch_all_transactions(token)
     pipeline = _fetch_pipeline(token)
@@ -135,7 +174,7 @@ def get_ura_data() -> tuple[list, list]:
 
 def force_refresh() -> bool:
     """Force a cache refresh regardless of age. Returns True on success."""
-    print("[URA Cache] Force refreshing...")
+    logger.info("[URA Cache] Force refreshing...")
     token = _get_token()
     if not token:
         return False
@@ -149,18 +188,19 @@ def force_refresh() -> bool:
 
 def cache_status() -> dict:
     """Return info about the current cache state."""
-    if not os.path.exists(CACHE_FILE):
-        return {"status": "missing"}
+    db = _get_db()
+    if db is None:
+        return {"status": "no_db"}
     try:
-        with open(CACHE_FILE) as f:
-            data = json.load(f)
-        age_hours = (time.time() - data.get("timestamp", 0)) / 3600
-        size_mb = os.path.getsize(CACHE_FILE) / 1024 / 1024
+        doc = db['ura_cache'].find_one({"_id": "meta"})
+        if not doc:
+            return {"status": "missing"}
+        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
         return {
             "status": "fresh" if age_hours < CACHE_MAX_AGE_HOURS else "stale",
             "age_hours": round(age_hours, 1),
-            "projects": len(data.get("transactions", [])),
-            "size_mb": round(size_mb, 1),
+            "projects": doc.get("project_count", "?"),
+            "size_mb": "N/A (MongoDB)",
         }
     except Exception:
-        return {"status": "corrupt"}
+        return {"status": "error"}
