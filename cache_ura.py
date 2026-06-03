@@ -38,6 +38,7 @@ def _get_db():
             socketTimeoutMS=10000,
         )
         _db = client['property_bot']
+        # TTL index creation removed - managed by refresh_job.py
         return _db
     except Exception as e:
         logger.error(f"[URA Cache] MongoDB connection failed: {e}")
@@ -144,45 +145,47 @@ def _load_cache() -> tuple[list, list]:
 
 
 def _save_cache(transactions: list, pipeline: list):
-    """
-    Save transactions in chunks of 500 projects each (~4MB per chunk)
-    to stay well under MongoDB's 16MB document limit.
-    """
     db = _get_db()
     if db is None:
         return
     try:
-        CHUNK_SIZE = 500
+        # Kept at 100 to prevent catastrophic 16MB BSON limit crashes
+        CHUNK_SIZE = 100 
+        current_time = time.time()
 
-        # Delete old chunks first
+        # Wipe old chunks before inserting new ones to prevent orphaned data
         db['ura_cache'].delete_many({"_id": {"$regex": "^data_chunk_"}})
 
-        # Save transactions in chunks
         chunks = [transactions[i:i+CHUNK_SIZE] for i in range(0, len(transactions), CHUNK_SIZE)]
         for i, chunk in enumerate(chunks):
             db['ura_cache'].replace_one(
                 {"_id": f"data_chunk_{i}"},
-                {"_id": f"data_chunk_{i}", "transactions": chunk},
+                {
+                    "_id": f"data_chunk_{i}", 
+                    "transactions": chunk,
+                    "updated_at": current_time 
+                },
                 upsert=True
             )
         logger.info(f"[URA Cache] Saved {len(transactions)} projects in {len(chunks)} chunks")
 
-        # Save pipeline separately (small, fits in one doc)
         db['ura_cache'].replace_one(
             {"_id": "pipeline"},
-            {"_id": "pipeline", "pipeline": pipeline},
+            {
+                "_id": "pipeline", 
+                "pipeline": pipeline,
+                "updated_at": current_time 
+            },
             upsert=True
         )
 
-        # Save metadata last (signals cache is complete)
         db['ura_cache'].replace_one(
             {"_id": "meta"},
             {
                 "_id": "meta",
-                "timestamp": time.time(),
+                "timestamp": current_time,
                 "project_count": len(transactions),
-                "chunk_count": len(chunks),
-                "updated_at": datetime.now(timezone.utc)
+                "chunk_count": len(chunks)
             },
             upsert=True
         )
