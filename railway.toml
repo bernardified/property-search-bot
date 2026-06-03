@@ -1,15 +1,6 @@
 [build]
 builder = "nixpacks"
 
-# ── Main bot service ──────────────────────────────────────────────────────────
-[[services]]
-name = "property-bot"
+[deploy]
 startCommand = "python bot.py"
-
-# ── Scheduled cache refresh ───────────────────────────────────────────────────
-[[services]]
-name = "ura-cache-refresh"
-startCommand = "python refresh_job.py"
-
-[services.cron]
-schedule = "0 2 * * *"  # runs daily at 2am UTC (10am SGT)
+restartPolicyType = "always"
