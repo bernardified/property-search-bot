@@ -1,120 +1,79 @@
-import json
 import os
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 
-STORAGE_FILE = "search_history.json"
+logger = logging.getLogger(__name__)
 
+# 1. Pull the connection string from Railway environment variables
+MONGO_URI = os.getenv("MONGO_URI")
 
-def _load() -> dict:
-    """Load storage file, return empty structure if not found."""
-    if not os.path.exists(STORAGE_FILE):
-        return {"searches": []}
+# 2. Initialize the connection globally
+if MONGO_URI:
     try:
-        with open(STORAGE_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"searches": []}
+        client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
+        db = client['property_bot'] # This creates/uses a database named 'property_bot'
+        searches = db['searches']   # This creates/uses a collection named 'searches'
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {e}")
+        searches = None
+else:
+    logger.warning("MONGO_URI not found in environment variables.")
+    searches = None
 
 
-def _save(data: dict):
-    """Save data to storage file."""
-    try:
-        with open(STORAGE_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except IOError as e:
-        print(f"[Storage] Failed to save: {e}")
+def record_search(user_id, username, query, resolved_name):
+    """Save a new search event to MongoDB."""
+    if searches is None:
+        return
 
-
-def record_search(user_id: int, username: str, query: str, resolved_name: str):
-    """
-    Record a search to persistent storage.
-    - query: what the user typed
-    - resolved_name: what URA matched it to
-    """
-    data = _load()
-
-    entry = {
+    document = {
         "user_id": user_id,
-        "username": username or "unknown",
+        "username": username,
         "query": query,
         "resolved_name": resolved_name,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc)
     }
-
-    data["searches"].append(entry)
-
-    # Keep only last 500 searches to prevent file bloat
-    if len(data["searches"]) > 500:
-        data["searches"] = data["searches"][-500:]
-
-    _save(data)
+    
+    try:
+        searches.insert_one(document)
+    except Exception as e:
+        logger.error(f"Failed to insert search record: {e}")
 
 
-def get_recent_searches(limit: int = 10) -> list:
-    """
-    Return the most searched developments globally, ranked by frequency.
-    Returns list of dicts with resolved_name, count, last_searched.
-    """
-    data = _load()
-    searches = data.get("searches", [])
-
-    if not searches:
+def get_recent_searches(limit=10):
+    """Fetch the most searched properties for the /list command."""
+    if searches is None:
         return []
 
-    # Aggregate by resolved_name
-    counts = {}
-    last_seen = {}
+    # Aggregation pipeline to group by property name and count them
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$resolved_name",            # Group by the resolved property name
+                "count": {"$sum": 1},               # Count how many times it was searched
+                "last_timestamp": {"$max": "$timestamp"} # Get the most recent search time
+            }
+        },
+        {"$sort": {"count": -1}},                   # Sort by highest count first
+        {"$limit": limit}                           # Limit to top N results
+    ]
 
-    for entry in searches:
-        name = entry.get("resolved_name", "").strip()
-        if not name:
-            continue
-        counts[name] = counts.get(name, 0) + 1
-        ts = entry.get("timestamp", "")
-        if name not in last_seen or ts > last_seen[name]:
-            last_seen[name] = ts
-
-    # Sort by count descending, then by last searched
-    ranked = sorted(
-        counts.keys(),
-        key=lambda n: (counts[n], last_seen.get(n, "")),
-        reverse=True
-    )
-
-    results = []
-    for name in ranked[:limit]:
-        ts_str = last_seen.get(name, "")
-        try:
-            dt = datetime.fromisoformat(ts_str)
-            last_searched = _relative_time(dt)
-        except ValueError:
-            last_searched = "unknown"
-
-        results.append({
-            "name": name,
-            "count": counts[name],
-            "last_searched": last_searched,
-        })
-
-    return results
-
-
-def _relative_time(dt: datetime) -> str:
-    """Convert a datetime to a human-readable relative string."""
-    now = datetime.now()
-    diff = now - dt
-    seconds = int(diff.total_seconds())
-
-    if seconds < 60:
-        return "just now"
-    elif seconds < 3600:
-        mins = seconds // 60
-        return f"{mins} min ago"
-    elif seconds < 86400:
-        hours = seconds // 3600
-        return f"{hours}h ago"
-    elif seconds < 86400 * 7:
-        days = seconds // 86400
-        return f"{days}d ago"
-    else:
-        return dt.strftime("%d %b %Y")
+    try:
+        results = list(searches.aggregate(pipeline))
+        
+        # Format the output to exactly match what your bot.py expects
+        formatted_results = []
+        for r in results:
+            formatted_results.append({
+                "name": r["_id"],
+                "count": r["count"],
+                # Format the raw datetime object into a clean string (e.g., '2026-06-03')
+                "last_searched": r["last_timestamp"].strftime("%Y-%m-%d") if r.get("last_timestamp") else "Unknown"
+            })
+            
+        return formatted_results
+    except Exception as e:
+        logger.error(f"Failed to aggregate recent searches: {e}")
+        return []
