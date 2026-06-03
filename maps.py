@@ -328,10 +328,11 @@ def build_google_maps_link(origin_name, dest_lat, dest_lng) -> str:
 
 # ── Primary schools via cached OneMap data ───────────────────────────────────
 
-def find_nearest_primary_schools(lat: float, lng: float, radius_m: float = 1000) -> list:
+def find_nearest_primary_schools(lat: float, lng: float) -> list:
     """Find nearest primary schools using MongoDB-cached OneMap data."""
     from schools_cache import find_nearest_primary_schools as cached_schools
-    return cached_schools(lat, lng, radius_m=radius_m, top_n=3)
+    # Removed radius_m to let schools_cache.py handle the 1200m buffer natively
+    return cached_schools(lat, lng, top_n=3)
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
@@ -377,10 +378,10 @@ def get_nearby_info(address: str) -> dict:
                 "duration": item["duration_text"],
                 "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
             })
-
+            
     # ── Primary schools via OneMap ───────────────────────────────────────────
     school_results = []
-    schools = find_nearest_primary_schools(lat, lng, radius_m=1000)
+    schools = find_nearest_primary_schools(lat, lng)
     if schools:
         dest_list = [{"lat": s["lat"], "lng": s["lng"]} for s in schools]
         distances = get_walking_distances_bulk(lat, lng, dest_list)
