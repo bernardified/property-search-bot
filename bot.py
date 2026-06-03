@@ -40,7 +40,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Walking distance to nearest MRT\n"
         "• Walking distance to nearest shopping mall\n\n"
         "Just type a development name to get started.\n"
-        "Example: `The Sail` or `Pinnacle Duxton`\n\n"
+        "Example: `Marina One Residences` or `The Garden Residences`\n\n"
         "Commands:\n"
         "/search — search a property\n"
         "/list — most searched developments\n"
@@ -106,7 +106,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/search with no args — prompt user to type the name."""
     if context.args:
         # User typed /search <name> directly — run immediately
-        await handle_property_search(update, " ".join(context.args))
+        await handle_property_search(update, context, " ".join(context.args))
         return ConversationHandler.END
 
     await update.message.reply_text(
@@ -118,7 +118,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def received_property_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive property name after /search prompt."""
     development_name = update.message.text.strip()
-    await handle_property_search(update, development_name)
+    await handle_property_search(update, context, development_name)
     return ConversationHandler.END
 
 
@@ -138,7 +138,7 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     development_name = data[len("search:"):]
     await query.edit_message_reply_markup(reply_markup=None)
-    await handle_property_search(update, development_name, message=query.message)
+    await handle_property_search(update, context, development_name, message=query.message)
 
 
 async def fuzzy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,7 +189,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_property_search(update, development_name)
 
 
-async def handle_property_search(update: Update, development_name: str, message=None):
+async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_TYPE, development_name: str, message=None):
     """Run the full property search and reply with results."""
     msg = message or update.message
     loading_msg = await msg.reply_text(
@@ -206,14 +206,8 @@ async def handle_property_search(update: Update, development_name: str, message=
             matched_name = ura_result["fuzzy_match"]
             alternatives = ura_result.get("alternatives", [])
 
-            # Store alternatives for the No callback
-            update.effective_user and context.user_data.update({
-                f"alt_{development_name}": alternatives
-            }) if hasattr(update, 'effective_user') and update.effective_user else None
-
-            # Store in a way accessible from callback
+            # Store alternatives for the No callback safely
             if update.effective_user:
-                from telegram.ext import ContextTypes as CT
                 context.user_data[f"alt_{development_name}"] = alternatives
 
             keyboard = [
