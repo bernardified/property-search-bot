@@ -278,27 +278,37 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
                 resolved_name=ura_result.get("development", development_name),
             )
 
-        # 4. Maps lookup
+        # 4. Resolve address for maps (store for later use via buttons)
         address = development_name
         if "error" not in ura_result:
             street = ura_result.get("street", "")
             project = ura_result.get("development", "")
             address = f"{project} {street}".strip() if street else project or development_name
 
-        maps_result = get_nearby_info(address)
-        nearby_text = format_nearby(maps_result)
+        # Store address in user_data so amenity buttons can use it
+        if update.effective_user:
+            context.user_data[f"addr_{development_name}"] = address
+            context.user_data[f"addr_last"] = address
 
-        # 5. Send results
-        full_message = f"{transaction_text}\n\n{nearby_text}"
+        # 5. Send prices only
         await loading_msg.delete()
         await msg.reply_text(
-            full_message, parse_mode="Markdown", disable_web_page_preview=True
+            transaction_text, parse_mode="Markdown", disable_web_page_preview=True
         )
 
-        # 6. Prompt to search again
-        keyboard = [[InlineKeyboardButton("🔍 Search another property", callback_data="new_search")]]
+        # 6. Action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("🚇 Nearest MRT", callback_data="amenity:mrt"),
+                InlineKeyboardButton("🏫 Primary Schools", callback_data="amenity:schools"),
+            ],
+            [
+                InlineKeyboardButton("🛍️ Shopping Malls", callback_data="amenity:malls"),
+                InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
+            ],
+        ]
         await msg.reply_text(
-            "Search for another property?",
+            "Tap to explore nearby amenities:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -312,6 +322,81 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
+
+async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle MRT / Schools / Malls button taps — fetch and send that section."""
+    query = update.callback_query
+    await query.answer()
+    amenity = query.data.split(":")[1]  # mrt, schools, malls
+
+    # Get the stored address
+    address = context.user_data.get("addr_last")
+    if not address:
+        await query.message.reply_text("⚠️ Session expired. Please search again.")
+        return
+
+    loading = await query.message.reply_text("🔍 Fetching...")
+
+    try:
+        maps_result = get_nearby_info(address)
+
+        if amenity == "mrt":
+            mrts = maps_result.get("mrts", [])
+            if mrts:
+                lines = ["🚇 *Nearest MRT Stations*", "─────────────────────"]
+                for i, mrt in enumerate(mrts, 1):
+                    lines.append(
+                        f"  {i}. {mrt['name']}\n"
+                        f"     🚶 {mrt['duration']} ({mrt['distance']})\n"
+                        f"     [Walking directions]({mrt['maps_link']})"
+                    )
+                text = "\n".join(lines)
+            else:
+                text = "🚇 No MRT stations found within 2.5km"
+
+        elif amenity == "schools":
+            schools = maps_result.get("schools", [])
+            if schools:
+                lines = ["🏫 *Nearest Primary Schools* _(within 1km)_", "─────────────────────"]
+                for i, s in enumerate(schools, 1):
+                    lines.append(
+                        f"  {i}. {s['name']}\n"
+                        f"     🚶 {s['duration']} ({s['distance']})\n"
+                        f"     [Walking directions]({s['maps_link']})"
+                    )
+                text = "\n".join(lines)
+            else:
+                text = "🏫 No primary schools found within 1km"
+
+        elif amenity == "malls":
+            malls = maps_result.get("malls", [])
+            if malls:
+                lines = ["🛍️ *Nearest Shopping Malls*", "─────────────────────"]
+                for i, m in enumerate(malls, 1):
+                    lines.append(
+                        f"  {i}. {m['name']}\n"
+                        f"     🚶 {m['duration']} ({m['distance']})\n"
+                        f"     [Walking directions]({m['maps_link']})"
+                    )
+                text = "\n".join(lines)
+            else:
+                text = "🛍️ No shopping malls found within 2km"
+        else:
+            text = "Unknown amenity type."
+
+        await loading.delete()
+        await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Amenity callback failed: {e}", exc_info=True)
+        await loading.delete()
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
+
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle unknown commands by showing help."""
+    await start(update, context)
+
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -338,7 +423,9 @@ def main():
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
+    app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
     logger.info("Bot is running...")
     app.run_polling()
