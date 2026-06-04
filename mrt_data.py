@@ -1,4 +1,5 @@
-# mrt_data.py
+# TODO: Add CRL (lime-green 🟩) when Phase 1 opens (~2030)
+# Interchanges to map: Ang Mo Kio (NSL), Bright Hill (CCL), Aviation Park (EWL)
 
 # 1. Visual formatting map
 LINE_FORMAT = {

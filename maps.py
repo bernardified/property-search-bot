@@ -2,11 +2,30 @@ import os
 import re
 import time
 import requests
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from urllib.parse import quote
 from math import radians, sin, cos, sqrt, atan2
 from onemap_mrt import find_nearest_mrts as onemap_find_nearest_mrts
-from mrt_data import get_line_for_exit, LINE_FORMAT
+
+SGT = ZoneInfo("Asia/Singapore")
+
+
+def _next_tuesday_9am_sgt() -> int:
+    """
+    Return a Unix timestamp for the next upcoming Tuesday at 09:00 SGT.
+    Used as departure_time for transit API calls so results reflect typical
+    weekday-morning conditions rather than the actual time of the request.
+    Tuesday is chosen as mid-week with stable, representative service patterns.
+    """
+    now = datetime.now(SGT)
+    days_until_tuesday = (1 - now.weekday()) % 7
+    if days_until_tuesday == 0 and now.hour >= 9:
+        days_until_tuesday = 7
+    target = now + timedelta(days=days_until_tuesday)
+    target_9am = target.replace(hour=9, minute=0, second=0, microsecond=0)
+    return int(target_9am.timestamp())
 
 load_dotenv()
 
@@ -372,7 +391,11 @@ def build_google_maps_link(origin_name, dest_lat, dest_lng, travel_mode: str = "
 
 
 def get_transit_distances_bulk(origin_lat, origin_lng, destinations) -> list:
-    """Get public transit distances from one origin to multiple destinations."""
+    """
+    Get public transit distances from one origin to multiple destinations.
+    Uses next Tuesday 09:00 SGT as departure_time so results reflect typical
+    weekday-morning service rather than whatever time the user taps the button.
+    """
     if not destinations:
         return []
     dest_str = "|".join([f"{d['lat']},{d['lng']}" for d in destinations])
@@ -380,6 +403,7 @@ def get_transit_distances_bulk(origin_lat, origin_lng, destinations) -> list:
         "origins": f"{origin_lat},{origin_lng}",
         "destinations": dest_str,
         "mode": "transit",
+        "departure_time": _next_tuesday_9am_sgt(),
         "key": GOOGLE_MAPS_API_KEY,
     }
     try:
@@ -464,10 +488,8 @@ def get_nearby_info(address: str) -> dict:
 
         for station, dist in zip(mrt_candidates, distances):
             if dist:
-                raw_name = f"{station['name']} MRT{station['exit_label']}"
-                line_label = get_line_for_exit(raw_name)   # e.g. " [🟡 CCL, 🟣 NEL]"
                 mrt_results.append({
-                    "name": f"{raw_name}{line_label}",
+                    "name": f"{station['name']} MRT{station['exit_label']}",
                     "distance": dist["distance_text"],
                     "duration": dist["duration_text"],
                     "distance_m": dist["distance_m"],

@@ -62,7 +62,7 @@ def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "")
     for i, item in enumerate(items, 1):
         walk_line = f"     🚶 {item['duration']} ({item['distance']})"
         if item.get("transit_duration"):
-            transit_line = f"\n     🚌 {item['transit_duration']} ({item['transit_distance']}) by transit"
+            transit_line = f"\n     🚌 ~{item['transit_duration']} ({item['transit_distance']}) by transit _(est. Tue 9am)_"
         else:
             transit_line = ""
         link_label = "Transit directions" if item.get("transit_duration") else "Walking directions"
@@ -315,7 +315,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         walk_line = f"     🚶 {s['duration']} walk ({s['distance']})"
                         if s.get("transit_duration"):
-                            transit_line = f"\n     🚌 {s['transit_duration']} ({s['transit_distance']}) by transit"
+                            transit_line = f"\n     🚌 ~{s['transit_duration']} ({s['transit_distance']}) by transit _(est. Tue 9am)_"
                             link_label = "Transit directions"
                         else:
                             transit_line = ""
