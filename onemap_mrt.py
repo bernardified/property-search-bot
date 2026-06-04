@@ -6,6 +6,7 @@ import requests
 from math import radians, sin, cos, sqrt, atan2
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from mrt_data import MRT_LINES
 from pymongo.server_api import ServerApi
 
 load_dotenv()
@@ -82,45 +83,6 @@ def haversine_m(lat1, lng1, lat2, lng2) -> float:
     dlambda = radians(lng2 - lng1)
     a = sin(dphi/2)**2 + cos(phi1)*cos(phi2)*sin(dlambda/2)**2
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
-
-
-# ── MRT station names ─────────────────────────────────────────────────────────
-SG_MRT_STATIONS = [
-    "Admiralty", "Aljunied", "Ang Mo Kio", "Bartley", "Bayfront",
-    "Beauty World", "Bedok", "Bedok North", "Bedok Reservoir", "Bencoolen",
-    "Bendemeer", "Bishan", "Boon Keng", "Boon Lay", "Botanic Gardens",
-    "Braddell", "Bras Basah", "Bright Hill", "Buangkok", "Bugis",
-    "Bukit Batok", "Bukit Gombak", "Bukit Panjang", "Buona Vista",
-    "Caldecott", "Cashew", "Changi Airport", "Chinatown", "Chinese Garden",
-    "Choa Chu Kang", "City Hall", "Clarke Quay", "Clementi", "Commonwealth",
-    "Dakota", "Dhoby Ghaut", "Dover", "Downtown",
-    "Esplanade", "Eunos", "Expo",
-    "Farrer Park", "Farrer Road", "Fort Canning",
-    "Gardens By The Bay", "Geylang Bahru",
-    "Haw Par Villa", "Hillview", "Holland Village", "Hougang",
-    "Joo Koon", "Jurong East",
-    "Kaki Bukit", "Kallang", "Kembangan", "Kent Ridge", "Khatib",
-    "King Albert Park", "Kovan", "Kranji",
-    "Labrador Park", "Lakeside", "Lavender", "Lentor", "Little India",
-    "Lorong Chuan",
-    "MacPherson", "Marina Bay", "Marina South Pier", "Marymount", "Marsiling",
-    "Maxwell", "Mayflower", "Mountbatten",
-    "Newton", "Nicoll Highway", "Novena",
-    "one-north", "Orchard", "Orchard Boulevard", "Outram Park",
-    "Pasir Panjang", "Pasir Ris", "Paya Lebar", "Pioneer", "Potong Pasir",
-    "Promenade", "Punggol",
-    "Queenstown",
-    "Raffles Place", "Redhill", "Rochor",
-    "Sembawang", "Sengkang", "Serangoon", "Shenton Way", "Simei",
-    "Sixth Avenue", "Somerset", "Springleaf", "Stadium", "Stevens",
-    "Sungei Bedok",
-    "Tampines", "Tampines East", "Tampines West", "Tan Kah Kee",
-    "Tanjong Pagar", "Tao Payoh", "Telok Ayer", "Telok Blangah",
-    "Tiong Bahru", "Tuas Crescent", "Tuas Link", "Tuas West Road",
-    "Ubi", "Upper Changi", "Upper Thomson",
-    "Woodlands", "Woodlands North", "Woodlands South", "Woodleigh",
-    "Yew Tee", "Yishun",
-]
 
 
 # ── MongoDB cache read/write ───────────────────────────────────────────────────
@@ -228,7 +190,6 @@ def _fetch_station_data(station_name: str, token: str) -> dict | None:
         "exits": exits,
     }
 
-
 def build_mrt_cache() -> dict:
     """Build or load the full MRT station coordinate cache from MongoDB."""
     if _is_cache_fresh():
@@ -241,12 +202,16 @@ def build_mrt_cache() -> dict:
         logger.warning("[MRT Cache] No token — using stale cache")
         return _load_cache()
 
+    ALL_MRT_STATIONS = set()
+    for stations in MRT_LINES.values():
+        ALL_MRT_STATIONS.update(stations)
+
     stations = {}
-    for name in SG_MRT_STATIONS:
-        data = _fetch_station_data(name, token)
+    for station_name in ALL_MRT_STATIONS:
+        data = _fetch_station_data(station_name, token)
         if data:
-            stations[name.upper()] = data
-            logger.info(f"[MRT Cache] Cached {name}")
+            stations[station_name.upper()] = data
+            logger.info(f"[MRT Cache] Cached {station_name}")
         time.sleep(0.15)
 
     if stations:

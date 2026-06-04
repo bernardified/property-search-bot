@@ -48,8 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Last 12 months of rental data\n\n"
         "Just type a development name to get started.\n"
         "Example: `Marina One Residences` or `The Garden Residences`\n\n"
-        "Commands:\n"
-        "/search — search a property\n"
+        "Other Commands:\n"
         "/list — most searched developments\n"
         "/refresh — update property data\n"
         "/help — show this message",
