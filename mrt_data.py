@@ -2,12 +2,12 @@
 
 # 1. Visual formatting map
 LINE_FORMAT = {
-    "EWL": "🟢 East West Line",
-    "NSL": "🔴 North South Line",
-    "NEL": "🟣 North East Line",
-    "CCL": "🟡 Circle Line",
-    "DTL": "🔵 Downtown Line",
-    "TEL": "🟤 Thomson-East Coast Line"
+    "EWL": "🟢 EWL",
+    "NSL": "🔴 NSL",
+    "NEL": "🟣 NEL",
+    "CCL": "🟡 CCL",
+    "DTL": "🔵 DTL",
+    "TEL": "🟤 TEL"
 }
 
 # 2. Master Map: Every station network (Used for standard stations)
