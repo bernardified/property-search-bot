@@ -147,6 +147,10 @@ def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
         avg_rent = round(sum(r["rent"] for r in band_rentals) / len(band_rentals))
         latest_rent = round(latest["rent"])
 
+        # PSF = rent / area midpoint
+        latest_psf = round(latest["rent"] / latest["area_midpoint"], 2) if latest["area_midpoint"] else None
+        avg_psf = round(sum(r["rent"] / r["area_midpoint"] for r in band_rentals if r["area_midpoint"]) / len(band_rentals), 2) if band_rentals else None
+
         # Gross yield = (monthly rent × 12 / sale price) × 100
         sale_price = sale_prices.get(label, {}).get("price") if sale_prices else None
         yield_pct = None
@@ -155,8 +159,10 @@ def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
 
         band_data[label] = {
             "latest_rent": latest_rent,
+            "latest_psf": latest_psf,
             "latest_date": _format_lease_date(latest["lease_date"]),
             "avg_rent": avg_rent,
+            "avg_psf": avg_psf,
             "count": len(band_rentals),
             "yield_pct": yield_pct,
         }
@@ -185,11 +191,13 @@ def format_rental(result: dict) -> str:
         data = result["bands"].get(label)
 
         if data:
-            yield_str = f" → 📈 *{data['yield_pct']}% yield*" if data.get("yield_pct") else ""
+            latest_psf_str = f" (S${data['latest_psf']:.2f} psf/mo)" if data.get("latest_psf") else ""
+            avg_psf_str = f" (S${data['avg_psf']:.2f} psf/mo)" if data.get("avg_psf") else ""
+            yield_str = f"\n  📈 *Gross yield: {data['yield_pct']}%*" if data.get("yield_pct") else ""
             lines.append(
                 f"_{label_escaped}_\n"
-                f"  🏠 Latest: S${data['latest_rent']:,}/mo ({data['latest_date']})\n"
-                f"  📊 Avg: S${data['avg_rent']:,}/mo ({data['count']} contracts){yield_str}"
+                f"  🏠 Latest: S${data['latest_rent']:,}/mo{latest_psf_str} ({data['latest_date']})\n"
+                f"  📊 Avg: S${data['avg_rent']:,}/mo{avg_psf_str} ({data['count']} contracts){yield_str}"
             )
         else:
             lines.append(f"_{label_escaped}_\n  No rental data found")
