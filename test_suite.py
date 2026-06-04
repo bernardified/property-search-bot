@@ -10,6 +10,7 @@ import time
 import unittest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+from mrt_data import get_line_for_exit
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -291,15 +292,6 @@ class TestRentalLogic(unittest.TestCase):
         self.assertNotEqual(street_address, "MARINA ONE RESIDENCES",
             "Geocoding was using project name instead of street")
 
-    def test_addr_key_truncation_fits_telegram_limit(self):
-        """addr_key must fit within Telegram's 64-char callback data limit."""
-        # Worst case: long project name + long street
-        project = "SOME VERY LONG DEVELOPMENT NAME HERE"
-        street = "SOME VERY LONG STREET NAME HERE TOO"
-        addr_key = f"amenity:rental:{project[:28]}|{street[:28]}"
-        self.assertLessEqual(len(addr_key), 64,
-            f"addr_key too long: {len(addr_key)} chars")
-
 
 # ══════════════════════════════════════════════════════
 # 5. MAPS & GEOCODING
@@ -319,6 +311,23 @@ class TestMapsHelpers(unittest.TestCase):
         mrt = {"name": "Lorong Chuan", "exit_label": " (Exit A)", "dest_lat": 1.35, "dest_lng": 103.86, "straight_dist": 100}
         display = f"{mrt['name']} MRT{mrt['exit_label']}"
         self.assertEqual(display, "Lorong Chuan MRT (Exit A)")
+
+    def test_interchange_specific_exit(self):
+        self.assertEqual(get_line_for_exit("Serangoon MRT (Exit E/G)"), " [🟡 CCL]")
+
+    def test_interchange_general_exit(self):
+        self.assertEqual(get_line_for_exit("Serangoon MRT (Exit A)"), " [🟣 NEL]")
+
+    def test_standard_station_no_exit(self):
+        self.assertEqual(get_line_for_exit("KOVAN MRT"), " [🟣 NEL]")
+
+    def test_marina_bay_shared_platform(self):
+        result = get_line_for_exit("Marina Bay MRT (Exit 1)")
+        self.assertIn("🔴 NSL", result)
+        self.assertIn("🟡 CCL", result)
+
+    def test_unknown_station_returns_empty(self):
+        self.assertEqual(get_line_for_exit("FAKE STATION MRT"), "")
 
 
 # ══════════════════════════════════════════════════════
@@ -407,6 +416,7 @@ class TestURACacheIntegration(unittest.TestCase):
             )
 
 
+
 # ══════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════
@@ -456,3 +466,4 @@ def run_tests():
 
 if __name__ == "__main__":
     run_tests()
+

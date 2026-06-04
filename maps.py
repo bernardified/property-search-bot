@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from urllib.parse import quote
 from math import radians, sin, cos, sqrt, atan2
 from onemap_mrt import find_nearest_mrts as onemap_find_nearest_mrts
+from mrt_data import get_line_for_exit, LINE_FORMAT
 
 load_dotenv()
 
@@ -463,8 +464,10 @@ def get_nearby_info(address: str) -> dict:
 
         for station, dist in zip(mrt_candidates, distances):
             if dist:
+                raw_name = f"{station['name']} MRT{station['exit_label']}"
+                line_label = get_line_for_exit(raw_name)   # e.g. " [🟡 CCL, 🟣 NEL]"
                 mrt_results.append({
-                    "name": f"{station['name']} MRT{station['exit_label']}",
+                    "name": f"{raw_name}{line_label}",
                     "distance": dist["distance_text"],
                     "duration": dist["duration_text"],
                     "distance_m": dist["distance_m"],
