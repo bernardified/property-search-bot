@@ -19,6 +19,7 @@ from cache_rental import force_refresh_rental, rental_cache_status
 from rental import get_rental_by_band, format_rental
 from onemap_mrt import build_mrt_cache
 from schools_cache import get_schools_cache
+from mrt_data import get_line_for_exit
 
 load_dotenv()
 
@@ -379,14 +380,19 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if mrts:
                 lines = ["🚇 *Nearest MRT Stations*", "─────────────────────"]
                 for i, mrt in enumerate(mrts, 1):
+                    # 2. Fetch the line data dynamically
+                    line_info = get_line_for_exit(mrt['name'])
+                    
+                    # 3. Inject it directly next to the name, and bold the name
                     lines.append(
-                        f"  {i}. {mrt['name']}\n"
+                        f"  {i}. *{mrt['name']}*{line_info}\n"
                         f"     🚶 {mrt['duration']} ({mrt['distance']})\n"
                         f"     [Walking directions]({mrt['maps_link']})"
                     )
                 text = "\n".join(lines)
             else:
-                text = "🚇 No MRT stations found within 2.5km"
+                # 4. Changed this fallback text
+                text = "🚇 No MRT stations found within the search radius"
 
         elif amenity == "schools":
             schools = maps_result.get("schools", [])
@@ -424,6 +430,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "\n".join(lines)
             else:
                 text = "🛍️ No shopping malls found within 2km"
+
         elif amenity == "rental":
             # Get sale prices from URA cache for yield calculation
             from ura import search_property
