@@ -220,3 +220,6 @@ __marimo__/
 ura_cache.json
 mrt_cache.json
 search_history.json
+
+#Test files
+Test/

@@ -8,15 +8,16 @@ load_dotenv()
 
 URA_API_KEY = os.getenv("URA_API_KEY")
 
-# Size bands in sqft (URA data is in sqm, we convert)
+# Size bands — must match ura.py exactly
 SIZE_BANDS = [
-    {"label": "< 600 sqft",       "min": 0,    "max": 600},
-    {"label": "600 – 700 sqft",   "min": 600,  "max": 700},
-    {"label": "700 – 800 sqft",   "min": 700,  "max": 800},
-    {"label": "800 – 900 sqft",   "min": 800,  "max": 900},
-    {"label": "900 – 1000 sqft",  "min": 900,  "max": 1000},
-    {"label": "> 1000 sqft",      "min": 1000, "max": float("inf")},
+    {"label": "<= 600 sqft",       "min": 0,    "max": 600},
+    {"label": "601 – 700 sqft",   "min": 601,  "max": 700},
+    {"label": "701 – 800 sqft",   "min": 701,  "max": 800},
+    {"label": "801 – 900 sqft",   "min": 801,  "max": 900},
+    {"label": "901 – 1000 sqft",  "min": 901,  "max": 1000},
+    {"label": "> 1000 sqft",      "min": 1001, "max": float("inf")},
 ]
+
 
 
 # API calls are handled by cache_ura.py — data is served from local cache
@@ -77,7 +78,7 @@ def format_contract_date(date_str: str) -> str:
 
 def get_band(sqft: float) -> str | None:
     for band in SIZE_BANDS:
-        if band["min"] <= sqft < band["max"]:
+        if band["min"] <= sqft <= band["max"]:
             return band["label"]
     return None
 
