@@ -4,7 +4,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from utils import get_mongo_db
+from utils import get_mongo_db, is_rental_stale
 
 load_dotenv()
 
@@ -14,8 +14,9 @@ URA_API_KEY = os.getenv("URA_API_KEY")
 URA_TOKEN_URL = "https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1"
 URA_RENTAL_BASE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Rental&refPeriod="
 
-# Refresh monthly — rental data updates on 15th of each month
-CACHE_MAX_AGE_HOURS = 24 * 30
+# URA rental contracts update on the 15th of each month at 09:00 SGT.
+# Staleness is determined by release calendar, not a fixed age threshold.
+# See utils.is_rental_stale() for logic.
 
 # MongoDB via utils.get_mongo_db()
 
@@ -104,6 +105,10 @@ def _fetch_all_rentals(token: str) -> list:
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
 def _is_cache_fresh() -> bool:
+    """
+    Return True if the cache is up-to-date — i.e. no URA rental release
+    (15th of month 09:00 SGT, shifted for public holidays) has occurred since last refresh.
+    """
     db = get_mongo_db()
     if db is None:
         return False
@@ -111,8 +116,8 @@ def _is_cache_fresh() -> bool:
         doc = db['rental_cache'].find_one({"_id": "meta"})
         if not doc:
             return False
-        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
-        return age_hours < CACHE_MAX_AGE_HOURS
+        last_refresh_ts = doc.get("timestamp", 0)
+        return not is_rental_stale(last_refresh_ts)
     except Exception:
         return False
 
@@ -211,9 +216,11 @@ def rental_cache_status() -> dict:
         doc = db['rental_cache'].find_one({"_id": "meta"})
         if not doc:
             return {"status": "missing"}
-        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
+        last_refresh_ts = doc.get("timestamp", 0)
+        age_hours = (time.time() - last_refresh_ts) / 3600
+        stale = is_rental_stale(last_refresh_ts)
         return {
-            "status": "fresh" if age_hours < CACHE_MAX_AGE_HOURS else "stale",
+            "status": "stale" if stale else "fresh",
             "age_hours": round(age_hours, 1),
             "projects": doc.get("project_count", "?"),
             "quarters": doc.get("quarters", []),

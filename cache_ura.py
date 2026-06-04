@@ -4,7 +4,7 @@ import logging
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from utils import get_mongo_db
+from utils import get_mongo_db, is_ura_transactions_stale
 
 load_dotenv()
 
@@ -15,7 +15,9 @@ URA_TOKEN_URL = "https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1"
 URA_TRANSACTIONS_BASE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Transaction&batch="
 URA_PIPELINE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Pipeline"
 
-CACHE_MAX_AGE_HOURS = 48
+# URA publishes new transaction data every Tuesday and Friday at 09:00 SGT.
+# Staleness is determined by release calendar, not a fixed age threshold.
+# See utils.is_ura_transactions_stale() for logic.
 
 # MongoDB via utils.get_mongo_db()
 
@@ -79,6 +81,10 @@ def _fetch_pipeline(token: str) -> list:
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
 def _is_cache_fresh() -> bool:
+    """
+    Return True if the cache is up-to-date — i.e. no URA transaction release
+    (Tue/Fri 09:00 SGT, shifted for public holidays) has occurred since last refresh.
+    """
     db = get_mongo_db()
     if db is None:
         return False
@@ -86,8 +92,8 @@ def _is_cache_fresh() -> bool:
         doc = db['ura_cache'].find_one({"_id": "meta"})
         if not doc:
             return False
-        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
-        return age_hours < CACHE_MAX_AGE_HOURS
+        last_refresh_ts = doc.get("timestamp", 0)
+        return not is_ura_transactions_stale(last_refresh_ts)
     except Exception as e:
         logger.error(f"[URA Cache] Freshness check failed: {e}")
         return False
@@ -218,9 +224,11 @@ def cache_status() -> dict:
         doc = db['ura_cache'].find_one({"_id": "meta"})
         if not doc:
             return {"status": "missing"}
-        age_hours = (time.time() - doc.get("timestamp", 0)) / 3600
+        last_refresh_ts = doc.get("timestamp", 0)
+        age_hours = (time.time() - last_refresh_ts) / 3600
+        stale = is_ura_transactions_stale(last_refresh_ts)
         return {
-            "status": "fresh" if age_hours < CACHE_MAX_AGE_HOURS else "stale",
+            "status": "stale" if stale else "fresh",
             "age_hours": round(age_hours, 1),
             "projects": doc.get("project_count", "?"),
             "size_mb": "N/A (MongoDB)",

@@ -1,13 +1,16 @@
 """
 Shared utilities used across the entire bot.
 Single source of truth for size bands, MongoDB connections,
-haversine distance, OneMap token, and date helpers.
+haversine distance, OneMap token, date helpers, and cache staleness logic.
 """
 import os
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from math import radians, sin, cos, sqrt, atan2
+from zoneinfo import ZoneInfo
+
+SGT = ZoneInfo("Asia/Singapore")
 
 logger = logging.getLogger(__name__)
 
@@ -183,3 +186,106 @@ def get_onemap_token() -> str | None:
     except Exception as e:
         logger.error(f"[OneMap] Auth error: {e}")
         return None
+
+# ── Cache staleness helpers ───────────────────────────────────────────────────
+#
+# These replace simple age-based checks with release-calendar-aware logic.
+#
+# URA transactions: published every Tuesday and Friday at 09:00 SGT.
+# URA rental contracts: published on the 15th of each month at 09:00 SGT.
+# Both shift to the next working day if the nominal date is a public holiday.
+#
+# SG public holidays sourced from MOM gazetted list.
+# Update _HOLIDAYS each year — Hari Raya dates are provisional until confirmed.
+
+def sg_public_holidays(year: int) -> set[date]:
+    """
+    Return the set of Singapore public holiday dates for the given year,
+    including in-lieu Mondays when a holiday falls on Sunday.
+
+    Covers 2026. Extend _HOLIDAYS for subsequent years.
+    Hari Raya Puasa and Haji dates are provisional; update when MOM confirms.
+    """
+    _HOLIDAYS: dict[int, list[date]] = {
+        2026: [
+            date(2026, 1, 1),   # New Year's Day (Thu)
+            date(2026, 2, 17),  # Chinese New Year Day 1 (Tue)
+            date(2026, 2, 18),  # Chinese New Year Day 2 (Wed)
+            date(2026, 3, 21),  # Hari Raya Puasa — provisional (Sat, no weekday impact)
+            date(2026, 4, 3),   # Good Friday (Fri)
+            date(2026, 5, 1),   # Labour Day (Fri)
+            date(2026, 5, 27),  # Hari Raya Haji — provisional (Wed)
+            date(2026, 5, 31),  # Vesak Day (Sun)
+            date(2026, 6, 1),   # Vesak Day in-lieu (Mon)
+            date(2026, 8, 9),   # National Day (Sun)
+            date(2026, 8, 10),  # National Day in-lieu (Mon)
+            date(2026, 11, 8),  # Deepavali (Sun)
+            date(2026, 11, 9),  # Deepavali in-lieu (Mon)
+            date(2026, 12, 25), # Christmas Day (Fri)
+        ],
+    }
+    return set(_HOLIDAYS.get(year, []))
+
+
+def next_working_day(d: date) -> date:
+    """
+    Return d itself if it is a working day (Mon–Fri, not a SG public holiday).
+    Otherwise advance day-by-day until the next working day.
+    """
+    holidays = sg_public_holidays(d.year)
+    while d.weekday() >= 5 or d in holidays:  # 5=Sat, 6=Sun
+        d += timedelta(days=1)
+        holidays = sg_public_holidays(d.year)  # refresh in case we rolled into a new year
+    return d
+
+
+def _release_occurred(nominal_day: date, release_hour: int,
+                       since_sgt: datetime, now_sgt: datetime) -> bool:
+    """
+    Return True if a release scheduled on nominal_day at release_hour SGT
+    has occurred after since_sgt and no later than now_sgt.
+    Applies next_working_day shift for holidays/weekends.
+    """
+    actual = next_working_day(nominal_day)
+    release_dt = datetime(actual.year, actual.month, actual.day, release_hour, 0, tzinfo=SGT)
+    return since_sgt < release_dt <= now_sgt
+
+
+def is_ura_transactions_stale(last_refresh_ts: float) -> bool:
+    """
+    Return True if URA transaction data needs refreshing.
+
+    URA publishes new transaction data every Tuesday and Friday at 09:00 SGT.
+    Releases shift to the next working day if the date is a public holiday.
+    Returns True if at least one such release has occurred since last_refresh_ts.
+    """
+    now_sgt = datetime.now(SGT)
+    since_sgt = datetime.fromtimestamp(last_refresh_ts, tz=SGT)
+    check = since_sgt.date()
+    while check <= now_sgt.date():
+        if check.weekday() in (1, 4):  # Tuesday=1, Friday=4
+            if _release_occurred(check, 9, since_sgt, now_sgt):
+                return True
+        check += timedelta(days=1)
+    return False
+
+
+def is_rental_stale(last_refresh_ts: float) -> bool:
+    """
+    Return True if rental contract data needs refreshing.
+
+    URA publishes rental contracts on the 15th of each month at 09:00 SGT.
+    Releases shift to the next working day if the 15th is a public holiday or weekend.
+    Returns True if at least one such release has occurred since last_refresh_ts.
+    """
+    now_sgt = datetime.now(SGT)
+    since_sgt = datetime.fromtimestamp(last_refresh_ts, tz=SGT)
+    for delta_months in range(3):  # check current month + next 2 (handles long cache gaps)
+        year = since_sgt.year
+        month = since_sgt.month + delta_months
+        while month > 12:
+            month -= 12
+            year += 1
+        if _release_occurred(date(year, month, 15), 9, since_sgt, now_sgt):
+            return True
+    return False

@@ -16,6 +16,8 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 DISTANCE_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
 
+# MRT stations and primary schools change infrequently (new lines/schools open rarely).
+# 30 days balances freshness with OneMap API load.
 CACHE_MAX_AGE_DAYS = 30
 
 # MongoDB via utils.get_mongo_db()

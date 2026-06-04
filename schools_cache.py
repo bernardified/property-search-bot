@@ -43,7 +43,12 @@ def _get_schools_config(db) -> dict:
             "WHITE SANDS PRIMARY SCHOOL", "WOODGROVE PRIMARY SCHOOL",
             "XINGHUA PRIMARY SCHOOL", "YISHUN PRIMARY SCHOOL"
         ],
-        "junk_words": ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "AFTERSCHOOL" "ACE", "MORNING STAR", "PTE", "LTD", "KINDERGARTEN", "CHILDCARE", "STUDENT CARE", "ENRICHMENT", "TUITION"]
+        "junk_words": [
+            "@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA",
+            "AFTER SCHOOL", "AFTERSCHOOL", "ACE", "MORNING STAR",
+            "PTE", "LTD", "KINDERGARTEN", "CHILDCARE", "STUDENT CARE",
+            "ENRICHMENT", "TUITION",
+        ]
     }
 
     if db is None:
@@ -124,17 +129,19 @@ def _normalise_school_name(name: str) -> str:
     return name
 
 
-def _is_valid_primary_school(name: str) -> bool:
-    """Return True only if this is clearly a primary school entry."""
+def _is_valid_primary_school(name: str, junk_words: list) -> bool:
+    """
+    Return True only if this is clearly a primary school entry.
+
+    Junk check runs FIRST — a name containing both 'PRIMARY SCHOOL' and a
+    junk word (e.g. 'Amp-Mercu Student Care @ Tampines Primary School')
+    must be rejected before the 'PRIMARY SCHOOL' check can accept it.
+    """
     name_upper = name.upper()
-    # Must contain PRIMARY or known primary school keywords
+    if any(j in name_upper for j in junk_words):
+        return False
     if "PRIMARY SCHOOL" in name_upper or "PRI SCH" in name_upper:
         return True
-    # Exclude clearly non-school entries
-    junk = ["CARE", "CENTRE", "STUDENT CARE", "AFTER SCHOOL", "ENRICHMENT",
-            "TUITION", "KINDERGARTEN", "CHILDCARE", "@"]
-    if any(j in name_upper for j in junk):
-        return False
     return False
 
 
@@ -142,6 +149,12 @@ def _fetch_all_schools(token: str) -> list:
     """Fetch primary schools via keyword and append legacy/non-standard schools."""
     schools = []
     seen = set()  # normalised names for deduplication
+
+    # Fetch config once — junk_words used by BOTH bulk and legacy paths
+    db = get_mongo_db()
+    config = _get_schools_config(db)
+    junk_words = config.get("junk_words", [])
+    exceptions = config.get("legacy_names", [])
 
     # 1. Bulk Search: paginate fully through all pages
     page = 1
@@ -169,10 +182,8 @@ def _fetch_all_schools(token: str) -> list:
                 name = item.get("SEARCHVAL", "")
                 if not name:
                     continue
-                # Filter to actual primary schools only
-                if not _is_valid_primary_school(name):
+                if not _is_valid_primary_school(name, junk_words):
                     continue
-                # Deduplicate by normalised name
                 norm = _normalise_school_name(name)
                 if norm in seen:
                     continue
@@ -197,13 +208,7 @@ def _fetch_all_schools(token: str) -> list:
             logger.error(f"[Schools Cache] Bulk fetch failed on page {page}: {e}")
             break
 
-    # 2. The Legacy Exceptions: Fetched dynamically from MongoDB app_config
-    db = get_mongo_db()
-    config = _get_schools_config(db)
-    
-    exceptions = config.get("legacy_names", [])
-    junk_words = config.get("junk_words", [])
-
+    # 2. Legacy exceptions: schools without "PRIMARY SCHOOL" in their OneMap name
     for school_name in exceptions:
         try:
             r = requests.get(
@@ -221,14 +226,10 @@ def _fetch_all_schools(token: str) -> list:
             results = data.get("results", [])
             
             if results:
-                valid_results = []
-                
-                # Filter out the junk using the dynamic MongoDB list
-                for item in results:
-                    name_upper = item.get("SEARCHVAL", "").upper()
-                    if any(junk in name_upper for junk in junk_words):
-                        continue
-                    valid_results.append(item)
+                valid_results = [
+                    item for item in results
+                    if not any(j in item.get("SEARCHVAL", "").upper() for j in junk_words)
+                ]
 
                 if valid_results:
                     best_match = min(valid_results, key=lambda x: len(x.get("SEARCHVAL", "")))
@@ -288,6 +289,5 @@ def find_nearest_primary_schools(origin_lat: float, origin_lng: float, top_n: in
         if dist <= MAX_RADIUS_M:
             nearby.append({**school, "dist": dist})
             
-    # Sort by straight-line distance
     nearby.sort(key=lambda x: x["dist"])
     return nearby[:top_n]
