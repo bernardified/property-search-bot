@@ -282,6 +282,50 @@ def find_nearest_mall(lat: float, lng: float) -> dict | None:
         return []
 
 
+# ── Supermarkets via Google Places ───────────────────────────────────────────
+
+MAJOR_SUPERMARKET_CHAINS = [
+    "fairprice", "ntuc", "cold storage", "giant", "sheng siong",
+    "prime supermarket", "hao mart", "marketplace", "jason's",
+    "meidi-ya", "don don donki", "donki",
+]
+
+def is_major_supermarket(name: str) -> bool:
+    """Filter to major supermarket chains only."""
+    name_lower = name.lower()
+    return any(chain in name_lower for chain in MAJOR_SUPERMARKET_CHAINS)
+
+
+def find_nearest_supermarkets(lat: float, lng: float) -> list:
+    """Use Google Places to find nearest major supermarkets within 1km."""
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": 1000,
+        "keyword": "supermarket",
+        "type": "supermarket",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    try:
+        r = requests.get(PLACES_URL, params=params, timeout=10)
+        data = r.json()
+        if data["status"] == "OK" and data["results"]:
+            candidates = []
+            for p in data["results"][:15]:
+                name = p["name"]
+                if not is_major_supermarket(name):
+                    continue
+                candidates.append({
+                    "name": name,
+                    "lat": p["geometry"]["location"]["lat"],
+                    "lng": p["geometry"]["location"]["lng"],
+                })
+            return candidates
+        return []
+    except Exception as e:
+        print(f"[Maps] Supermarket search failed: {e}")
+        return []
+
+
 # ── Walking distances ─────────────────────────────────────────────────────────
 
 def get_walking_distances_bulk(origin_lat, origin_lng, destinations) -> list:
@@ -395,7 +439,25 @@ def get_nearby_info(address: str) -> dict:
                     "dist": school["dist"]
                 })
 
-    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results}
+    # ── Supermarkets via Google Places ──────────────────────────────────────────
+    supermarket_results = []
+    supermarket_candidates = find_nearest_supermarkets(lat, lng)
+    if supermarket_candidates:
+        distances = get_walking_distances_bulk(lat, lng, supermarket_candidates)
+        combined = []
+        for place, dist in zip(supermarket_candidates, distances):
+            if dist:
+                combined.append({**place, **dist})
+        combined.sort(key=lambda x: x["distance_m"])
+        for item in combined[:3]:
+            supermarket_results.append({
+                "name": item["name"],
+                "distance": item["distance_text"],
+                "duration": item["duration_text"],
+                "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
+            })
+
+    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results}
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -436,7 +498,7 @@ def format_nearby(result: dict) -> str:
 
     schools = result.get("schools", [])
     if schools:
-        lines.append("🏫 *Nearest Primary Schools* _(within 2km)_")
+        lines.append("🏫 *Nearest Primary Schools* _(within 1km)_")
         for i, school in enumerate(schools, 1):
             lines.append(
                 f"  {i}. {school['name']}\n"
@@ -444,6 +506,6 @@ def format_nearby(result: dict) -> str:
                 f"     [Walking directions]({school['maps_link']})"
             )
     else:
-        lines += ["🏫 *Nearest Primary Schools*", "  None found within 2km"]
+        lines += ["🏫 *Nearest Primary Schools*", "  None found within 1km"]
 
     return "\n".join(lines)
