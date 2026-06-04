@@ -15,6 +15,8 @@ from ura import search_property, format_transactions
 from maps import get_nearby_info, format_nearby
 from storage import record_search, get_recent_searches
 from cache_ura import force_refresh, cache_status
+from cache_rental import force_refresh_rental, rental_cache_status
+from rental import get_rental_by_band, format_rental
 from onemap_mrt import build_mrt_cache
 from schools_cache import get_schools_cache
 
@@ -40,7 +42,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Search for any non-landed private residential development to get:\n"
         "• Latest transacted prices by unit size\n"
         "• Distance to nearest MRT\n"
-        "• Primary schools within 2km\n"
+        "• Primary schools within 1km\n"
         "• Distance to nearest shopping mall\n\n"
         "Just type a development name to get started.\n"
         "Example: `Marina One Residences` or `The Garden Residences`\n\n"
@@ -101,6 +103,14 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Schools refresh failed: {e}")
         lines.append("❌ Primary schools — refresh failed")
+
+    # 4. Rental data
+    rental_ok = force_refresh_rental()
+    r_status = rental_cache_status()
+    if rental_ok:
+        lines.append(f"✅ Rental data — {r_status.get('projects', '?')} projects ({', '.join(r_status.get('quarters', []))})")
+    else:
+        lines.append("❌ Rental data — refresh failed")
 
     await msg.edit_text("🔄 All caches refreshed\n\n" + "\n".join(lines))
 
@@ -312,6 +322,9 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{addr_key}"),
+                InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{addr_key}"),
+            ],
+            [
                 InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
             ],
         ]
@@ -395,7 +408,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "\n".join(lines)
                 
             else:
-                text = "🏫 No primary schools found within 2km"
+                text = "🏫 No primary schools found within 1km"
 
         elif amenity == "malls":
             malls = maps_result.get("malls", [])
@@ -410,6 +423,18 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "\n".join(lines)
             else:
                 text = "🛍️ No shopping malls found within 2km"
+        elif amenity == "rental":
+            # Get sale prices from URA cache for yield calculation
+            from ura import search_property
+            ura_result = search_property(address)
+            sale_prices = {}
+            if "error" not in ura_result:
+                for band_label, txn in ura_result.get("bands", {}).items():
+                    sale_prices[band_label] = {"price": txn.get("price")}
+
+            rental_result = get_rental_by_band(address, sale_prices)
+            text = format_rental(rental_result)
+
         else:
             text = "Unknown amenity type."
 
