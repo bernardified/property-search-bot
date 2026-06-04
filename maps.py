@@ -436,7 +436,7 @@ def format_nearby(result: dict) -> str:
 
     schools = result.get("schools", [])
     if schools:
-        lines.append("🏫 *Nearest Primary Schools* _(within 1km)_")
+        lines.append("🏫 *Nearest Primary Schools* _(within 2km)_")
         for i, school in enumerate(schools, 1):
             lines.append(
                 f"  {i}. {school['name']}\n"
@@ -444,6 +444,6 @@ def format_nearby(result: dict) -> str:
                 f"     [Walking directions]({school['maps_link']})"
             )
     else:
-        lines += ["🏫 *Nearest Primary Schools*", "  None found within 1km"]
+        lines += ["🏫 *Nearest Primary Schools*", "  None found within 2km"]
 
     return "\n".join(lines)

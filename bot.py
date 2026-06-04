@@ -40,7 +40,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Search for any non-landed private residential development to get:\n"
         "• Latest transacted prices by unit size\n"
         "• Distance to nearest MRT\n"
-        "• Primary schools within 1km\n"
+        "• Primary schools within 2km\n"
         "• Distance to nearest shopping mall\n\n"
         "Just type a development name to get started.\n"
         "Example: `Marina One Residences` or `The Garden Residences`\n\n"
@@ -124,7 +124,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. Send one single message with the buttons attached
     await update.message.reply_text(
-        "🏆 *Leaderboard*\nClick a property to quickly reload it:",
+        "🏆 *Frequently Searched Properties*\nClick a property to quickly reload it:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -395,7 +395,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "\n".join(lines)
                 
             else:
-                text = "🏫 No primary schools found within 1km"
+                text = "🏫 No primary schools found within 2km"
 
         elif amenity == "malls":
             malls = maps_result.get("malls", [])

@@ -53,7 +53,19 @@ def _get_schools_config(db) -> dict:
             "MARYMOUNT CONVENT SCHOOL", "CANOSSA CATHOLIC PRIMARY SCHOOL", 
             "DE LA SALLE SCHOOL", "MONTFORT JUNIOR SCHOOL", "CHONGFU SCHOOL",
             "AI TONG SCHOOL", "POI CHING SCHOOL", "HONG WEN SCHOOL", 
-            "PEI CHUN PUBLIC SCHOOL", "ANGLO-CHINESE SCHOOL (JUNIOR)"
+            "PEI CHUN PUBLIC SCHOOL", "ANGLO-CHINESE SCHOOL (JUNIOR)",
+            "HAIG GIRLS SCHOOL", "CHIJ KATONG PRIMARY", "NGEE ANN PRIMARY SCHOOL",
+            "OPERA ESTATE PRIMARY SCHOOL", "FAIRFIELD METHODIST SCHOOL",
+            "QUEENSTOWN PRIMARY SCHOOL", "RADIN MAS PRIMARY SCHOOL",
+            "ZHANGDE PRIMARY SCHOOL", "CEDAR PRIMARY SCHOOL",
+            "EAST VIEW PRIMARY SCHOOL", "ELIAS PARK PRIMARY SCHOOL",
+            "FERN GREEN PRIMARY SCHOOL", "FUHUA PRIMARY SCHOOL",
+            "LIANHUA PRIMARY SCHOOL", "NAN HUA PRIMARY SCHOOL",
+            "NORTHOAKS PRIMARY SCHOOL", "PEIYING PRIMARY SCHOOL",
+            "RIVER VALLEY PRIMARY SCHOOL", "RULANG PRIMARY SCHOOL",
+            "SWISS COTTAGE PRIMARY SCHOOL", "WESTWOOD PRIMARY SCHOOL",
+            "WHITE SANDS PRIMARY SCHOOL", "WOODGROVE PRIMARY SCHOOL",
+            "XINGHUA PRIMARY SCHOOL", "YISHUN PRIMARY SCHOOL"
         ],
         "junk_words": ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "ACE", "MORNING STAR"]
     }
@@ -136,13 +148,35 @@ def _save_cache(schools: list):
 
 
 # ── OneMap school fetching ─────────────────────────────────────────────────────
+def _normalise_school_name(name: str) -> str:
+    """Normalise school name for deduplication — strip block/unit info."""
+    name = re.sub(r'\s+(BLOCK|BLK)\s+\w+', '', name.upper()).strip()
+    name = re.sub(r'\s+#\S+', '', name).strip()
+    return name
+
+
+def _is_valid_primary_school(name: str) -> bool:
+    """Return True only if this is clearly a primary school entry."""
+    name_upper = name.upper()
+    # Must contain PRIMARY or known primary school keywords
+    if "PRIMARY SCHOOL" in name_upper or "PRI SCH" in name_upper:
+        return True
+    # Exclude clearly non-school entries
+    junk = ["CARE", "CENTRE", "STUDENT CARE", "AFTER SCHOOL", "ENRICHMENT",
+            "TUITION", "KINDERGARTEN", "CHILDCARE", "@"]
+    if any(j in name_upper for j in junk):
+        return False
+    return False
+
+
 def _fetch_all_schools(token: str) -> list:
     """Fetch primary schools via keyword and append legacy/non-standard schools."""
     schools = []
-    seen = set()
+    seen = set()  # normalised names for deduplication
 
-    # 1. Bulk Search: Catch all standard "... Primary School" names
-    for page in range(1, 10):
+    # 1. Bulk Search: paginate fully through all pages
+    page = 1
+    while True:
         try:
             r = requests.get(
                 ONEMAP_SEARCH_URL,
@@ -156,19 +190,40 @@ def _fetch_all_schools(token: str) -> list:
                 timeout=10
             )
             data = r.json()
-            if not data.get("results"):
+            results = data.get("results", [])
+            total_pages = int(data.get("totalNumPages", 1))
+
+            if not results:
                 break
-            
-            for item in data["results"]:
+
+            for item in results:
                 name = item.get("SEARCHVAL", "")
-                if name in seen:
+                if not name:
                     continue
-                seen.add(name)
-                schools.append({
-                    "name": name.title(),
-                    "lat": float(item["LATITUDE"]),
-                    "lng": float(item["LONGITUDE"])
-                })
+                # Filter to actual primary schools only
+                if not _is_valid_primary_school(name):
+                    continue
+                # Deduplicate by normalised name
+                norm = _normalise_school_name(name)
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                try:
+                    schools.append({
+                        "name": name.title(),
+                        "lat": float(item["LATITUDE"]),
+                        "lng": float(item["LONGITUDE"])
+                    })
+                except (KeyError, ValueError):
+                    continue
+
+            logger.info(f"[Schools Cache] Bulk page {page}/{total_pages}: {len(results)} results, {len(schools)} schools so far")
+
+            if page >= total_pages:
+                break
+            page += 1
+            time.sleep(0.2)
+
         except Exception as e:
             logger.error(f"[Schools Cache] Bulk fetch failed on page {page}: {e}")
             break
@@ -250,15 +305,14 @@ def get_schools_cache() -> list:
 
 def find_nearest_primary_schools(origin_lat: float, origin_lng: float, top_n: int = 5) -> list:
     """
-    Find nearest primary schools. 
-    Uses a 1200m radius to account for center-to-boundary polygon offsets.
+    Find nearest primary schools within 2km.
+    Uses 2000m radius matching what property portals advertise.
     """
     schools = get_schools_cache()
     if not schools:
         return []
 
-    # Buffer radius to catch schools where the boundary is <1km but center is >1km
-    MAX_RADIUS_M = 1200 
+    MAX_RADIUS_M = 2000 
     
     nearby = []
     for school in schools:
