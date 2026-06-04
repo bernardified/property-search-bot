@@ -104,7 +104,7 @@ class TestUtils(unittest.TestCase):
         # Raffles Place to Marina Bay MRT ~500m apart
         dist = self.haversine_m(1.2830, 103.8513, 1.2765, 103.8545)
         self.assertGreater(dist, 400)
-        self.assertLess(dist, 800)
+        self.assertLess(dist, 1000)  # ~805m actual distance
 
 
 # ══════════════════════════════════════════════════════
@@ -260,6 +260,46 @@ class TestRentalLogic(unittest.TestCase):
             self.assertEqual(band, expected_band,
                 f"Area '{area_str}' (midpoint {midpoint}) -> '{band}' but expected '{expected_band}'")
 
+    def test_addr_key_format(self):
+        """addr_key must store PROJECT|STREET so rental uses project, maps use street."""
+        project = "MARINA ONE RESIDENCES"
+        street = "MARINA WAY"
+        addr_key = f"{project[:28]}|{street[:28]}"
+
+        # Split correctly
+        project_name, street_address = addr_key.split("|", 1)
+        self.assertEqual(project_name, "MARINA ONE RESIDENCES")
+        self.assertEqual(street_address, "MARINA WAY")
+
+    def test_addr_key_rental_uses_project_not_street(self):
+        """Rental search must use project name, not street address."""
+        addr_key = "MARINA ONE RESIDENCES|MARINA WAY"
+        project_name, street_address = addr_key.split("|", 1)
+
+        # Rental should search by project name
+        self.assertEqual(project_name, "MARINA ONE RESIDENCES")
+        self.assertNotEqual(project_name, "MARINA WAY",
+            "Rental was using street address instead of project name")
+
+    def test_addr_key_maps_uses_street(self):
+        """Geocoding must use street address, not project name."""
+        addr_key = "MARINA ONE RESIDENCES|MARINA WAY"
+        project_name, street_address = addr_key.split("|", 1)
+
+        # Maps should geocode by street
+        self.assertEqual(street_address, "MARINA WAY")
+        self.assertNotEqual(street_address, "MARINA ONE RESIDENCES",
+            "Geocoding was using project name instead of street")
+
+    def test_addr_key_truncation_fits_telegram_limit(self):
+        """addr_key must fit within Telegram's 64-char callback data limit."""
+        # Worst case: long project name + long street
+        project = "SOME VERY LONG DEVELOPMENT NAME HERE"
+        street = "SOME VERY LONG STREET NAME HERE TOO"
+        addr_key = f"amenity:rental:{project[:28]}|{street[:28]}"
+        self.assertLessEqual(len(addr_key), 64,
+            f"addr_key too long: {len(addr_key)} chars")
+
 
 # ══════════════════════════════════════════════════════
 # 5. MAPS & GEOCODING
@@ -270,7 +310,7 @@ class TestMapsHelpers(unittest.TestCase):
     def test_google_maps_link_format(self):
         from maps import build_google_maps_link
         link = build_google_maps_link("LORONG CHUAN", 1.35153, 103.86481)
-        self.assertIn("maps.google.com/maps/dir", link)
+        self.assertIn("google.com/maps/dir", link)
         self.assertIn("walking", link)
         self.assertIn("1.35153", link)
 

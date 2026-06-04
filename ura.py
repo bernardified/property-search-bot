@@ -3,21 +3,14 @@ import requests
 from dotenv import load_dotenv
 from datetime import datetime
 from cache_ura import get_ura_data
+from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date, format_mmyy_date
 
 load_dotenv()
 
 URA_API_KEY = os.getenv("URA_API_KEY")
 
-# Size bands — must match ura.py exactly
-SIZE_BANDS = [
-    {"label": "<= 600 sqft",       "min": 0,    "max": 600},
-    {"label": "601 – 700 sqft",   "min": 601,  "max": 700},
-    {"label": "701 – 800 sqft",   "min": 701,  "max": 800},
-    {"label": "801 – 900 sqft",   "min": 801,  "max": 900},
-    {"label": "901 – 1000 sqft",  "min": 901,  "max": 1000},
-    {"label": "> 1000 sqft",      "min": 1001, "max": float("inf")},
-]
 
+# Shared utilities imported from utils.py
 
 
 # API calls are handled by cache_ura.py — data is served from local cache
@@ -40,47 +33,7 @@ def get_project_info(project_name: str, pipeline_data: list) -> dict:
     return {"total_units": None, "expected_top": None}
 
 
-def sqm_to_sqft(sqm: float) -> float:
-    return sqm * 10.7639
 
-
-def parse_float(value) -> float | None:
-    try:
-        return float(str(value).replace(",", "").strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def parse_contract_date(date_str: str) -> datetime | None:
-    """
-    Parse URA contractDate format.
-    URA uses MMYY e.g. "0921" = September 2021.
-    """
-    try:
-        date_str = date_str.strip()
-        if len(date_str) == 4:
-            mm = int(date_str[:2])
-            yy = int(date_str[2:])
-            year = 2000 + yy
-            return datetime(year, mm, 1)
-        return None
-    except (ValueError, TypeError):
-        return None
-
-
-def format_contract_date(date_str: str) -> str:
-    """Convert MMYY to human-readable e.g. '0921' -> 'Sep 2021'"""
-    dt = parse_contract_date(date_str)
-    if dt:
-        return dt.strftime("%b %Y")
-    return date_str
-
-
-def get_band(sqft: float) -> str | None:
-    for band in SIZE_BANDS:
-        if band["min"] <= sqft <= band["max"]:
-            return band["label"]
-    return None
 
 
 def search_property(development_name: str) -> dict:
@@ -214,14 +167,14 @@ def search_property(development_name: str) -> dict:
 
         psf = round(price / area_sqft) if area_sqft > 0 else None
         contract_date_raw = txn.get("contractDate", "")
-        contract_date_parsed = parse_contract_date(contract_date_raw)
+        contract_date_parsed = parse_mmyy_date(contract_date_raw)
 
         entry = {
             "project": item["project"],
             "street": item["street"],
             "contract_date_raw": contract_date_raw,
             "contract_date_parsed": contract_date_parsed,
-            "contract_date_display": format_contract_date(contract_date_raw),
+            "contract_date_display": format_mmyy_date(contract_date_raw),
             "price": price,
             "psf": psf,
             "area_sqft": round(area_sqft),

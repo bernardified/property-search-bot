@@ -2,57 +2,11 @@ import difflib
 import logging
 from datetime import datetime
 from cache_rental import get_rental_data
+from utils import SIZE_BANDS, get_band, parse_sqft_range, parse_mmyy_date, format_mmyy_date
 
 logger = logging.getLogger(__name__)
 
-# Size bands — must match ura.py exactly
-SIZE_BANDS = [
-    {"label": "<= 600 sqft",       "min": 0,    "max": 600},
-    {"label": "601 – 700 sqft",   "min": 601,  "max": 700},
-    {"label": "701 – 800 sqft",   "min": 701,  "max": 800},
-    {"label": "801 – 900 sqft",   "min": 801,  "max": 900},
-    {"label": "901 – 1000 sqft",  "min": 901,  "max": 1000},
-    {"label": "> 1000 sqft",      "min": 1001, "max": float("inf")},
-]
-
-
-def _parse_sqft_range(area_sqft_str: str) -> float | None:
-    """
-    Parse URA area range string to midpoint in sqft.
-    e.g. "600-700" -> 650.0, "1700-1800" -> 1750.0
-    """
-    try:
-        parts = area_sqft_str.strip().split("-")
-        if len(parts) == 2:
-            return (float(parts[0]) + float(parts[1])) / 2
-        return float(parts[0])
-    except (ValueError, AttributeError):
-        return None
-
-
-def _get_band(sqft: float) -> str | None:
-    for band in SIZE_BANDS:
-        if band["min"] <= sqft <= band["max"]:
-            return band["label"]
-    return None
-
-
-def _parse_lease_date(date_str: str) -> datetime | None:
-    """Parse MMYY lease date e.g. '0426' -> April 2026"""
-    try:
-        date_str = str(date_str).strip()
-        if len(date_str) == 4:
-            mm = int(date_str[:2])
-            yy = int(date_str[2:])
-            return datetime(2000 + yy, mm, 1)
-        return None
-    except (ValueError, TypeError):
-        return None
-
-
-def _format_lease_date(date_str: str) -> str:
-    dt = _parse_lease_date(date_str)
-    return dt.strftime("%b %Y") if dt else date_str
+# Shared utilities imported from utils.py
 
 
 def find_rental_project(development_name: str, rental_data: list) -> list:
@@ -103,17 +57,17 @@ def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
     for project in projects:
         for record in project.get("rental", []):
             area_str = record.get("areaSqft", "")
-            midpoint = _parse_sqft_range(area_str)
+            midpoint = parse_sqft_range(area_str)
             if midpoint is None:
                 continue
-            band = _get_band(midpoint)
+            band = get_band(midpoint)
             if not band:
                 continue
             rent = record.get("rent")
             if not rent:
                 continue
             lease_date = record.get("leaseDate", "")
-            lease_dt = _parse_lease_date(lease_date)
+            lease_dt = parse_mmyy_date(lease_date)
             all_rentals.append({
                 "band": band,
                 "rent": float(rent),
@@ -160,7 +114,7 @@ def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
         band_data[label] = {
             "latest_rent": latest_rent,
             "latest_psf": latest_psf,
-            "latest_date": _format_lease_date(latest["lease_date"]),
+            "latest_date": format_mmyy_date(latest["lease_date"]),
             "avg_rent": avg_rent,
             "avg_psf": avg_psf,
             "count": len(band_rentals),

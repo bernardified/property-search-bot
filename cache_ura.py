@@ -4,45 +4,20 @@ import logging
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
+from utils import get_mongo_db
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 URA_API_KEY = os.getenv("URA_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI")
 URA_TOKEN_URL = "https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1"
 URA_TRANSACTIONS_BASE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Transaction&batch="
 URA_PIPELINE_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1?service=PMI_Resi_Pipeline"
 
 CACHE_MAX_AGE_HOURS = 48
 
-# ── MongoDB setup ─────────────────────────────────────────────────────────────
-_db = None
-
-def _get_db():
-    global _db
-    if _db is not None:
-        return _db
-    if not MONGO_URI:
-        logger.warning("[URA Cache] No MONGO_URI set")
-        return None
-    try:
-        client = MongoClient(
-            MONGO_URI,
-            server_api=ServerApi('1'),
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
-            socketTimeoutMS=10000,
-        )
-        _db = client['property_bot']
-        # TTL index creation removed - managed by refresh_job.py
-        return _db
-    except Exception as e:
-        logger.error(f"[URA Cache] MongoDB connection failed: {e}")
-        return None
+# MongoDB via utils.get_mongo_db()
 
 
 # ── URA API helpers ───────────────────────────────────────────────────────────
@@ -104,7 +79,7 @@ def _fetch_pipeline(token: str) -> list:
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
 def _is_cache_fresh() -> bool:
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return False
     try:
@@ -120,7 +95,7 @@ def _is_cache_fresh() -> bool:
 
 def _load_cache() -> tuple[list, list]:
     """Load transactions from chunked documents + pipeline from single doc."""
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return [], []
     try:
@@ -145,7 +120,7 @@ def _load_cache() -> tuple[list, list]:
 
 
 def _save_cache(transactions: list, pipeline: list):
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return
     try:
@@ -236,7 +211,7 @@ def force_refresh() -> bool:
 
 def cache_status() -> dict:
     """Return info about the current cache state."""
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return {"status": "no_db"}
     try:

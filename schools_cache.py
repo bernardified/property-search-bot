@@ -3,42 +3,18 @@ import re
 import time
 import logging
 import requests
-from math import radians, sin, cos, sqrt, atan2
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
+from utils import get_mongo_db, haversine_m, get_onemap_token
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = os.getenv("MONGO_URI")
 ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 CACHE_MAX_AGE_DAYS = 30
 
 
-# ── MongoDB setup ─────────────────────────────────────────────────────────────
-_db = None
-
-def _get_db():
-    global _db
-    if _db is not None:
-        return _db
-    if not MONGO_URI:
-        return None
-    try:
-        client = MongoClient(
-            MONGO_URI,
-            server_api=ServerApi('1'),
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
-            socketTimeoutMS=10000,
-        )
-        _db = client['property_bot']
-        return _db
-    except Exception as e:
-        logger.error(f"[Schools Cache] MongoDB connection failed: {e}")
-        return None
+# MongoDB via utils.get_mongo_db()
     
 def _get_schools_config(db) -> dict:
     """Fetch legacy school names and junk filters from MongoDB, or seed if missing."""
@@ -88,19 +64,12 @@ def _get_schools_config(db) -> dict:
         return default_config
 
 
-# ── Haversine ─────────────────────────────────────────────────────────────────
-def haversine_m(lat1, lng1, lat2, lng2) -> float:
-    R = 6371000
-    phi1, phi2 = radians(lat1), radians(lat2)
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lng2 - lng1)
-    a = sin(dphi/2)**2 + cos(phi1)*cos(phi2)*sin(dlambda/2)**2
-    return R * 2 * atan2(sqrt(a), sqrt(1-a))
+# haversine_m via utils.haversine_m
 
 
 # ── Cache read/write ──────────────────────────────────────────────────────────
 def _is_cache_fresh() -> bool:
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return False
     try:
@@ -114,7 +83,7 @@ def _is_cache_fresh() -> bool:
 
 
 def _load_cache() -> list:
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return []
     try:
@@ -128,7 +97,7 @@ def _load_cache() -> list:
 
 
 def _save_cache(schools: list):
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return
     try:
@@ -229,7 +198,7 @@ def _fetch_all_schools(token: str) -> list:
             break
 
     # 2. The Legacy Exceptions: Fetched dynamically from MongoDB app_config
-    db = _get_db()
+    db = get_mongo_db()
     config = _get_schools_config(db)
     
     exceptions = config.get("legacy_names", [])
@@ -286,8 +255,7 @@ def get_schools_cache() -> list:
         return _load_cache()
 
     logger.info("[Schools Cache] Cache stale or missing — fetching from OneMap...")
-    from onemap_mrt import get_token
-    token = get_token()
+    token = get_onemap_token()
     if not token:
         logger.warning("[Schools Cache] No OneMap token — using stale cache")
         return _load_cache()

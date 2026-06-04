@@ -3,92 +3,34 @@ import re
 import time
 import logging
 import requests
-from math import radians, sin, cos, sqrt, atan2
 from dotenv import load_dotenv
-from pymongo import MongoClient
 from mrt_data import MRT_LINES
-from pymongo.server_api import ServerApi
+from utils import get_mongo_db, haversine_m, get_onemap_token
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-ONEMAP_EMAIL = os.getenv("ONEMAP_EMAIL")
-ONEMAP_PASSWORD = os.getenv("ONEMAP_PASSWORD")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI")
 
-ONEMAP_AUTH_URL = "https://www.onemap.gov.sg/api/auth/post/getToken"
 ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 DISTANCE_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
 
 CACHE_MAX_AGE_DAYS = 30
 
-# ── MongoDB setup ─────────────────────────────────────────────────────────────
-_db = None
-
-def _get_db():
-    global _db
-    if _db is not None:
-        return _db
-    if not MONGO_URI:
-        return None
-    try:
-        client = MongoClient(
-            MONGO_URI,
-            server_api=ServerApi('1'),
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
-            socketTimeoutMS=10000,
-        )
-        _db = client['property_bot']
-        return _db
-    except Exception as e:
-        logger.error(f"[MRT Cache] MongoDB connection failed: {e}")
-        return None
+# MongoDB via utils.get_mongo_db()
 
 
-# ── OneMap token ──────────────────────────────────────────────────────────────
-_token = None
-_token_expiry = 0
-
-def get_token() -> str | None:
-    global _token, _token_expiry
-    if _token and time.time() < _token_expiry - 300:
-        return _token
-    if not ONEMAP_EMAIL or not ONEMAP_PASSWORD:
-        return None
-    try:
-        r = requests.post(
-            ONEMAP_AUTH_URL,
-            json={"email": ONEMAP_EMAIL, "password": ONEMAP_PASSWORD},
-            timeout=10
-        )
-        data = r.json()
-        if "access_token" in data:
-            _token = data["access_token"]
-            _token_expiry = int(data.get("expiry_timestamp", time.time() + 28800))
-            return _token
-        return None
-    except Exception as e:
-        logger.error(f"[OneMap] Auth error: {e}")
-        return None
+# OneMap token via utils.get_onemap_token()
 
 
-# ── Haversine ─────────────────────────────────────────────────────────────────
-def haversine_m(lat1, lng1, lat2, lng2) -> float:
-    R = 6371000
-    phi1, phi2 = radians(lat1), radians(lat2)
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lng2 - lng1)
-    a = sin(dphi/2)**2 + cos(phi1)*cos(phi2)*sin(dlambda/2)**2
-    return R * 2 * atan2(sqrt(a), sqrt(1-a))
+# haversine_m via utils.haversine_m
 
 
 # ── MongoDB cache read/write ───────────────────────────────────────────────────
 
 def _is_cache_fresh() -> bool:
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return False
     try:
@@ -102,7 +44,7 @@ def _is_cache_fresh() -> bool:
 
 
 def _load_cache() -> dict:
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return {}
     try:
@@ -116,7 +58,7 @@ def _load_cache() -> dict:
 
 
 def _save_cache(stations: dict):
-    db = _get_db()
+    db = get_mongo_db()
     if db is None:
         return
     try:
@@ -197,7 +139,7 @@ def build_mrt_cache() -> dict:
         return _load_cache()
 
     logger.info("[MRT Cache] Building MRT cache from OneMap...")
-    token = get_token()
+    token = get_onemap_token()
     if not token:
         logger.warning("[MRT Cache] No token — using stale cache")
         return _load_cache()
