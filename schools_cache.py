@@ -67,7 +67,7 @@ def _get_schools_config(db) -> dict:
             "WHITE SANDS PRIMARY SCHOOL", "WOODGROVE PRIMARY SCHOOL",
             "XINGHUA PRIMARY SCHOOL", "YISHUN PRIMARY SCHOOL"
         ],
-        "junk_words": ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "ACE", "MORNING STAR"]
+        "junk_words": ["@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA", "AFTER SCHOOL", "AFTERSCHOOL" "ACE", "MORNING STAR", "PTE", "LTD", "KINDERGARTEN", "CHILDCARE", "STUDENT CARE", "ENRICHMENT", "TUITION"]
     }
 
     if db is None:

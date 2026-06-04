@@ -15,11 +15,8 @@ from ura import search_property, format_transactions
 from maps import get_nearby_info, format_nearby
 from storage import record_search, get_recent_searches
 from cache_ura import force_refresh, cache_status
-from cache_rental import force_refresh_rental, rental_cache_status
-from rental import get_rental_by_band, format_rental
 from onemap_mrt import build_mrt_cache
 from schools_cache import get_schools_cache
-from mrt_data import get_line_for_exit
 
 load_dotenv()
 
@@ -44,11 +41,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Latest transacted prices by unit size\n"
         "• Distance to nearest MRT\n"
         "• Primary schools within 1km\n"
-        "• Distance to nearest shopping mall\n"
-        "• Last 12 months of rental data\n\n"
+        "• Distance to nearest shopping mall\n\n"
         "Just type a development name to get started.\n"
         "Example: `Marina One Residences` or `The Garden Residences`\n\n"
-        "Other Commands:\n"
+        "Commands:\n"
+        "/search — search a property\n"
         "/list — most searched developments\n"
         "/refresh — update property data\n"
         "/help — show this message",
@@ -104,14 +101,6 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Schools refresh failed: {e}")
         lines.append("❌ Primary schools — refresh failed")
-
-    # 4. Rental data
-    rental_ok = force_refresh_rental()
-    r_status = rental_cache_status()
-    if rental_ok:
-        lines.append(f"✅ Rental data — {r_status.get('projects', '?')} projects ({', '.join(r_status.get('quarters', []))})")
-    else:
-        lines.append("❌ Rental data — refresh failed")
 
     await msg.edit_text("🔄 All caches refreshed\n\n" + "\n".join(lines))
 
@@ -288,11 +277,13 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             )
 
         # 4. Resolve address for maps (store for later use via buttons)
+        # Use street address only for geocoding — combining project+street confuses Google
+        # e.g. "THE ORIE LORONG AH SOO" geocodes incorrectly; "LORONG AH SOO" is accurate
         address = development_name
         if "error" not in ura_result:
             street = ura_result.get("street", "")
             project = ura_result.get("development", "")
-            address = f"{project} {street}".strip() if street else project or development_name
+            address = street if street else project or development_name
 
         # 5. Send prices (or the 'No transactions found' error text)
         await loading_msg.delete()
@@ -313,8 +304,10 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         # Success State: Show all amenity buttons
-        resolved = ura_result.get("development", development_name)
-        addr_key = resolved[:40] 
+        # Use street for geocoding key — more reliable than project name
+        street = ura_result.get("street", "")
+        project = ura_result.get("development", development_name)
+        addr_key = (street if street else project)[:40]
 
         keyboard = [
             [
@@ -323,9 +316,6 @@ async def handle_property_search(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{addr_key}"),
-                InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{addr_key}"),
-            ],
-            [
                 InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
             ],
         ]
@@ -358,16 +348,8 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ Could not identify property. Please search again.")
         return
 
-    # Resolve full address from URA cache using the development name key
-    from cache_ura import get_ura_data
-    all_results, _ = get_ura_data()
-    address = addr_key  # fallback
-    for project in all_results:
-        pname = project.get("project", "").upper()
-        if addr_key.upper() in pname or pname in addr_key.upper():
-            street = project.get("street", "")
-            address = f"{project.get('project', '')} {street}".strip()
-            break
+    # addr_key is the street address stored at search time — use directly
+    address = addr_key
 
     loading = await query.message.reply_text("🔍 Fetching...")
 
@@ -379,19 +361,14 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if mrts:
                 lines = ["🚇 *Nearest MRT Stations*", "─────────────────────"]
                 for i, mrt in enumerate(mrts, 1):
-                    # 2. Fetch the line data dynamically
-                    line_info = get_line_for_exit(mrt['name'])
-                    
-                    # 3. Inject it directly next to the name, and bold the name
                     lines.append(
-                        f"  {i}. *{mrt['name']}*{line_info}\n"
+                        f"  {i}. {mrt['name']}\n"
                         f"     🚶 {mrt['duration']} ({mrt['distance']})\n"
                         f"     [Walking directions]({mrt['maps_link']})"
                     )
                 text = "\n".join(lines)
             else:
-                # 4. Changed this fallback text
-                text = "🚇 No MRT stations found within the search radius"
+                text = "🚇 No MRT stations found within 2.5km"
 
         elif amenity == "schools":
             schools = maps_result.get("schools", [])
@@ -429,19 +406,6 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "\n".join(lines)
             else:
                 text = "🛍️ No shopping malls found within 2km"
-
-        elif amenity == "rental":
-            # Get sale prices from URA cache for yield calculation
-            from ura import search_property
-            ura_result = search_property(address)
-            sale_prices = {}
-            if "error" not in ura_result:
-                for band_label, txn in ura_result.get("bands", {}).items():
-                    sale_prices[band_label] = {"price": txn.get("price")}
-
-            rental_result = get_rental_by_band(address, sale_prices)
-            text = format_rental(rental_result)
-
         else:
             text = "Unknown amenity type."
 
