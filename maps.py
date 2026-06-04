@@ -360,14 +360,81 @@ def get_walking_distances_bulk(origin_lat, origin_lng, destinations) -> list:
         return [None] * len(destinations)
 
 
-def build_google_maps_link(origin_name, dest_lat, dest_lng) -> str:
+def build_google_maps_link(origin_name, dest_lat, dest_lng, travel_mode: str = "walking") -> str:
     encoded = quote(f"{origin_name}, Singapore")
     return (
         f"https://www.google.com/maps/dir/?api=1"
         f"&origin={encoded}"
         f"&destination={dest_lat},{dest_lng}"
-        f"&travelmode=walking"
+        f"&travelmode={travel_mode}"
     )
+
+
+def get_transit_distances_bulk(origin_lat, origin_lng, destinations) -> list:
+    """Get public transit distances from one origin to multiple destinations."""
+    if not destinations:
+        return []
+    dest_str = "|".join([f"{d['lat']},{d['lng']}" for d in destinations])
+    params = {
+        "origins": f"{origin_lat},{origin_lng}",
+        "destinations": dest_str,
+        "mode": "transit",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    try:
+        r = requests.get(DISTANCE_URL, params=params, timeout=10)
+        data = r.json()
+        if data["status"] == "OK":
+            results = []
+            for el in data["rows"][0]["elements"]:
+                if el["status"] == "OK":
+                    results.append({
+                        "distance_text": el["distance"]["text"],
+                        "distance_m": el["distance"]["value"],
+                        "duration_text": el["duration"]["text"],
+                    })
+                else:
+                    results.append(None)
+            return results
+        return [None] * len(destinations)
+    except Exception as e:
+        print(f"[Maps] Transit distance fetch failed: {e}")
+        return [None] * len(destinations)
+
+
+# ── Transit enrichment ────────────────────────────────────────────────────────
+
+WALK_THRESHOLD_M = 1000  # above this, show transit alternative
+
+def _enrich_with_transit(origin_lat, origin_lng, origin_name, results: list) -> list:
+    """
+    For any result whose walking distance exceeds WALK_THRESHOLD_M, fetch
+    the transit time and switch the maps link to transit mode.
+
+    Mutates results in-place and returns them.
+    Each result dict must have: distance_m, dest_lat, dest_lng, maps_link.
+    """
+    far_indices = [i for i, r in enumerate(results) if r.get("distance_m", 0) > WALK_THRESHOLD_M]
+    if not far_indices:
+        return results
+
+    far_dests = [{"lat": results[i]["dest_lat"], "lng": results[i]["dest_lng"]} for i in far_indices]
+    transit_data = get_transit_distances_bulk(origin_lat, origin_lng, far_dests)
+
+    for list_idx, result_idx in enumerate(far_indices):
+        td = transit_data[list_idx] if list_idx < len(transit_data) else None
+        if td:
+            results[result_idx]["transit_duration"] = td["duration_text"]
+            results[result_idx]["transit_distance"] = td["distance_text"]
+        # Switch the maps link to transit mode regardless (walking > 1km = take transit)
+        results[result_idx]["maps_link"] = build_google_maps_link(
+            origin_name,
+            results[result_idx]["dest_lat"],
+            results[result_idx]["dest_lng"],
+            travel_mode="transit",
+        )
+
+    return results
 
 
 # ── Primary schools via cached OneMap data ───────────────────────────────────
@@ -391,7 +458,6 @@ def get_nearby_info(address: str) -> dict:
 
     mrt_results = []
     if mrt_candidates:
-        # Get walking distances for all candidates in one bulk call
         dest_list = [{"lat": m["dest_lat"], "lng": m["dest_lng"]} for m in mrt_candidates]
         distances = get_walking_distances_bulk(lat, lng, dest_list)
 
@@ -401,8 +467,13 @@ def get_nearby_info(address: str) -> dict:
                     "name": f"{station['name']} MRT{station['exit_label']}",
                     "distance": dist["distance_text"],
                     "duration": dist["duration_text"],
+                    "distance_m": dist["distance_m"],
+                    "dest_lat": station["dest_lat"],
+                    "dest_lng": station["dest_lng"],
                     "maps_link": build_google_maps_link(address, station["dest_lat"], station["dest_lng"]),
                 })
+
+        mrt_results = _enrich_with_transit(lat, lng, address, mrt_results)
 
     # ── Mall via Google Places ────────────────────────────────────────────────
     mall_results = []
@@ -419,8 +490,12 @@ def get_nearby_info(address: str) -> dict:
                 "name": item["name"],
                 "distance": item["distance_text"],
                 "duration": item["duration_text"],
+                "distance_m": item["distance_m"],
+                "dest_lat": item["lat"],
+                "dest_lng": item["lng"],
                 "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
             })
+        mall_results = _enrich_with_transit(lat, lng, address, mall_results)
 
     # ── Primary schools via OneMap ───────────────────────────────────────────
 # ── Primary schools via OneMap ───────────────────────────────────────────
@@ -433,11 +508,15 @@ def get_nearby_info(address: str) -> dict:
             if dist:
                 school_results.append({
                     "name": school["name"],
-                    "distance": dist["distance_text"], # Google's walking distance
-                    "duration": dist["duration_text"], # Google's walking duration
+                    "distance": dist["distance_text"],
+                    "duration": dist["duration_text"],
+                    "distance_m": dist["distance_m"],
+                    "dest_lat": school["lat"],
+                    "dest_lng": school["lng"],
                     "maps_link": build_google_maps_link(address, school["lat"], school["lng"]),
-                    "dist": school["dist"]
+                    "dist": school["dist"],
                 })
+        school_results = _enrich_with_transit(lat, lng, address, school_results)
 
     # ── Supermarkets via Google Places ──────────────────────────────────────────
     supermarket_results = []
@@ -454,8 +533,12 @@ def get_nearby_info(address: str) -> dict:
                 "name": item["name"],
                 "distance": item["distance_text"],
                 "duration": item["duration_text"],
+                "distance_m": item["distance_m"],
+                "dest_lat": item["lat"],
+                "dest_lng": item["lng"],
                 "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
             })
+        supermarket_results = _enrich_with_transit(lat, lng, address, supermarket_results)
 
     return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results}
 

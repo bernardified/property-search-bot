@@ -47,7 +47,7 @@ def _get_schools_config(db) -> dict:
             "@", "CARE", "NASCANS", "COMMIT", "FORMER", "YMCA",
             "AFTER SCHOOL", "AFTERSCHOOL", "ACE", "MORNING STAR",
             "PTE", "LTD", "KINDERGARTEN", "CHILDCARE", "STUDENT CARE",
-            "ENRICHMENT", "TUITION",
+            "ENRICHMENT", "TUITION", "LEARNING", "STUDIO",
         ]
     }
 
@@ -134,11 +134,19 @@ def _is_valid_primary_school(name: str, junk_words: list) -> bool:
     Return True only if this is clearly a primary school entry.
 
     Junk check runs FIRST — a name containing both 'PRIMARY SCHOOL' and a
-    junk word (e.g. 'Amp-Mercu Student Care @ Tampines Primary School')
-    must be rejected before the 'PRIMARY SCHOOL' check can accept it.
+    junk word (e.g. 'Student Care Centre @ Tampines Primary School') must be
+    rejected before the keyword check can accept it.
+
+    Bracket pattern rejected separately — 'PRIMARY SCHOOL' inside brackets
+    means the entry is a tenant AT a school, not the school itself
+    (e.g. 'Learning Studio (Zhonghua Primary School)').
     """
     name_upper = name.upper()
     if any(j in name_upper for j in junk_words):
+        return False
+    # Reject entries where PRIMARY SCHOOL only appears inside brackets
+    import re
+    if re.search(r'\([^)]*PRIMARY SCHOOL[^)]*\)', name_upper):
         return False
     if "PRIMARY SCHOOL" in name_upper or "PRI SCH" in name_upper:
         return True
@@ -224,17 +232,15 @@ def _fetch_all_schools(token: str) -> list:
             )
             data = r.json()
             results = data.get("results", [])
-            
+
             if results:
                 valid_results = [
                     item for item in results
                     if not any(j in item.get("SEARCHVAL", "").upper() for j in junk_words)
                 ]
-
                 if valid_results:
                     best_match = min(valid_results, key=lambda x: len(x.get("SEARCHVAL", "")))
                     final_name = best_match.get("SEARCHVAL", "").title()
-                    
                     if not any(school_name.lower() in s['name'].lower() for s in schools):
                         schools.append({
                             "name": final_name,
@@ -289,5 +295,6 @@ def find_nearest_primary_schools(origin_lat: float, origin_lng: float, top_n: in
         if dist <= MAX_RADIUS_M:
             nearby.append({**school, "dist": dist})
             
+    # Sort by straight-line distance
     nearby.sort(key=lambda x: x["dist"])
     return nearby[:top_n]

@@ -60,10 +60,16 @@ def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "")
         return empty_msg
     lines = [title, "─────────────────────"]
     for i, item in enumerate(items, 1):
+        walk_line = f"     🚶 {item['duration']} ({item['distance']})"
+        if item.get("transit_duration"):
+            transit_line = f"\n     🚌 {item['transit_duration']} ({item['transit_distance']}) by transit"
+        else:
+            transit_line = ""
+        link_label = "Transit directions" if item.get("transit_duration") else "Walking directions"
         lines.append(
             f"  {i}. {item['name']}\n"
-            f"     🚶 {item['duration']} ({item['distance']})\n"
-            f"     [Walking directions]({item['maps_link']})"
+            f"{walk_line}{transit_line}\n"
+            f"     [{link_label}]({item['maps_link']})"
         )
     if note:
         lines += ["", note]
@@ -307,10 +313,17 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"{int(s['dist'])}m" if s["dist"] < 1000
                             else f"{s['dist']/1000:.1f}km"
                         )
+                        walk_line = f"     🚶 {s['duration']} walk ({s['distance']})"
+                        if s.get("transit_duration"):
+                            transit_line = f"\n     🚌 {s['transit_duration']} ({s['transit_distance']}) by transit"
+                            link_label = "Transit directions"
+                        else:
+                            transit_line = ""
+                            link_label = "Walking directions"
                         lines.append(
                             f"  {i}. {s['name']} _(MOE: {moe_dist})_\n"
-                            f"     🚶 {s['duration']} walk ({s['distance']})\n"
-                            f"     [Walking directions]({s['maps_link']})"
+                            f"{walk_line}{transit_line}\n"
+                            f"     [{link_label}]({s['maps_link']})"
                         )
                     lines += [
                         "",
