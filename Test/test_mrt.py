@@ -1,8 +1,10 @@
-import os, requests
+import os, sys, requests
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
-from onemap_mrt import find_nearest_mrts
+from cache.onemap_mrt import find_nearest_mrts
 
 # Chuan Park coordinates
 results = find_nearest_mrts(1.3519273, 103.8640435, top_n=3)

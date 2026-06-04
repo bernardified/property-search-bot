@@ -1,7 +1,7 @@
 import difflib
 import logging
 from datetime import datetime
-from cache_rental import get_rental_data
+from cache.cache_rental import get_rental_data
 from utils import SIZE_BANDS, get_band, parse_sqft_range, parse_mmyy_date, format_mmyy_date
 
 logger = logging.getLogger(__name__)

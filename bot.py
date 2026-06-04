@@ -14,11 +14,11 @@ from telegram.ext import (
 from ura import search_property, format_transactions
 from maps import get_nearby_info
 from storage import record_search, get_recent_searches
-from cache_ura import force_refresh, cache_status
-from cache_rental import force_refresh_rental, rental_cache_status
+from cache.cache_ura import force_refresh, cache_status
+from cache.cache_rental import force_refresh_rental, rental_cache_status
 from rental import get_rental_by_band, format_rental
-from onemap_mrt import build_mrt_cache
-from schools_cache import get_schools_cache
+from cache.onemap_mrt import build_mrt_cache
+from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection
 
 load_dotenv()
@@ -74,22 +74,6 @@ def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "")
     if note:
         lines += ["", note]
     return "\n".join(lines)
-
-
-def resolve_street_from_ura(addr_key: str) -> str:
-    """
-    Resolve street address from URA cache using development name key.
-    Returns street if found, falls back to addr_key.
-    Uses street only — project+street combination confuses Google geocoder.
-    """
-    from cache_ura import get_ura_data
-    all_results, _ = get_ura_data()
-    for project in all_results:
-        pname = project.get("project", "").upper()
-        if addr_key.upper() in pname or pname in addr_key.upper():
-            street = project.get("street", "")
-            return street if street else project.get("project", addr_key)
-    return addr_key
 
 
 def get_user_id(msg) -> int:
