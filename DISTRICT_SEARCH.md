@@ -11,11 +11,29 @@ Users can browse Singapore's 28 districts to discover the most-transacted develo
    - 🔍 **Search by Name** — Search a specific development (existing flow)
    - 📍 **Browse by District** — Browse top developments by area (new)
 3. If "Browse by District" is selected:
-   - Bot shows a grid of district buttons labelled with estate names (`D1 · Raffles Place`, `D19 · Hougang`, …), 2 per row
+   - Bot shows a grid of district buttons labelled with 2 estate names (`D1 · Raffles Place / Marina`, `D19 · Hougang / Serangoon`, …), 2 per row
    - User taps a district
    - Bot shows the top 10 developments in that district, ranked by transaction count (last 6 months)
-   - Each development shows: name, transaction count, and average PSF
-4. User taps a development to view full transaction details (same as name-based search)
+   - Each development shows: name (as a tappable link), transaction count, and average PSF
+4. User taps a development **name** to view full transaction details (same as name-based search)
+
+### Tapping a development (deep links)
+Telegram has no way to make in-message text trigger a bot action directly, so
+each development name is rendered as a **deep link**:
+`https://t.me/<bot_username>?start=d<district>r<rank>` (e.g. `d2r4`).
+
+- The message is sent with **HTML** parse mode (robust for names containing
+  `@`, `&`, etc. — e.g. `SKYSUITES@ANSON`), each name wrapped in `<a href=…>`.
+- Tapping sends `/start d2r4`; the `start` handler parses the payload,
+  re-fetches the district's ranked list, and calls `handle_property_search`
+  for the matching development — same result as a name search.
+- The payload is just district+rank (short, safe charset), so no property-name
+  encoding is needed. Out-of-range payloads fall through to the welcome screen.
+- Earlier this was a column of 10 full-width inline buttons; that was replaced
+  with links because the button stack was too clunky. Only a single
+  **🔍 New Search** button remains below the list.
+- **Caveat:** tapping a deep link to the same bot can show a brief "START"
+  confirmation / re-focus on some clients before loading the property.
 
 ### Data Source
 - Uses URA transaction data (already cached in MongoDB) — **no external geocoding required**
@@ -29,16 +47,16 @@ Users can browse Singapore's 28 districts to discover the most-transacted develo
 ### New File
 - **`district_search.py`** — Core district search logic
   - `get_top_developments_by_district(district, limit=10)` — Top N developments by resale/sub-sale transaction count over the last 6 months
-  - `format_district_results(district, developments)` — Format results for Telegram, with estate name in the header
-  - `DISTRICT_NAMES` / `district_short_name()` / `district_full_name()` — Estate-name labels (single source of truth)
+  - `format_district_results(district, developments, bot_username=None)` — Format results as **HTML**; when `bot_username` is given, each name becomes a `t.me/<bot>?start=d<district>r<rank>` deep link
+  - `DISTRICT_NAMES` / `district_full_name()` / `district_button_label()` — Estate-name labels (single source of truth); `district_button_label()` trims to 2 towns for buttons, `district_full_name()` returns all towns for the header
   - `NUM_DISTRICTS = 28`
 
 ### Modified File
 - **`bot.py`**
-  - `/start` now shows the two search-mode buttons directly (no need to type `/search` first)
+  - `/start` now shows the two search-mode buttons directly (no need to type `/search` first), **and** handles the `d<district>r<rank>` deep-link payload to open a property
   - Shared keyboard helpers: `build_search_mode_keyboard()`, `build_district_keyboard()`
   - `search_mode_callback()` — Handle name vs. district selection
-  - `district_callback()` — Handle district selection and display results
+  - `district_callback()` — Handle district selection; sends the HTML list with name deep links + a single "New Search" button
   - Registered both callbacks globally so they work from `/start` and `/search`
 
 ## District Numbering
@@ -61,19 +79,23 @@ Bot: 🏠 Singapore Private Property Search …
 
 User: [clicks Browse by District]
 Bot: 📍 Select an area:
-     [D1 · Raffles Place] [D2 · Tanjong Pagar]
-     [D3 · Tiong Bahru]   [D4 · Harbourfront]
+     [D1 · Raffles Place / Marina] [D2 · Tanjong Pagar / Anson]
+     [D3 · Tiong Bahru / Queenstown] [D4 · Harbourfront / Sentosa]
      ...
-     [D19 · Hougang]      [D20 · Ang Mo Kio]
+     [D19 · Hougang / Serangoon]   [D20 · Ang Mo Kio / Bishan]
      ...
 
-User: [clicks D19 · Hougang]
+User: [clicks D19 · Hougang / Serangoon]
 Bot: 📍 District 19 — Hougang / Serangoon / Punggol
-     Top developments · Last 6 months
-     1. RIVERCOVE RESIDENCES — 47 txns · S$1,634 psf
-     2. RIVERFRONT RESIDENCES — 42 txns · S$1,732 psf
-     3. THE FLORENCE RESIDENCES — 42 txns · S$1,881 psf
+     Top developments · Last 6 months · tap a name for details
+     1. RIVERCOVE RESIDENCES   ← tappable link → 47 txns · S$1,634 psf
+     2. RIVERFRONT RESIDENCES  ← tappable link → 42 txns · S$1,732 psf
+     3. THE FLORENCE RESIDENCES ← tappable link → 42 txns · S$1,881 psf
      ...
+     [🔍 New Search]
+
+User: [taps "RIVERFRONT RESIDENCES"]  (deep link /start d19r2)
+Bot: [shows full transaction details + amenity buttons]
 ```
 
 ## Notes
