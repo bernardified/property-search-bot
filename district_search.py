@@ -20,46 +20,49 @@ NUM_DISTRICTS = 28
 # the numbering. The first segment (before " / ") is used as the compact
 # button label; the full string is used in the results header.
 DISTRICT_NAMES: dict[int, str] = {
-    1:  "Raffles Place / Marina",
-    2:  "Tanjong Pagar / Anson",
-    3:  "Tiong Bahru / Queenstown",
-    4:  "Harbourfront / Sentosa",
-    5:  "Clementi / Pasir Panjang",
-    6:  "City Hall / Clarke Quay",
-    7:  "Bugis / Beach Road",
-    8:  "Farrer Park / Little India",
-    9:  "Orchard / River Valley",
-    10: "Bukit Timah / Holland",
-    11: "Novena / Newton",
-    12: "Toa Payoh / Balestier",
-    13: "Macpherson / Potong Pasir",
-    14: "Geylang / Paya Lebar",
-    15: "Katong / Marine Parade",
-    16: "Bedok / Upper East Coast",
-    17: "Changi / Loyang",
-    18: "Tampines / Pasir Ris",
+    1:  "Raffles Place / Marina / Cecil",
+    2:  "Tanjong Pagar / Anson / Shenton Way",
+    3:  "Tiong Bahru / Queenstown / Redhill",
+    4:  "Harbourfront / Sentosa / Telok Blangah",
+    5:  "Clementi / Pasir Panjang / West Coast",
+    6:  "City Hall / Clarke Quay / High Street",
+    7:  "Bugis / Beach Road / Golden Mile",
+    8:  "Farrer Park / Little India / Lavender",
+    9:  "Orchard / River Valley / Cairnhill",
+    10: "Bukit Timah / Holland / Tanglin",
+    11: "Novena / Newton / Thomson",
+    12: "Toa Payoh / Balestier / Boon Keng",
+    13: "Macpherson / Potong Pasir / Braddell",
+    14: "Geylang / Paya Lebar / Eunos",
+    15: "Katong / Marine Parade / Joo Chiat",
+    16: "Bedok / Upper East Coast / Eastwood",
+    17: "Changi / Loyang / Flora",
+    18: "Tampines / Pasir Ris / Simei",
     19: "Hougang / Serangoon / Punggol",
-    20: "Ang Mo Kio / Bishan",
-    21: "Upper Bukit Timah / Clementi Park",
-    22: "Jurong / Boon Lay",
-    23: "Bukit Batok / Choa Chu Kang",
-    24: "Tengah / Lim Chu Kang",
-    25: "Woodlands / Kranji",
-    26: "Upper Thomson / Mandai",
-    27: "Yishun / Sembawang",
-    28: "Seletar / Yio Chu Kang",
+    20: "Ang Mo Kio / Bishan / Thomson",
+    21: "Upper Bukit Timah / Clementi Park / Ulu Pandan",
+    22: "Jurong / Boon Lay / Tuas",
+    23: "Bukit Batok / Bukit Panjang / Choa Chu Kang",
+    24: "Lim Chu Kang / Tengah / Kranji",
+    25: "Woodlands / Admiralty / Marsiling",
+    26: "Upper Thomson / Mandai / Springleaf",
+    27: "Yishun / Sembawang / Canberra",
+    28: "Seletar / Yio Chu Kang / Fernvale",
 }
-
-
-def district_short_name(district: int) -> str:
-    """Compact label for buttons, e.g. 19 -> 'Hougang'."""
-    full = DISTRICT_NAMES.get(district, "")
-    return full.split(" / ")[0] if full else ""
 
 
 def district_full_name(district: int) -> str:
     """Full estate name for headers, e.g. 19 -> 'Hougang / Serangoon / Punggol'."""
     return DISTRICT_NAMES.get(district, "")
+
+
+def district_button_label(district: int) -> str:
+    """Compact label for buttons — first 2 towns so two fit per row.
+
+    e.g. 19 -> 'Hougang / Serangoon'. The full set of towns is shown in the
+    results header once a district is selected.
+    """
+    return " / ".join(DISTRICT_NAMES.get(district, "").split(" / ")[:2])
 
 
 def _normalize_district(value) -> int | None:
@@ -144,28 +147,42 @@ def get_top_developments_by_district(district: int, limit: int = 10) -> list:
     return results[:limit]
 
 
-def format_district_results(district: int, developments: list) -> str:
-    """Format the top developments for a district into a Telegram message."""
+def _html_escape(text: str) -> str:
+    """Escape the three characters that are special in Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_district_results(district: int, developments: list, bot_username: str | None = None) -> str:
+    """Format the top developments for a district into a Telegram (HTML) message.
+
+    If ``bot_username`` is provided, each development name becomes a tappable
+    deep link (``t.me/<bot>?start=d<district>r<rank>``) that pulls up that
+    property's transactions. Without it, names render as plain bold text.
+    """
     name = district_full_name(district)
-    title = f"District {district}" + (f" — {name}" if name else "")
+    title = _html_escape(f"District {district}" + (f" — {name}" if name else ""))
 
     if not developments:
         return (
-            f"📍 *{title}*\n\n"
+            f"📍 <b>{title}</b>\n\n"
             "No transactions found in the last 6 months.\n"
-            "_This district may have limited private residential activity._"
+            "<i>This district may have limited private residential activity.</i>"
         )
 
     lines = [
-        f"📍 *{title}*",
-        "_Top developments · Last 6 months_",
+        f"📍 <b>{title}</b>",
+        "<i>Top developments · Last 6 months · tap a name for details</i>",
         "─────────────────────────────────────────",
     ]
-    for i, dev in enumerate(developments, 1):
+    for rank, dev in enumerate(developments, 1):
         count = dev["transaction_count"]
         psf_str = f"S${dev['avg_psf']:,} psf" if dev["avg_psf"] else "N/A"
+        name_html = _html_escape(dev["project"])
+        if bot_username:
+            link = f"https://t.me/{bot_username}?start=d{district}r{rank}"
+            name_html = f'<a href="{link}">{name_html}</a>'
         lines.append(
-            f"  {i}. *{dev['project']}*\n"
+            f"  {rank}. <b>{name_html}</b>\n"
             f"     📊 {count} txn{'s' if count != 1 else ''} · {psf_str}"
         )
     return "\n".join(lines)

@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,7 +24,8 @@ from utils import get_mongo_db, clear_mongo_collection
 from district_search import (
     get_top_developments_by_district,
     format_district_results,
-    district_short_name,
+    district_full_name,
+    district_button_label,
     NUM_DISTRICTS,
 )
 
@@ -52,13 +54,17 @@ def build_search_mode_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_district_keyboard() -> InlineKeyboardMarkup:
-    """Grid of district buttons labelled with their estate name, 2 per row."""
+    """Grid of district buttons, 2 per row, labelled with 2 estate names.
+
+    Buttons stay compact (2 towns) so two fit per row; the full set of towns
+    is shown in the results header once a district is selected.
+    """
     keyboard = []
     for i in range(1, NUM_DISTRICTS + 1):
         if (i - 1) % 2 == 0:
             keyboard.append([])
         keyboard[-1].append(
-            InlineKeyboardButton(f"D{i} · {district_short_name(i)}", callback_data=f"district:{i}")
+            InlineKeyboardButton(f"D{i} · {district_button_label(i)}", callback_data=f"district:{i}")
         )
     return InlineKeyboardMarkup(keyboard)
 
@@ -114,6 +120,16 @@ def get_username(msg) -> str:
 # ── Command Handlers ──────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Deep link from a district list: /start d<district>r<rank> → open that property
+    if context.args:
+        m = re.fullmatch(r"d(\d+)r(\d+)", context.args[0].strip())
+        if m:
+            district, rank = int(m.group(1)), int(m.group(2))
+            developments = get_top_developments_by_district(district, limit=10)
+            if 1 <= rank <= len(developments):
+                await handle_property_search(update, context, developments[rank - 1]["project"])
+                return
+
     await update.message.reply_text(
         "🏠 *Singapore Private Property Search*\n\n"
         "Get instant data on private residential developments:\n"
@@ -317,21 +333,21 @@ async def district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loading = await query.message.reply_text(f"🔍 Loading developments in District {district}...")
 
         developments = get_top_developments_by_district(district, limit=10)
-        text = format_district_results(district, developments)
+        text = format_district_results(district, developments, bot_username=context.bot.username)
 
         await loading.delete()
-        await query.message.reply_text(text, parse_mode="Markdown")
 
+        reply_markup = None
         if developments:
-            keyboard = [
-                [InlineKeyboardButton(dev["project"][:40], callback_data=f"search:{dev['project']}")]
-                for dev in developments
-            ]
-            keyboard.append([InlineKeyboardButton("🔍 New Search", callback_data="new_search")])
-            await query.message.reply_text(
-                "Tap a development to see full details:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            reply_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 New Search", callback_data="new_search")]
+            ])
+        await query.message.reply_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
 
     except Exception as e:
         logger.error(f"District callback failed: {e}", exc_info=True)
