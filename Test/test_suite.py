@@ -1,6 +1,6 @@
 """
 Property Bot Test Suite
-Run with: python test_suite.py
+Run with: python -m Test.test_suite or python Test/test_suite.py
 Tests all critical functions without hitting live APIs where possible.
 """
 import os
@@ -10,6 +10,9 @@ import time
 import unittest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from mrt_data import get_line_for_exit
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -127,10 +130,12 @@ class TestURAMatching(unittest.TestCase):
             {"project": "CHUAN PARK", "street": "LORONG CHUAN", "transaction": []},
         ]
 
-    def _match(self, search_name):
-        """Run match_score logic against fake projects and return best match."""
+    def _score_all(self, search_name, projects=None):
+        """Return sorted list of (score, project) for all projects above 0.6."""
         import difflib
+        from ura import SEARCH_STOPWORDS
         search = search_name.upper().strip()
+        pool = projects if projects is not None else self.fake_projects
 
         def match_score(pn):
             pn = pn.upper().strip()
@@ -138,15 +143,20 @@ class TestURAMatching(unittest.TestCase):
             if search in pn: return 0.95
             if pn in search:
                 return 0.7 + (0.2 * len(pn) / len(search))
-            words = [w for w in search.split() if len(w) > 2]
+            words = [w for w in search.split() if len(w) > 2 and w not in SEARCH_STOPWORDS]
             if words:
                 found = sum(1 for w in words if w in pn)
                 if found == len(words): return 0.85
                 if found > 0: return 0.6 + (0.2 * found / len(words))
             return difflib.SequenceMatcher(None, search, pn).ratio()
 
-        scored = [(match_score(p["project"]), p) for p in self.fake_projects]
+        scored = [(match_score(p["project"]), p) for p in pool if match_score(p["project"]) >= 0.6]
         scored.sort(key=lambda x: x[0], reverse=True)
+        return scored
+
+    def _match(self, search_name):
+        """Run match_score logic against fake projects and return best match."""
+        scored = self._score_all(search_name)
         return scored[0][1]["project"] if scored else None
 
     def test_exact_match(self):
@@ -173,6 +183,36 @@ class TestURAMatching(unittest.TestCase):
 
     def test_chuan_park(self):
         self.assertEqual(self._match("chuan park"), "CHUAN PARK")
+
+    def test_highpark_ambiguity(self):
+        """
+        Searching 'highpark' against two projects whose names both contain 'highpark'
+        should produce ≥2 candidates within AMBIGUITY_THRESHOLD of each other.
+        'HIGHPARK RESIDENCES' and 'SCOTTS HIGHPARK' are chosen because 'highpark'
+        is a literal substring of both, so the scoring algorithm returns 0.95 for
+        each — a genuine tie that the ambiguity check must surface to the user.
+        (Note: 'HIGH PARK RESIDENCES' with a space would not trigger this because
+        'highpark' is not a substring of it; that requires a separate normalization path.)
+        """
+        from ura import AMBIGUITY_THRESHOLD
+        highpark_projects = [
+            {"project": "HIGHPARK RESIDENCES", "street": "FERNVALE ROAD", "transaction": []},
+            {"project": "SCOTTS HIGHPARK", "street": "SCOTTS ROAD", "transaction": []},
+        ]
+        scored = self._score_all("highpark", projects=highpark_projects)
+        self.assertGreaterEqual(len(scored), 2, "Expected at least 2 scored candidates")
+
+        best_score = scored[0][0]
+        close = [p for s, p in scored if s >= best_score - AMBIGUITY_THRESHOLD]
+        self.assertGreaterEqual(
+            len(close), 2,
+            f"Expected ≥2 projects within {AMBIGUITY_THRESHOLD} of best score {best_score:.2f}, "
+            f"got {len(close)}: {[(s, p['project']) for s, p in scored]}"
+        )
+        # Both specific projects must be in the close set
+        close_names = {p["project"] for p in close}
+        self.assertIn("HIGHPARK RESIDENCES", close_names)
+        self.assertIn("SCOTTS HIGHPARK", close_names)
 
 
 # ══════════════════════════════════════════════════════
@@ -356,7 +396,7 @@ class TestCacheFreshness(unittest.TestCase):
 
     def test_quarter_generation(self):
         """Last 4 quarters should always contain 4 valid entries in YYqQ format."""
-        from cache_rental import get_last_4_quarters
+        from cache.cache_rental import get_last_4_quarters
         import re
         quarters = get_last_4_quarters()
         self.assertEqual(len(quarters), 4)

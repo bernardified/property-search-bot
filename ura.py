@@ -2,12 +2,34 @@ import os
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
-from cache_ura import get_ura_data
+from cache.cache_ura import get_ura_data
 from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date, format_mmyy_date
 
 load_dotenv()
 
 URA_API_KEY = os.getenv("URA_API_KEY")
+
+AMBIGUITY_THRESHOLD = 0.15   # if 2+ projects score within this of best, surface all for user to choose
+MIN_AMBIGUITY_SCORE = 0.85   # only run ambiguity check when best match is already strong; below this, weak matches produce too many false positives
+
+# Words stripped from the user's query before word-match scoring.
+# These are generic property-type suffixes and articles that appear in hundreds of
+# projects and carry no discriminative signal — keeping them would inflate the score
+# of every project sharing the suffix (e.g. "highpark residences" scoring 0.70 for
+# all 289 "*RESIDENCES" projects).
+# NOT included: location words (PARK, GARDENS, HILL, VIEW, COURT, ESTATE) because
+# they ARE the key identifier in names like "CHUAN PARK" or "HORIZON GARDENS".
+SEARCH_STOPWORDS = frozenset({
+    "RESIDENCES", "RESIDENCE",
+    "APARTMENTS", "APARTMENT",
+    "RESIDENTIAL",
+    "CONDOMINIUM", "CONDOMINIUMS",
+    "SUITES",
+    "MANSIONS", "MANSION",
+    "VILLAS", "VILLA",
+    "LODGE",
+    "THE",
+})
 
 
 # Shared utilities imported from utils.py
@@ -78,8 +100,8 @@ def search_property(development_name: str) -> dict:
             length_ratio = len(pn) / len(sn)
             return 0.7 + (0.2 * length_ratio)  # 0.7–0.9 range
 
-        # All search words found in project name
-        search_words = [w for w in sn.split() if len(w) > 2]
+        # All search words found in project name (stopwords excluded)
+        search_words = [w for w in sn.split() if len(w) > 2 and w not in SEARCH_STOPWORDS]
         if search_words:
             found = sum(1 for w in search_words if w in pn)
             if found == len(search_words):
@@ -106,6 +128,20 @@ def search_property(development_name: str) -> dict:
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score = scored[0][0]
 
+    # Ambiguity check: multiple strong projects score closely and no exact match.
+    # MIN_AMBIGUITY_SCORE guard prevents firing on weak/partial matches (e.g.
+    # "highpark residences" scoring 0.78 against hundreds of "RESIDENCES" projects).
+    if MIN_AMBIGUITY_SCORE <= best_score < 1.0:
+        close_candidates = [p for s, p in scored if s >= best_score - AMBIGUITY_THRESHOLD]
+        if len(close_candidates) >= 2:
+            return {
+                "ambiguous": True,
+                "candidates": [
+                    {"project": p.get("project", ""), "street": p.get("street", "")}
+                    for p in close_candidates[:5]
+                ],
+            }
+
     if best_score >= 0.9:
         # Take all projects at the top score (handles multi-block developments)
         top_projects = [p for s, p in scored if s >= 0.9]
@@ -129,7 +165,7 @@ def search_property(development_name: str) -> dict:
     # e.g. "srgn" matched "SERANGOON" — no warning needed, result is clearly correct
     # e.g. "residnces" matched "RESIDENCES" — warn because it was a typo correction
     matched_project_name = top_projects[0].get("project", "").upper()
-    search_words = [w for w in search_name.split() if len(w) > 2]
+    search_words = [w for w in search_name.split() if len(w) > 2 and w not in SEARCH_STOPWORDS]
     all_words_found = all(w in matched_project_name for w in search_words)
     fuzzy_name = matched_project_name if (best_score < 0.9 and not all_words_found) else None
 
