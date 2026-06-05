@@ -377,7 +377,23 @@ async def handle_property_search(
         # 1. URA transaction data
         ura_result = search_property(development_name)
 
-        # 2. Handle fuzzy match — ask user to confirm
+        # 2a. Handle ambiguous result — multiple close matches, let user pick
+        if ura_result.get("ambiguous"):
+            candidates = ura_result["candidates"]
+            keyboard = [
+                [InlineKeyboardButton(c["project"].title(), callback_data=f"search:{c['project']}")]
+                for c in candidates
+            ]
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="fuzzy_cancel")])
+            await loading_msg.delete()
+            await msg.reply_text(
+                "🔍 *Multiple matches found* — which one did you mean?",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # 2b. Handle fuzzy match — ask user to confirm
         if "error" not in ura_result and ura_result.get("fuzzy_match"):
             matched_name = ura_result["fuzzy_match"]
             alternatives = ura_result.get("alternatives", [])
