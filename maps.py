@@ -300,7 +300,7 @@ def _enrich_with_transit(origin_lat, origin_lng, origin_name, results: list) -> 
 
 def find_nearest_primary_schools(lat: float, lng: float) -> list:
     """Find nearest primary schools using MongoDB-cached OneMap data."""
-    from schools_cache import find_nearest_primary_schools as cached_schools
+    from cache.schools_cache import find_nearest_primary_schools as cached_schools
     return cached_schools(lat, lng, top_n=5)
 
 
