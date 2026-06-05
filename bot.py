@@ -20,6 +20,12 @@ from rental import get_rental_by_band, format_rental
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection
+from district_search import (
+    get_top_developments_by_district,
+    format_district_results,
+    district_short_name,
+    NUM_DISTRICTS,
+)
 
 load_dotenv()
 
@@ -32,9 +38,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WAITING_FOR_PROPERTY_NAME = 1
+WAITING_FOR_DISTRICT = 2
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def build_search_mode_keyboard() -> InlineKeyboardMarkup:
+    """The two top-level search options shown by /start and /search."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Search by Name", callback_data="search_mode:name")],
+        [InlineKeyboardButton("📍 Browse by District", callback_data="search_mode:district")],
+    ])
+
+
+def build_district_keyboard() -> InlineKeyboardMarkup:
+    """Grid of district buttons labelled with their estate name, 2 per row."""
+    keyboard = []
+    for i in range(1, NUM_DISTRICTS + 1):
+        if (i - 1) % 2 == 0:
+            keyboard.append([])
+        keyboard[-1].append(
+            InlineKeyboardButton(f"D{i} · {district_short_name(i)}", callback_data=f"district:{i}")
+        )
+    return InlineKeyboardMarkup(keyboard)
+
 
 def build_amenity_keyboard(addr_key: str) -> InlineKeyboardMarkup:
     """Build the standard amenity button keyboard."""
@@ -89,20 +116,24 @@ def get_username(msg) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏠 *Singapore Private Property Search*\n\n"
-        "Search for any non-landed private residential development to get:\n"
+        "Get instant data on private residential developments:\n"
         "• Latest transacted prices by unit size\n"
         "• Distance to nearest MRT\n"
         "• Primary schools within 2km\n"
         "• Distance to nearest shopping mall\n"
         "• Nearest supermarkets\n"
         "• Rental prices & gross yield\n\n"
-        "Just type a development name to get started.\n"
-        "Example: `Marina One Residences` or `The Garden Residences`\n\n"
+        "*Two ways to search:*\n"
+        "🔍 *By Name* — Search a specific development\n"
+        "📍 *By District* — Browse top developments by area\n\n"
+        "Pick an option below to get started.\n\n"
         "Commands:\n"
+        "/search — find a property\n"
         "/list — most searched developments\n"
         "/refresh — update property data\n"
         "/help — show this message",
         parse_mode="Markdown",
+        reply_markup=build_search_mode_keyboard(),
     )
 
 
@@ -179,7 +210,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         await handle_property_search(update, context, " ".join(context.args))
         return ConversationHandler.END
-    await update.message.reply_text("🏠 Please enter the property or development name:")
+
+    await update.message.reply_text(
+        "🏠 How would you like to search?",
+        reply_markup=build_search_mode_keyboard(),
+    )
     return WAITING_FOR_PROPERTY_NAME
 
 
@@ -241,7 +276,66 @@ async def new_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text("🏠 Please enter the property or development name:")
+    keyboard = [
+        [InlineKeyboardButton("🔍 Search by Name", callback_data="search_mode:name")],
+        [InlineKeyboardButton("📍 Browse by District", callback_data="search_mode:district")],
+    ]
+    await query.message.reply_text(
+        "🏠 How would you like to search?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def search_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle search mode selection (name vs district)."""
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data.split(":")[1]
+
+    if mode == "name":
+        await query.edit_message_text("🏠 Please enter the property or development name:")
+
+    elif mode == "district":
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "📍 *Select an area:*",
+            parse_mode="Markdown",
+            reply_markup=build_district_keyboard(),
+        )
+
+
+async def district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle district selection and show top 10 developments."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        district = int(query.data.split(":")[1])
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        loading = await query.message.reply_text(f"🔍 Loading developments in District {district}...")
+
+        developments = get_top_developments_by_district(district, limit=10)
+        text = format_district_results(district, developments)
+
+        await loading.delete()
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+        if developments:
+            keyboard = [
+                [InlineKeyboardButton(dev["project"][:40], callback_data=f"search:{dev['project']}")]
+                for dev in developments
+            ]
+            keyboard.append([InlineKeyboardButton("🔍 New Search", callback_data="new_search")])
+            await query.message.reply_text(
+                "Tap a development to see full details:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    except Exception as e:
+        logger.error(f"District callback failed: {e}", exc_info=True)
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
 
 async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,6 +575,8 @@ def main():
     app.add_handler(CommandHandler("refresh", refresh_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(search_conv)
+    app.add_handler(CallbackQueryHandler(search_mode_callback, pattern="^search_mode:"))
+    app.add_handler(CallbackQueryHandler(district_callback, pattern="^district:"))
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
