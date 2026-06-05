@@ -6,10 +6,10 @@ import logging
 import os
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
-from cache_ura import force_refresh, cache_status
-from cache_rental import force_refresh_rental, rental_cache_status
-from onemap_mrt import build_mrt_cache
-from schools_cache import get_schools_cache
+from cache.cache_ura import force_refresh, cache_status
+from cache.cache_rental import force_refresh_rental, rental_cache_status
+from cache.onemap_mrt import build_mrt_cache
+from cache.schools_cache import get_schools_cache
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
