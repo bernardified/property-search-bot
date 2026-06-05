@@ -222,3 +222,6 @@ ura_cache.json
 mrt_cache.json
 search_history.json
 
+# Claude Code documentation (local, not shared)
+CLAUDE.md
+
