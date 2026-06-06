@@ -55,14 +55,14 @@ def main():
 
     # 2. MRT stations
     logger.info("Refreshing MRT stations...")
-    if db:
+    if db is not None:
         clear_collection(db, "mrt_cache")
     stations = build_mrt_cache()
     logger.info(f"✅ MRT — {len(stations)} stations")
 
     # 3. Primary schools
     logger.info("Refreshing primary schools...")
-    if db:
+    if db is not None:
         clear_collection(db, "schools_cache")
     schools = get_schools_cache()
     logger.info(f"✅ Schools — {len(schools)} schools")
