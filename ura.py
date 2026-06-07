@@ -271,11 +271,18 @@ def search_property(development_name: str) -> dict:
                 "count": len(psf_list),
             }
 
+    # Overall 12-month average PSF across all size bands (shown in the header)
+    all_psf = [psf for psf_list in band_psf_list.values() for psf in psf_list]
+    overall_avg_psf = round(sum(all_psf) / len(all_psf)) if all_psf else None
+    overall_psf_count = len(all_psf)
+
     return {
         "development": matched_project_name,
         "street": matched_transactions[0]["street"],
         "bands": band_latest,
         "band_avg_psf": band_avg_psf,
+        "overall_avg_psf": overall_avg_psf,
+        "overall_psf_count": overall_psf_count,
         "fuzzy_match": fuzzy_name,
         "alternatives": alternatives,
         "total_units": total_units,
@@ -297,6 +304,8 @@ def format_transactions(result: dict) -> str:
     street = result.get("street", "")
     bands = result.get("bands", {})
     band_avg_psf = result.get("band_avg_psf", {})
+    overall_avg_psf = result.get("overall_avg_psf")
+    overall_psf_count = result.get("overall_psf_count", 0)
     fuzzy_match = result.get("fuzzy_match")
     total_units = result.get("total_units")
     expected_top = result.get("expected_top")
@@ -307,8 +316,9 @@ def format_transactions(result: dict) -> str:
     sale_type = first_txn.get("type_of_sale", "")
     meta = " · ".join(filter(None, [sale_type, tenure]))
 
+    psf_suffix = f"  ·  📊 S${overall_avg_psf:,} avg psf" if overall_avg_psf else ""
     lines = [
-        f"🏢 *{development}*",
+        f"🏢 *{development}*{psf_suffix}",
         f"📍 {street}",
     ]
     if fuzzy_match:
