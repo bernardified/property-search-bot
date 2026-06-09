@@ -408,14 +408,16 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amenity == "rental":
             # Rental uses project name — indexed by development name in URA
             ura_result = search_property(project_name)
-            # New-sale-only developments (often still under construction) have no
-            # resale market and no rental contracts. Gate them here so the rental
-            # matcher never runs and can't bleed in a neighbour's rental records.
-            if "error" not in ura_result and not ura_result.get("has_secondary_market", True):
+            # A still-under-construction development has no rental contracts of its
+            # own — any rental match would be stale/wrong (e.g. an en-bloc'd
+            # predecessor of the same name). Gate it here so the matcher never runs.
+            # Completed developments — even new-sale-only ones with no resales yet —
+            # are NOT gated and show their real rentals if any exist.
+            if "error" not in ura_result and ura_result.get("under_construction"):
                 text = (
-                    f"🏠 *{project_name.title()}* has only new-sale (developer) "
-                    "transactions so far — no resale market and no rental contracts yet.\n\n"
-                    "_Rental & yield data will appear once the development completes "
+                    f"🏠 *{project_name.title()}* is still under construction "
+                    "(not yet completed) — there are no rental contracts for it yet.\n\n"
+                    "_Rental & yield data will appear once the development TOPs "
                     "and units start getting leased._"
                 )
             else:

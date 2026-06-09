@@ -32,12 +32,6 @@ SEARCH_STOPWORDS = frozenset({
     "THE",
 })
 
-# Sale types that constitute a secondary (resale) market: sub-sale (2) + resale (3).
-# A development with NONE of these is new-sale-only — a developer launch, often still
-# under construction — so it has no resale market and no rental contracts yet. Used to
-# suppress rental lookups upstream (see search_property's has_secondary_market).
-SECONDARY_SALE_TYPES = {"2", "3"}
-
 
 # Shared utilities imported from utils.py
 
@@ -332,13 +326,14 @@ def search_property(development_name: str) -> dict:
     overall_avg_psf = round(sum(all_psf) / len(all_psf)) if all_psf else None
     overall_psf_count = len(all_psf)
 
-    # Does this development have a secondary (resale) market? A new-sale-only
-    # project (often still under construction) has no resale/sub-sale txns and
-    # therefore no rental contracts — used upstream to suppress rental lookups.
-    has_secondary_market = any(
-        str(item["txn"].get("typeOfSale", "")) in SECONDARY_SALE_TYPES
-        for item in matched_transactions
-    )
+    # Is this development still under construction (not yet TOP'd)? URA lists
+    # uncompleted projects in the pipeline feed, so presence there (expected_top
+    # is populated) means the building isn't finished. Such a project physically
+    # has no rental contracts of its own — any rental match for it is stale/wrong
+    # (e.g. an en-bloc'd predecessor of the same name), so rentals are suppressed
+    # upstream. A COMPLETED development — even a new-sale-only one with no resales
+    # yet — is NOT gated and goes to the rental matcher as normal.
+    under_construction = expected_top is not None
 
     return {
         "development": matched_project_name,
@@ -347,7 +342,7 @@ def search_property(development_name: str) -> dict:
         "band_avg_psf": band_avg_psf,
         "overall_avg_psf": overall_avg_psf,
         "overall_psf_count": overall_psf_count,
-        "has_secondary_market": has_secondary_market,
+        "under_construction": under_construction,
         "fuzzy_match": fuzzy_name,
         "alternatives": alternatives,
         "total_units": total_units,
@@ -367,7 +362,7 @@ def _sale_type_label(type_code: str) -> str:
 # new-sale prices reflect the developer's launch pricing, not the resale market,
 # so including them would distort the secondary-market trend.
 
-TREND_SALE_TYPES = SECONDARY_SALE_TYPES   # sub-sale + resale only
+TREND_SALE_TYPES = {"2", "3"}        # sub-sale + resale only
 HALF_YEAR_TXN_THRESHOLD = 40         # >= this many txns over >= 2 yrs → half-yearly buckets
 
 

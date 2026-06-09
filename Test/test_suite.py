@@ -662,11 +662,16 @@ class TestRentalMatching(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
-# SECONDARY-MARKET GATE (new-sale-only → no rentals)
+# UNDER-CONSTRUCTION GATE (new launch → no rentals)
 # ══════════════════════════════════════════════════════
 
-class TestSecondaryMarketFlag(unittest.TestCase):
-    """search_property.has_secondary_market gates rental lookups for new launches."""
+class TestUnderConstructionGate(unittest.TestCase):
+    """
+    search_property.under_construction gates rental lookups. The signal is URA
+    pipeline membership (uncompleted projects), NOT the presence of a secondary
+    market — so a COMPLETED new-sale-only development (no resales yet) is allowed
+    through and still shows its rentals.
+    """
 
     AREA_SQM = 92.903  # ~1000 sqft
 
@@ -677,44 +682,55 @@ class TestSecondaryMarketFlag(unittest.TestCase):
             "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
         }
 
-    def _patch(self, txns, project="TEST PROJECT", street="TEST ST"):
-        data = ([{"project": project, "street": street, "transaction": txns}], [])
+    def _patch(self, txns, pipeline=None, project="TEST PROJECT", street="TEST ST"):
+        data = ([{"project": project, "street": street, "transaction": txns}], pipeline or [])
         return patch("ura.get_ura_data", return_value=data)
 
-    def test_new_sale_only_has_no_secondary_market(self):
+    def _pipeline(self, project="TEST PROJECT", top="2028"):
+        return [{"project": project, "expectedTOPYear": top, "totalUnits": 100}]
+
+    def test_under_construction_when_in_pipeline(self):
+        """New launch present in the pipeline feed → under_construction True."""
         from ura import search_property
-        with self._patch([self._txn(sale="1") for _ in range(5)]):
+        with self._patch([self._txn(sale="1") for _ in range(5)], pipeline=self._pipeline()):
             result = search_property("TEST PROJECT")
         self.assertNotIn("error", result)
-        self.assertFalse(result["has_secondary_market"])
+        self.assertTrue(result["under_construction"])
 
-    def test_resale_present_has_secondary_market(self):
-        from ura import search_property
-        with self._patch([self._txn(sale="1"), self._txn(sale="3")]):
-            result = search_property("TEST PROJECT")
-        self.assertTrue(result["has_secondary_market"])
-
-    def test_sub_sale_present_has_secondary_market(self):
-        from ura import search_property
-        with self._patch([self._txn(sale="1"), self._txn(sale="2")]):
-            result = search_property("TEST PROJECT")
-        self.assertTrue(result["has_secondary_market"])
-
-    def test_demolished_twin_excluded(self):
+    def test_completed_new_sale_only_not_gated(self):
         """
-        A redevelopment (new-sale-only) sharing its base name with an en-bloc'd
-        '(DEMOLISHED)' block must NOT inherit the demolished building's old resales
-        — has_secondary_market stays False (the Chuan Park bug).
+        The key case from review: a COMPLETED development with only new-sale txns
+        (no resales yet) is NOT in the pipeline → under_construction False, so its
+        real rentals are NOT suppressed.
+        """
+        from ura import search_property
+        with self._patch([self._txn(sale="1") for _ in range(5)], pipeline=[]):
+            result = search_property("TEST PROJECT")
+        self.assertFalse(result["under_construction"])
+
+    def test_completed_resale_not_gated(self):
+        from ura import search_property
+        with self._patch([self._txn(sale="3") for _ in range(5)], pipeline=[]):
+            result = search_property("TEST PROJECT")
+        self.assertFalse(result["under_construction"])
+
+    def test_demolished_twin_excluded_and_gated(self):
+        """
+        Chuan Park bug: a redevelopment sharing its base name with an en-bloc'd
+        '(DEMOLISHED)' block resolves to the LIVE block, and (being in the pipeline)
+        is under construction — so rentals are gated and the demolished resales
+        don't leak in.
         """
         from ura import search_property
         live = {"project": "CHUAN PARK", "street": "LORONG CHUAN",
                 "transaction": [self._txn(sale="1") for _ in range(5)]}
         demolished = {"project": "CHUAN PARK (DEMOLISHED)", "street": "LORONG CHUAN",
                       "transaction": [self._txn(sale="3") for _ in range(5)]}
-        with patch("ura.get_ura_data", return_value=([live, demolished], [])):
+        pipeline = self._pipeline(project="CHUAN PARK", top="na")
+        with patch("ura.get_ura_data", return_value=([live, demolished], pipeline)):
             result = search_property("CHUAN PARK")
         self.assertEqual(result["development"], "CHUAN PARK")
-        self.assertFalse(result["has_secondary_market"])
+        self.assertTrue(result["under_construction"])
 
     def test_demolished_block_still_searchable_explicitly(self):
         """Searching the demolished block by name still resolves to it."""
@@ -726,7 +742,6 @@ class TestSecondaryMarketFlag(unittest.TestCase):
         with patch("ura.get_ura_data", return_value=([live, demolished], [])):
             result = search_property("CHUAN PARK (DEMOLISHED)")
         self.assertEqual(result["development"], "CHUAN PARK (DEMOLISHED)")
-        self.assertTrue(result["has_secondary_market"])
 
 
 # ══════════════════════════════════════════════════════
@@ -752,7 +767,7 @@ def run_tests():
         TestPriceTrend,
         TestAmenityCallbackButtons,
         TestRentalMatching,
-        TestSecondaryMarketFlag,
+        TestUnderConstructionGate,
     ]
 
     for cls in test_classes:
