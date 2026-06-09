@@ -22,7 +22,9 @@ SIZE_BANDS = [
     {"label": "701 – 800 sqft",   "min": 701,  "max": 800},
     {"label": "801 – 900 sqft",   "min": 801,  "max": 900},
     {"label": "901 – 1000 sqft",  "min": 901,  "max": 1000},
-    {"label": "> 1000 sqft",      "min": 1001, "max": float("inf")},
+    {"label": "1001 – 1100 sqft", "min": 1001, "max": 1100},
+    {"label": "1101 – 1200 sqft", "min": 1101, "max": 1200},
+    {"label": "> 1200 sqft",      "min": 1201, "max": float("inf")},
 ]
 
 
