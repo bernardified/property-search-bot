@@ -12,7 +12,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from ura import search_property, format_transactions
+from ura import search_property, format_transactions, price_trend, format_price_trend
 from maps import get_nearby_info
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
@@ -82,6 +82,9 @@ def build_amenity_keyboard(addr_key: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{addr_key}"),
+            InlineKeyboardButton("📈 Price Trend", callback_data=f"amenity:trend:{addr_key}"),
+        ],
+        [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
         ],
     ])
@@ -389,6 +392,9 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sale_prices[band_label] = {"price": txn.get("price")}
             rental_result = get_rental_by_band(project_name, sale_prices)
             text = format_rental(rental_result)
+        elif amenity == "trend":
+            # Price trend uses project name — indexed by development name in URA
+            text = format_price_trend(price_trend(project_name))
         else:
             maps_result = get_nearby_info(address)
 
