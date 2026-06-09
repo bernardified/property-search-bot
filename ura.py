@@ -1,10 +1,13 @@
 import os
 import difflib
+import logging
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
 from cache.cache_ura import get_ura_data
 from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date, format_mmyy_date
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -593,65 +596,70 @@ def render_price_trend_png(result: dict) -> bytes | None:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-    except Exception:
+    except Exception as e:
+        logger.warning("PSF trend chart disabled — matplotlib unavailable: %s", e)
         return None
 
-    development = result.get("development", "Unknown")
-    pct = result.get("pct_change")
-    span = result.get("span_label", "")
-    total = result.get("total_txns", 0)
+    try:
+        development = result.get("development", "Unknown")
+        pct = result.get("pct_change")
+        span = result.get("span_label", "")
+        total = result.get("total_txns", 0)
 
-    labels = [p["label"] for p in periods]
-    psf = [p["avg_psf"] for p in periods]
-    x = list(range(len(periods)))
+        labels = [p["label"] for p in periods]
+        psf = [p["avg_psf"] for p in periods]
+        x = list(range(len(periods)))
 
-    line_color = "#1f77b4"
-    up = pct is not None and pct > 0
+        line_color = "#1f77b4"
+        up = pct is not None and pct > 0
 
-    fig, ax = plt.subplots(figsize=(8, 4.2), dpi=140)
-    ax.plot(x, psf, color=line_color, linewidth=2, zorder=2)
+        fig, ax = plt.subplots(figsize=(8, 4.2), dpi=140)
+        ax.plot(x, psf, color=line_color, linewidth=2, zorder=2)
 
-    # Solid markers for completed periods; a hollow marker for an in-progress one.
-    for xi, p in zip(x, periods):
-        if p.get("partial"):
-            ax.plot(xi, p["avg_psf"], marker="o", markersize=9, markerfacecolor="white",
-                    markeredgecolor=line_color, markeredgewidth=2, zorder=3)
+        # Solid markers for completed periods; a hollow marker for an in-progress one.
+        for xi, p in zip(x, periods):
+            if p.get("partial"):
+                ax.plot(xi, p["avg_psf"], marker="o", markersize=9, markerfacecolor="white",
+                        markeredgecolor=line_color, markeredgewidth=2, zorder=3)
+            else:
+                ax.plot(xi, p["avg_psf"], marker="o", markersize=7, color=line_color, zorder=3)
+
+        # Annotate each point with its PSF value.
+        span_psf = (max(psf) - min(psf)) or 1
+        for xi, p in zip(x, periods):
+            note = f"{p['avg_psf']:,}" + (" *" if p.get("partial") else "")
+            ax.annotate(note, (xi, p["avg_psf"]), textcoords="offset points",
+                        xytext=(0, 9), ha="center", fontsize=9, color="#333")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45 if len(labels) > 6 else 0, ha="right" if len(labels) > 6 else "center")
+        ax.set_ylabel("Avg PSF (S$)", fontsize=10)
+        ax.set_ylim(min(psf) - span_psf * 0.18, max(psf) + span_psf * 0.22)
+        ax.margins(x=0.06)
+        ax.grid(axis="y", linestyle=":", alpha=0.5)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        if pct is not None and span:
+            arrow = "▲" if up else ("▼" if pct < 0 else "►")
+            sign = "+" if pct > 0 else ""
+            subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  resale + sub-sale only"
         else:
-            ax.plot(xi, p["avg_psf"], marker="o", markersize=7, color=line_color, zorder=3)
+            subtitle = f"{total} txns  ·  resale + sub-sale only"
+        has_partial = any(p.get("partial") for p in periods)
+        if has_partial:
+            subtitle += "   (* current period still in progress)"
 
-    # Annotate each point with its PSF value.
-    span_psf = (max(psf) - min(psf)) or 1
-    for xi, p in zip(x, periods):
-        note = f"{p['avg_psf']:,}" + (" *" if p.get("partial") else "")
-        ax.annotate(note, (xi, p["avg_psf"]), textcoords="offset points",
-                    xytext=(0, 9), ha="center", fontsize=9, color="#333")
+        ax.set_title(f"{development} — PSF trend", fontsize=13, fontweight="bold", loc="left", pad=22)
+        ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color="#666", va="bottom")
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45 if len(labels) > 6 else 0, ha="right" if len(labels) > 6 else "center")
-    ax.set_ylabel("Avg PSF (S$)", fontsize=10)
-    ax.set_ylim(min(psf) - span_psf * 0.18, max(psf) + span_psf * 0.22)
-    ax.margins(x=0.06)
-    ax.grid(axis="y", linestyle=":", alpha=0.5)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-
-    if pct is not None and span:
-        arrow = "▲" if up else ("▼" if pct < 0 else "►")
-        sign = "+" if pct > 0 else ""
-        subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  resale + sub-sale only"
-    else:
-        subtitle = f"{total} txns  ·  resale + sub-sale only"
-    has_partial = any(p.get("partial") for p in periods)
-    if has_partial:
-        subtitle += "   (* current period still in progress)"
-
-    ax.set_title(f"{development} — PSF trend", fontsize=13, fontweight="bold", loc="left", pad=22)
-    ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color="#666", va="bottom")
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-    return buf.getvalue()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning("PSF trend chart render failed: %s", e, exc_info=True)
+        return None
 
 
 def format_transactions(result: dict) -> str:
