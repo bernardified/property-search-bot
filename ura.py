@@ -143,6 +143,14 @@ def _collect_matched_transactions(development_name: str) -> dict:
         project_name = project.get("project", "").upper().strip()
         if not project_name:
             continue
+        # URA tags an en-bloc'd building with a "(DEMOLISHED)" suffix while its
+        # redevelopment carries the same base name (e.g. "CHUAN PARK" new launch +
+        # "CHUAN PARK (DEMOLISHED)" old resales). The defunct building is a separate
+        # development — don't let its old transactions merge into the live project
+        # (they would wrongly flip has_secondary_market and pollute the price trend).
+        # Only include it if the user explicitly searched for the demolished block.
+        if "DEMOLISHED" in project_name and "DEMOLISHED" not in search_name:
+            continue
         score = score_name_match(search_name, project_name)
         if score >= 0.6:
             scored.append((score, project))

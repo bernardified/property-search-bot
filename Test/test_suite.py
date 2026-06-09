@@ -700,6 +700,34 @@ class TestSecondaryMarketFlag(unittest.TestCase):
             result = search_property("TEST PROJECT")
         self.assertTrue(result["has_secondary_market"])
 
+    def test_demolished_twin_excluded(self):
+        """
+        A redevelopment (new-sale-only) sharing its base name with an en-bloc'd
+        '(DEMOLISHED)' block must NOT inherit the demolished building's old resales
+        — has_secondary_market stays False (the Chuan Park bug).
+        """
+        from ura import search_property
+        live = {"project": "CHUAN PARK", "street": "LORONG CHUAN",
+                "transaction": [self._txn(sale="1") for _ in range(5)]}
+        demolished = {"project": "CHUAN PARK (DEMOLISHED)", "street": "LORONG CHUAN",
+                      "transaction": [self._txn(sale="3") for _ in range(5)]}
+        with patch("ura.get_ura_data", return_value=([live, demolished], [])):
+            result = search_property("CHUAN PARK")
+        self.assertEqual(result["development"], "CHUAN PARK")
+        self.assertFalse(result["has_secondary_market"])
+
+    def test_demolished_block_still_searchable_explicitly(self):
+        """Searching the demolished block by name still resolves to it."""
+        from ura import search_property
+        live = {"project": "CHUAN PARK", "street": "LORONG CHUAN",
+                "transaction": [self._txn(sale="1") for _ in range(5)]}
+        demolished = {"project": "CHUAN PARK (DEMOLISHED)", "street": "LORONG CHUAN",
+                      "transaction": [self._txn(sale="3") for _ in range(5)]}
+        with patch("ura.get_ura_data", return_value=([live, demolished], [])):
+            result = search_property("CHUAN PARK (DEMOLISHED)")
+        self.assertEqual(result["development"], "CHUAN PARK (DEMOLISHED)")
+        self.assertTrue(result["has_secondary_market"])
+
 
 # ══════════════════════════════════════════════════════
 # RUNNER
