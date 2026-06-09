@@ -425,7 +425,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "error" not in ura_result:
                     for band_label, txn in ura_result.get("bands", {}).items():
                         sale_prices[band_label] = {"price": txn.get("price")}
-                rental_result = get_rental_by_band(project_name, sale_prices)
+                rental_result = get_rental_by_band(project_name, sale_prices, street_address)
                 text = format_rental(rental_result)
         elif amenity == "trend":
             # Price trend uses project name — indexed by development name in URA

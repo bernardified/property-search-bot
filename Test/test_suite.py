@@ -660,6 +660,26 @@ class TestRentalMatching(unittest.TestCase):
         names = self._names("AFFINITY AT SERANGOON")
         self.assertEqual(names, ["AFFINITY AT SERANGOON"])
 
+    def test_street_disambiguates_fuzzy_match(self):
+        """
+        A fuzzy (non-exact) name match must be corroborated by an agreeing street,
+        so a string-similar development on a different road can't slip through.
+        """
+        from rental import find_rental_project
+        data = [{"project": "FLORENCE RESIDENCES", "street": "FLORENCE ROAD", "rental": []}]
+        # 'THE FLORENCE' scores 0.85 (all words found) — fuzzy, so street is checked.
+        wrong_street = [p["project"] for p in find_rental_project("THE FLORENCE", data, "HOUGANG AVENUE 3")]
+        right_street = [p["project"] for p in find_rental_project("THE FLORENCE", data, "FLORENCE ROAD")]
+        self.assertEqual(wrong_street, [])
+        self.assertEqual(right_street, ["FLORENCE RESIDENCES"])
+
+    def test_exact_match_ignores_street(self):
+        """An exact name match is trusted even when no street is supplied."""
+        from rental import find_rental_project
+        data = [{"project": "MARINA BAY RESIDENCES", "street": "MARINA BOULEVARD", "rental": []}]
+        names = [p["project"] for p in find_rental_project("MARINA BAY RESIDENCES", data, "")]
+        self.assertEqual(names, ["MARINA BAY RESIDENCES"])
+
 
 # ══════════════════════════════════════════════════════
 # UNDER-CONSTRUCTION GATE (new launch → no rentals)

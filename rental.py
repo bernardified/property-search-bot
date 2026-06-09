@@ -16,21 +16,53 @@ logger = logging.getLogger(__name__)
 # and loose-fuzzy collisions that previously bled across developments.
 RENTAL_MATCH_THRESHOLD = 0.85
 
+# Generic road-type / directional words carry no development-identifying signal,
+# so two unrelated roads that share only e.g. "ROAD" must not look related. We
+# strip these before comparing streets.
+_STREET_STOPWORDS = frozenset({
+    "ROAD", "RD", "STREET", "ST", "AVENUE", "AVE", "DRIVE", "DR", "LANE",
+    "CLOSE", "CRESCENT", "WALK", "LINK", "RISE", "PLACE", "TERRACE", "LOOP",
+    "BOULEVARD", "BLVD", "WAY", "JALAN", "LORONG", "CENTRAL",
+    "NORTH", "SOUTH", "EAST", "WEST", "UPPER", "LOWER",
+})
 
-def find_rental_project(development_name: str, rental_data: list) -> list:
+
+def _street_tokens(street: str) -> set:
+    return {w for w in street.upper().split() if len(w) > 2 and w not in _STREET_STOPWORDS}
+
+
+def _streets_agree(a: str, b: str) -> bool:
+    """
+    True if two streets plausibly belong to the same development — i.e. they share
+    a significant (non-road-type) token. Missing street info on either side is not
+    treated as a conflict (returns True), so we never block on absent data.
+    """
+    ta, tb = _street_tokens(a), _street_tokens(b)
+    if not ta or not tb:
+        return True
+    return bool(ta & tb)
+
+
+def find_rental_project(development_name: str, rental_data: list, street: str = "") -> list:
     """
     Find matching project(s) in rental data, using the SAME name-matching score
     as the transaction search (ura.score_name_match) so a development resolves to
     the same project on both the sale and rental sides.
 
+    For non-exact name matches, the `street` (if provided) must corroborate the
+    match — a surrounding property on a different road is rejected even when its
+    name is string-similar (e.g. "LENTOR HILLS RESIDENCES" on LENTOR HILLS ROAD
+    vs the 0.84-scoring "LEONIE HILL RESIDENCES" on LEONIE HILL ROAD).
+
     Only projects tied at the single best score are returned — a weaker neighbour
     match can never be mixed into a strong (exact/substring) one. If nothing clears
-    the threshold (e.g. an under-construction project with no rental contracts of
-    its own), returns [] rather than a fuzzy neighbour's records.
+    the bar (e.g. a development with no rental contracts of its own), returns []
+    rather than a fuzzy neighbour's records.
     """
     search = development_name.upper().strip()
     if not search:
         return []
+    search_street = (street or "").strip()
 
     scored = []
     for project in rental_data:
@@ -38,8 +70,13 @@ def find_rental_project(development_name: str, rental_data: list) -> list:
         if not pname:
             continue
         score = score_name_match(search, pname)
-        if score >= RENTAL_MATCH_THRESHOLD:
-            scored.append((score, project))
+        if score < RENTAL_MATCH_THRESHOLD:
+            continue
+        # Exact name matches are trusted outright; anything fuzzier must be backed
+        # by an agreeing street so a string-similar neighbour can't slip through.
+        if score < 1.0 and search_street and not _streets_agree(search_street, project.get("street", "")):
+            continue
+        scored.append((score, project))
 
     if not scored:
         return []
@@ -51,17 +88,18 @@ def find_rental_project(development_name: str, rental_data: list) -> list:
     return [p for s, p in scored if s >= best_score - 1e-9]
 
 
-def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
+def get_rental_by_band(development_name: str, sale_prices: dict, street: str = "") -> dict:
     """
     Find rental data for a development, grouped by size band.
     sale_prices: dict of band_label -> latest sale price (for yield calculation)
+    street: the development's street, used to disambiguate fuzzy name matches.
     Returns dict of band_label -> {latest_rent, avg_rent, count, yield_pct}
     """
     rental_data = get_rental_data()
     if not rental_data:
         return {"error": "Rental data unavailable. Please try again later."}
 
-    projects = find_rental_project(development_name, rental_data)
+    projects = find_rental_project(development_name, rental_data, street)
     if not projects:
         return {"error": f'No rental data found for "{development_name}".'}
 
