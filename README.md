@@ -4,11 +4,12 @@ A Telegram bot for searching Singapore private property transaction prices and r
 
 ## Features
 
-- **Transaction prices** — search any private development by name; results bucketed by size band (≤600 sqft → >1000 sqft)
-- **Rental contracts** — latest URA rental data for the same development, grouped by size band
+- **Transaction prices** — search any private development by name; results bucketed by size band (≤600 sqft → >1200 sqft)
+- **Rental contracts and gross yield** — latest URA rental data for the same development, grouped by size band
 - **Nearest MRT** — walking distance and exit number via OneMap + Google Maps
 - **Primary schools** — Phase 2A-eligible schools within 1 km, sorted by distance
 - **Shopping malls & supermarkets** — nearby amenities via Google Places
+- **Price trend** — price trend for the past 5 years
 - **Smart cache** — URA data refreshes automatically on Tuesday/Friday (transactions) and the 15th of each month (rentals)
 
 ## Commands
