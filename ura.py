@@ -478,6 +478,38 @@ def _trend_span_label(periods: list[dict]) -> str:
     return f"{months} mths"
 
 
+# Block glyphs for the PSF trend visual.
+_BAR_EIGHTHS = "▏▎▍▌▋▊▉█"   # 1/8 .. 8/8 of a cell, for sub-block bar resolution
+_SPARK_LEVELS = "▁▂▃▄▅▆▇█"  # 8 vertical levels for the inline sparkline
+
+
+def _spark(values: list[float]) -> str:
+    """One-line sparkline of the series, scaled to its own min/max."""
+    if not values:
+        return ""
+    lo, hi = min(values), max(values)
+    span = hi - lo
+    mid = len(_SPARK_LEVELS) // 2
+    out = []
+    for v in values:
+        idx = round((v - lo) / span * (len(_SPARK_LEVELS) - 1)) if span > 0 else mid
+        out.append(_SPARK_LEVELS[idx])
+    return "".join(out)
+
+
+def _scaled_bar(value: float, lo: float, hi: float, width: int = 8) -> str:
+    """
+    Horizontal bar rebased to the series range: lo → empty, hi → full.
+    Uses eighth-block glyphs so small period-to-period moves stay visible.
+    """
+    span = hi - lo
+    frac = (value - lo) / span if span > 0 else 1.0
+    eighths = round(frac * width * 8)
+    full, rem = divmod(eighths, 8)
+    bar = "█" * full + (_BAR_EIGHTHS[rem - 1] if rem else "")
+    return bar + "░" * (width - full - (1 if rem else 0))
+
+
 def format_price_trend(result: dict) -> str:
     """Render a price_trend() result as a Telegram (Markdown) message with text bars."""
     if "error" in result:
@@ -496,22 +528,28 @@ def format_price_trend(result: dict) -> str:
     if fuzzy:
         lines.append(f"⚠️ _Did you mean: {fuzzy}?_")
 
+    psf_values = [p["avg_psf"] for p in periods]
+    spark = _spark(psf_values)
+
     if pct is not None and span:
         arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "→")
         sign = "+" if pct > 0 else ""
-        lines.append(f"{arrow} {sign}{pct}% over {span} · {total} txns")
+        stat = f"{arrow} {sign}{pct}% over {span} · {total} txns"
     else:
-        lines.append(f"{total} txns · _not enough history for a trend_")
+        stat = f"{total} txns · _not enough history for a trend_"
+    lines.append(f"`{spark}`  {stat}" if spark else stat)
 
     lines += ["_resale + sub-sale only_", "─────────────────────"]
 
-    max_psf = max((p["avg_psf"] for p in periods), default=0)
-    BAR_WIDTH = 8
-    for p in periods:
-        filled = round(BAR_WIDTH * p["avg_psf"] / max_psf) if max_psf else 0
-        filled = max(1, filled)  # always show at least one block
-        bar = "█" * filled + "░" * (BAR_WIDTH - filled)
-        lines.append(f"`{p['label']:<7}` S${p['avg_psf']:,} {bar} ({p['count']})")
+    if psf_values:
+        lo, hi = min(psf_values), max(psf_values)
+        psf_w = max(len(f"{v:,}") for v in psf_values)
+        cnt_w = max(len(str(p["count"])) for p in periods)
+        for p in periods:
+            bar = _scaled_bar(p["avg_psf"], lo, hi)
+            psf_str = f"{p['avg_psf']:,}".rjust(psf_w)
+            cnt = str(p["count"]).rjust(cnt_w)
+            lines.append(f"`{p['label']:<7} S${psf_str} {bar} ({cnt})`")
 
     return "\n".join(lines)
 
