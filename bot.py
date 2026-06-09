@@ -383,12 +383,25 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amenity == "rental":
             # Rental uses project name — indexed by development name in URA
             ura_result = search_property(project_name)
-            sale_prices = {}
-            if "error" not in ura_result:
-                for band_label, txn in ura_result.get("bands", {}).items():
-                    sale_prices[band_label] = {"price": txn.get("price")}
-            rental_result = get_rental_by_band(project_name, sale_prices)
-            text = format_rental(rental_result)
+            # New launches (only new-sale transactions) have no rental market of
+            # their own. The rental matcher would otherwise fuzzy-match a nearby
+            # completed development and show its contracts mislabeled — so skip.
+            if "error" not in ura_result and not ura_result.get("has_secondary_market", True):
+                text = (
+                    "🏠 *Rental Prices & Yield*\n"
+                    "─────────────────────\n\n"
+                    f"_{project_name.title()} only has new-sale (developer) "
+                    "transactions — it's a new launch with no resale or rental "
+                    "market yet. Rental data will appear once the project is "
+                    "completed and tenanted._"
+                )
+            else:
+                sale_prices = {}
+                if "error" not in ura_result:
+                    for band_label, txn in ura_result.get("bands", {}).items():
+                        sale_prices[band_label] = {"price": txn.get("price")}
+                rental_result = get_rental_by_band(project_name, sale_prices)
+                text = format_rental(rental_result)
         else:
             maps_result = get_nearby_info(address)
 

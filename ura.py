@@ -276,6 +276,12 @@ def search_property(development_name: str) -> dict:
     overall_avg_psf = round(sum(all_psf) / len(all_psf)) if all_psf else None
     overall_psf_count = len(all_psf)
 
+    # A development with ONLY new-sale transactions (typeOfSale 1) is a fresh
+    # launch / still under construction — it has no resale or rental market of
+    # its own yet. Used to gate rental lookups (see bot.py amenity_callback).
+    sale_types = {str(item["txn"].get("typeOfSale", "")) for item in matched_transactions}
+    has_secondary_market = bool(sale_types & {"2", "3"})
+
     return {
         "development": matched_project_name,
         "street": matched_transactions[0]["street"],
@@ -283,6 +289,7 @@ def search_property(development_name: str) -> dict:
         "band_avg_psf": band_avg_psf,
         "overall_avg_psf": overall_avg_psf,
         "overall_psf_count": overall_psf_count,
+        "has_secondary_market": has_secondary_market,
         "fuzzy_match": fuzzy_name,
         "alternatives": alternatives,
         "total_units": total_units,
