@@ -408,12 +408,23 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amenity == "rental":
             # Rental uses project name — indexed by development name in URA
             ura_result = search_property(project_name)
-            sale_prices = {}
-            if "error" not in ura_result:
-                for band_label, txn in ura_result.get("bands", {}).items():
-                    sale_prices[band_label] = {"price": txn.get("price")}
-            rental_result = get_rental_by_band(project_name, sale_prices)
-            text = format_rental(rental_result)
+            # New-sale-only developments (often still under construction) have no
+            # resale market and no rental contracts. Gate them here so the rental
+            # matcher never runs and can't bleed in a neighbour's rental records.
+            if "error" not in ura_result and not ura_result.get("has_secondary_market", True):
+                text = (
+                    f"🏠 *{project_name.title()}* has only new-sale (developer) "
+                    "transactions so far — no resale market and no rental contracts yet.\n\n"
+                    "_Rental & yield data will appear once the development completes "
+                    "and units start getting leased._"
+                )
+            else:
+                sale_prices = {}
+                if "error" not in ura_result:
+                    for band_label, txn in ura_result.get("bands", {}).items():
+                        sale_prices[band_label] = {"price": txn.get("price")}
+                rental_result = get_rental_by_band(project_name, sale_prices)
+                text = format_rental(rental_result)
         elif amenity == "trend":
             # Price trend uses project name — indexed by development name in URA
             text = format_price_trend(price_trend(project_name))

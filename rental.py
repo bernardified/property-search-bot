@@ -1,41 +1,54 @@
-import difflib
 import logging
 from datetime import datetime
 from cache.cache_rental import get_rental_data
+from ura import score_name_match
 from utils import SIZE_BANDS, get_band, parse_sqft_range, parse_mmyy_date, format_mmyy_date
 
 logger = logging.getLogger(__name__)
 
 # Shared utilities imported from utils.py
 
+# Minimum score to accept a rental project as a match. High enough to reject a
+# neighbouring development that merely shares a leading token — e.g. searching
+# "LENTOR HILLS RESIDENCES" must NOT pull a different Lentor-area development's
+# rentals. 0.85 admits exact (1.0), search-substring (0.95), close length-ratio
+# substrings, and all-words-found (0.85) matches, but rejects the partial-word
+# and loose-fuzzy collisions that previously bled across developments.
+RENTAL_MATCH_THRESHOLD = 0.85
+
 
 def find_rental_project(development_name: str, rental_data: list) -> list:
-    """Find matching project(s) in rental data using same fuzzy logic as ura.py."""
-    search = development_name.upper().strip()
-    matched = []
+    """
+    Find matching project(s) in rental data, using the SAME name-matching score
+    as the transaction search (ura.score_name_match) so a development resolves to
+    the same project on both the sale and rental sides.
 
+    Only projects tied at the single best score are returned — a weaker neighbour
+    match can never be mixed into a strong (exact/substring) one. If nothing clears
+    the threshold (e.g. an under-construction project with no rental contracts of
+    its own), returns [] rather than a fuzzy neighbour's records.
+    """
+    search = development_name.upper().strip()
+    if not search:
+        return []
+
+    scored = []
     for project in rental_data:
         pname = project.get("project", "").upper().strip()
         if not pname:
             continue
+        score = score_name_match(search, pname)
+        if score >= RENTAL_MATCH_THRESHOLD:
+            scored.append((score, project))
 
-        # Exact match
-        if search == pname:
-            return [project]
-        # Substring match
-        if search in pname or pname in search:
-            matched.append((0.95, project))
-            continue
-        # Fuzzy
-        ratio = difflib.SequenceMatcher(None, search, pname).ratio()
-        if ratio >= 0.75:
-            matched.append((ratio, project))
-
-    if not matched:
+    if not scored:
         return []
-    matched.sort(key=lambda x: x[0], reverse=True)
-    best_score = matched[0][0]
-    return [p for s, p in matched if s >= best_score * 0.95]
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score = scored[0][0]
+    # Keep only projects at the top score (handles a development split across
+    # multiple identically-named rental blocks); drop anything weaker.
+    return [p for s, p in scored if s >= best_score - 1e-9]
 
 
 def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:

@@ -608,6 +608,100 @@ class TestAmenityCallbackButtons(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
+# RENTAL PROJECT MATCHING (cross-development bleed guard)
+# ══════════════════════════════════════════════════════
+
+class TestRentalMatching(unittest.TestCase):
+    """
+    find_rental_project must resolve to the SAME development as the transaction
+    search and must NOT pull a neighbouring development's rental records when the
+    searched project has none of its own (the Lentor Hills Residences bug).
+    """
+
+    def setUp(self):
+        # Minimal fake rental dataset (only the 'project' key matters for matching).
+        self.rental_data = [
+            {"project": "MARINA BAY RESIDENCES", "rental": []},
+            {"project": "LENTOR MODERN", "rental": []},
+            {"project": "LENTOR HILLS", "rental": []},
+            {"project": "THE FLORENCE RESIDENCES", "rental": []},
+            {"project": "AFFINITY AT SERANGOON", "rental": []},
+        ]
+
+    def _names(self, search, data=None):
+        from rental import find_rental_project
+        return [p["project"] for p in find_rental_project(search, data if data is not None else self.rental_data)]
+
+    def test_exact_match(self):
+        self.assertEqual(self._names("MARINA BAY RESIDENCES"), ["MARINA BAY RESIDENCES"])
+
+    def test_legitimate_prefix_match(self):
+        """'MARINA BAY' is a substring of 'MARINA BAY RESIDENCES' — must still match."""
+        self.assertEqual(self._names("MARINA BAY"), ["MARINA BAY RESIDENCES"])
+
+    def test_trailing_token_variant(self):
+        """'THE FOO' vs 'FOO RESIDENCES' (neither a substring) must still match via words."""
+        data = [{"project": "FLORENCE RESIDENCES", "rental": []}]
+        self.assertEqual(self._names("THE FLORENCE", data), ["FLORENCE RESIDENCES"])
+
+    def test_cross_development_no_false_positive(self):
+        """
+        Under-construction 'LENTOR HILLS RESIDENCES' has NO rental records of its
+        own here — it must NOT bleed into neighbouring 'LENTOR MODERN' or the
+        shorter 'LENTOR HILLS'. The matcher returns [] rather than wrong data.
+        """
+        self.assertEqual(self._names("LENTOR HILLS RESIDENCES"), [])
+
+    def test_no_match_returns_empty(self):
+        self.assertEqual(self._names("SOME NONEXISTENT CONDO"), [])
+
+    def test_only_top_scored_returned(self):
+        """A weak neighbour is never mixed in with a strong (exact) match."""
+        names = self._names("AFFINITY AT SERANGOON")
+        self.assertEqual(names, ["AFFINITY AT SERANGOON"])
+
+
+# ══════════════════════════════════════════════════════
+# SECONDARY-MARKET GATE (new-sale-only → no rentals)
+# ══════════════════════════════════════════════════════
+
+class TestSecondaryMarketFlag(unittest.TestCase):
+    """search_property.has_secondary_market gates rental lookups for new launches."""
+
+    AREA_SQM = 92.903  # ~1000 sqft
+
+    def _txn(self, sale="3"):
+        return {
+            "area": str(self.AREA_SQM), "price": "2000000", "contractDate": "0324",
+            "typeOfSale": sale, "propertyType": "Condominium",
+            "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
+        }
+
+    def _patch(self, txns, project="TEST PROJECT", street="TEST ST"):
+        data = ([{"project": project, "street": street, "transaction": txns}], [])
+        return patch("ura.get_ura_data", return_value=data)
+
+    def test_new_sale_only_has_no_secondary_market(self):
+        from ura import search_property
+        with self._patch([self._txn(sale="1") for _ in range(5)]):
+            result = search_property("TEST PROJECT")
+        self.assertNotIn("error", result)
+        self.assertFalse(result["has_secondary_market"])
+
+    def test_resale_present_has_secondary_market(self):
+        from ura import search_property
+        with self._patch([self._txn(sale="1"), self._txn(sale="3")]):
+            result = search_property("TEST PROJECT")
+        self.assertTrue(result["has_secondary_market"])
+
+    def test_sub_sale_present_has_secondary_market(self):
+        from ura import search_property
+        with self._patch([self._txn(sale="1"), self._txn(sale="2")]):
+            result = search_property("TEST PROJECT")
+        self.assertTrue(result["has_secondary_market"])
+
+
+# ══════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════
 
@@ -629,6 +723,8 @@ def run_tests():
         TestURACacheIntegration,
         TestPriceTrend,
         TestAmenityCallbackButtons,
+        TestRentalMatching,
+        TestSecondaryMarketFlag,
     ]
 
     for cls in test_classes:
