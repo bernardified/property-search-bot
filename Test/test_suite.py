@@ -458,6 +458,156 @@ class TestURACacheIntegration(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
+# 9. PRICE TREND
+# ══════════════════════════════════════════════════════
+
+class TestPriceTrend(unittest.TestCase):
+    """price_trend() bucketing, sale-type filtering, and rendering."""
+
+    # ~1000 sqft so PSF == price / 1000, making expected PSF easy to assert.
+    AREA_SQM = 92.903
+
+    def _txn(self, price, mmyy, sale="3"):
+        return {
+            "area": str(self.AREA_SQM), "price": str(price), "contractDate": mmyy,
+            "typeOfSale": sale, "propertyType": "Condominium",
+            "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
+        }
+
+    def _patch(self, txns, project="TEST PROJECT", street="TEST ST"):
+        """Patch ura.get_ura_data to return one synthetic project. Returns the patcher."""
+        data = ([{"project": project, "street": street, "transaction": txns}], [])
+        return patch("ura.get_ura_data", return_value=data)
+
+    def test_excludes_new_sale(self):
+        """New-sale (typeOfSale 1) txns must not contribute to the trend."""
+        from ura import price_trend
+        txns = [self._txn(2_000_000, "0323", sale="3") for _ in range(5)]
+        txns += [self._txn(3_000_000, "0323", sale="1") for _ in range(5)]  # new sale, excluded
+        txns += [self._txn(2_000_000, "0623", sale="2") for _ in range(2)]  # sub-sale, included
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["total_txns"], 7)            # 5 resale + 2 sub-sale
+        self.assertEqual(result["periods"][0]["avg_psf"], 2000)  # new-sale 3000 psf not averaged in
+
+    def test_only_new_sale_returns_error(self):
+        """A project with only new-sale txns has no resale market to trend."""
+        from ura import price_trend
+        txns = [self._txn(3_000_000, "0323", sale="1") for _ in range(10)]
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        self.assertIn("error", result)
+
+    def test_yearly_bucketing_low_volume(self):
+        """Below the half-yearly threshold → yearly buckets (no 'H' in labels)."""
+        from ura import price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(5)]   # 2022
+        txns += [self._txn(2_000_000, "0923") for _ in range(5)]  # 2023
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        labels = [p["label"] for p in result["periods"]]
+        self.assertEqual(labels, ["2022", "2023"])
+        self.assertTrue(all("H" not in l for l in labels))
+
+    def test_half_yearly_bucketing_high_volume(self):
+        """At/above 40 txns spanning two calendar years → half-yearly buckets."""
+        from ura import price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(20)]  # 2022 H1
+        txns += [self._txn(2_000_000, "0923") for _ in range(20)]  # 2023 H2
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        labels = [p["label"] for p in result["periods"]]
+        self.assertEqual(labels, ["2022 H1", "2023 H2"])
+
+    def test_pct_change_sign_and_order(self):
+        """Rising PSF → positive pct_change; periods sorted ascending in time."""
+        from ura import price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(3)]   # 2022 → 1800 psf
+        txns += [self._txn(2_000_000, "0324") for _ in range(3)]  # 2024 → 2000 psf
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        self.assertEqual([p["label"] for p in result["periods"]], ["2022", "2024"])
+        self.assertEqual(result["pct_change"], 11)               # (2000-1800)/1800 ≈ +11%
+        self.assertEqual(result["span_label"], "2 yrs")
+
+    def test_single_period_has_no_pct(self):
+        """One populated period can't have a trend — pct_change is None."""
+        from ura import price_trend
+        txns = [self._txn(2_000_000, "0323") for _ in range(4)]
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+        self.assertIsNone(result["pct_change"])
+
+    def test_format_renders_bars_and_arrow(self):
+        """format_price_trend output carries the header, an up-arrow, and bar blocks."""
+        from ura import price_trend, format_price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(3)]
+        txns += [self._txn(2_000_000, "0324") for _ in range(3)]
+        with self._patch(txns):
+            text = format_price_trend(price_trend("TEST PROJECT"))
+        self.assertIn("📈", text)
+        self.assertIn("↑", text)
+        self.assertIn("█", text)
+        self.assertIn("resale + sub-sale only", text)
+
+
+# ══════════════════════════════════════════════════════
+# AMENITY CALLBACK BUTTONS
+# ══════════════════════════════════════════════════════
+
+class TestAmenityCallbackButtons(unittest.TestCase):
+    """Amenity button callback_data must stay within Telegram's 64-byte limit."""
+
+    @staticmethod
+    def _ctx():
+        """A minimal stand-in for ContextTypes.DEFAULT_TYPE (just needs user_data)."""
+        return MagicMock(user_data={})
+
+    def test_token_round_trips(self):
+        """store_addr_key → resolve_addr_key returns the original addr_key."""
+        from bot import store_addr_key, resolve_addr_key
+        ctx = self._ctx()
+        addr_key = "AFFINITY AT SERANGOON|SERANGOON NORTH AVENUE 1"
+        token = store_addr_key(ctx, addr_key)
+        self.assertEqual(resolve_addr_key(ctx, token), addr_key)
+
+    def test_token_is_deterministic(self):
+        """Same addr_key yields the same token (so dedupe works)."""
+        from bot import store_addr_key
+        addr_key = "THE SAIL @ MARINA BAY|MARINA BOULEVARD"
+        self.assertEqual(store_addr_key(self._ctx(), addr_key),
+                         store_addr_key(self._ctx(), addr_key))
+
+    def test_resolve_unknown_token_returns_none(self):
+        """A token absent from user_data (e.g. after restart) resolves to None."""
+        from bot import resolve_addr_key
+        self.assertIsNone(resolve_addr_key(self._ctx(), "deadbeef"))
+
+    def test_resolve_legacy_literal_addr_key(self):
+        """Backward-compat: a literal PROJECT|STREET passes through unchanged."""
+        from bot import resolve_addr_key
+        legacy = "OLD PROJECT|OLD STREET"
+        self.assertEqual(resolve_addr_key(self._ctx(), legacy), legacy)
+
+    def test_all_callback_data_within_64_bytes(self):
+        """Every button's callback_data must be ≤ 64 bytes, even for long names."""
+        from bot import store_addr_key, build_amenity_keyboard
+        ctx = self._ctx()
+        # A deliberately long project + street that overflowed the old scheme.
+        token = store_addr_key(
+            ctx, "AFFINITY AT SERANGOON DEVELOPMENT|SERANGOON NORTH AVENUE 1 SINGAPORE"
+        )
+        keyboard = build_amenity_keyboard(token)
+        for row in keyboard.inline_keyboard:
+            for button in row:
+                self.assertLessEqual(
+                    len(button.callback_data.encode("utf-8")), 64,
+                    f"callback_data too long: {button.callback_data!r}",
+                )
+
+
+# ══════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════
 
@@ -477,6 +627,8 @@ def run_tests():
         TestCacheFreshness,
         TestStorage,
         TestURACacheIntegration,
+        TestPriceTrend,
+        TestAmenityCallbackButtons,
     ]
 
     for cls in test_classes:

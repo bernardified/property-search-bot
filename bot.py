@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import logging
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from ura import search_property, format_transactions
+from ura import search_property, format_transactions, price_trend, format_price_trend
 from maps import get_nearby_info
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
@@ -69,19 +70,42 @@ def build_district_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def build_amenity_keyboard(addr_key: str) -> InlineKeyboardMarkup:
-    """Build the standard amenity button keyboard."""
+def store_addr_key(context: ContextTypes.DEFAULT_TYPE, addr_key: str) -> str:
+    """Stash the full "PROJECT|STREET" addr_key and return a short token.
+
+    Telegram caps callback_data at 64 bytes. Embedding full project + street
+    names overflows for longer names (e.g. "AFFINITY AT SERANGOON"), so we map
+    the addr_key to an 8-char token and carry only the token in callback_data.
+    """
+    token = hashlib.md5(addr_key.encode("utf-8")).hexdigest()[:8]
+    context.user_data.setdefault("addr_keys", {})[token] = addr_key
+    return token
+
+
+def resolve_addr_key(context: ContextTypes.DEFAULT_TYPE, token: str) -> str | None:
+    """Look up a stored addr_key by token. None if unknown (e.g. after restart)."""
+    # Backward-compat: legacy buttons embedded the literal "PROJECT|STREET".
+    if "|" in token:
+        return token
+    return context.user_data.get("addr_keys", {}).get(token)
+
+
+def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Build the standard amenity button keyboard. `token` resolves to an addr_key."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{addr_key}"),
-            InlineKeyboardButton("🏫 Primary Schools", callback_data=f"amenity:schools:{addr_key}"),
+            InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{token}"),
+            InlineKeyboardButton("🏫 Primary Schools", callback_data=f"amenity:schools:{token}"),
         ],
         [
-            InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{addr_key}"),
-            InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{addr_key}"),
+            InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{token}"),
+            InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
         ],
         [
-            InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{addr_key}"),
+            InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{token}"),
+            InlineKeyboardButton("📈 Price Trend", callback_data=f"amenity:trend:{token}"),
+        ],
+        [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
         ],
     ])
@@ -361,8 +385,9 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parts = query.data.split(":", 2)
     amenity = parts[1]
-    addr_key = parts[2] if len(parts) > 2 else None
+    token = parts[2] if len(parts) > 2 else None
 
+    addr_key = resolve_addr_key(context, token) if token else None
     if not addr_key:
         await query.message.reply_text("⚠️ Could not identify property. Please search again.")
         return
@@ -402,6 +427,15 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         sale_prices[band_label] = {"price": txn.get("price")}
                 rental_result = get_rental_by_band(project_name, sale_prices)
                 text = format_rental(rental_result)
+            sale_prices = {}
+            if "error" not in ura_result:
+                for band_label, txn in ura_result.get("bands", {}).items():
+                    sale_prices[band_label] = {"price": txn.get("price")}
+            rental_result = get_rental_by_band(project_name, sale_prices)
+            text = format_rental(rental_result)
+        elif amenity == "trend":
+            # Price trend uses project name — indexed by development name in URA
+            text = format_price_trend(price_trend(project_name))
         else:
             maps_result = get_nearby_info(address)
 
@@ -548,8 +582,9 @@ async def handle_property_search(
         # Format: "PROJECT|STREET" — project for rental search, street for geocoding
         street = ura_result.get("street", "") if "error" not in ura_result else ""
         project = ura_result.get("development", development_name) if "error" not in ura_result else development_name
-        # Truncate each part to fit within Telegram's 64-char callback limit
-        addr_key = f"{project[:28]}|{street[:28]}"
+        # Stash full names behind a short token — full addr_key would overflow
+        # Telegram's 64-byte callback_data limit for longer property names.
+        addr_token = store_addr_key(context, f"{project}|{street}")
 
         # 5. Send transaction results
         await loading_msg.delete()
@@ -569,7 +604,7 @@ async def handle_property_search(
 
         await msg.reply_text(
             "Tap to explore nearby amenities:",
-            reply_markup=build_amenity_keyboard(addr_key)
+            reply_markup=build_amenity_keyboard(addr_token)
         )
 
     except Exception as e:

@@ -58,12 +58,22 @@ def get_project_info(project_name: str, pipeline_data: list) -> dict:
 
 
 
-def search_property(development_name: str) -> dict:
+def _collect_matched_transactions(development_name: str) -> dict:
     """
-    Search for the latest transaction per size band for a given development.
-    Uses local cache — instant response after first load.
+    Fuzzy-match a development name against the URA cache and collect every
+    transaction across all matched blocks.
+
+    Shared by search_property() and price_trend() so the matching/ambiguity
+    logic lives in exactly one place.
+
+    Returns one of:
+      {"error": str}                      — no usable match
+      {"ambiguous": True, "candidates": …} — several close matches, ask user
+      {"matched_transactions": [...],      — success
+       "matched_project_name": str, "street": str,
+       "fuzzy_match": str|None, "alternatives": [...]}
     """
-    all_results, pipeline_data = get_ura_data()
+    all_results, _pipeline_data = get_ura_data()
     if not all_results:
         return {"error": "Could not load URA transaction data. Please try again later."}
 
@@ -175,6 +185,29 @@ def search_property(development_name: str) -> dict:
         for s, p in scored
         if p.get("project", "").upper() != matched_project_name
     ][:3]
+
+    return {
+        "matched_transactions": matched_transactions,
+        "matched_project_name": matched_transactions[0]["project"],
+        "street": matched_transactions[0]["street"],
+        "fuzzy_match": fuzzy_name,
+        "alternatives": alternatives,
+    }
+
+
+def search_property(development_name: str) -> dict:
+    """
+    Search for the latest transaction per size band for a given development.
+    Uses local cache — instant response after first load.
+    """
+    matched = _collect_matched_transactions(development_name)
+    if "error" in matched or "ambiguous" in matched:
+        return matched
+
+    matched_transactions = matched["matched_transactions"]
+    fuzzy_name = matched["fuzzy_match"]
+    alternatives = matched["alternatives"]
+    _all_results, pipeline_data = get_ura_data()
 
     # Find the latest transaction per size band
     band_latest = {}
@@ -300,6 +333,167 @@ def search_property(development_name: str) -> dict:
 def _sale_type_label(type_code: str) -> str:
     """Convert URA sale type code to label."""
     return {"1": "New Sale", "2": "Sub Sale", "3": "Resale"}.get(str(type_code), type_code)
+
+
+# ── Price trend ───────────────────────────────────────────────────────────────
+#
+# Tracks overall average PSF over time (all size bands combined — PSF is already
+# size-normalised). Only resale (typeOfSale 3) and sub-sale (2) are counted;
+# new-sale prices reflect the developer's launch pricing, not the resale market,
+# so including them would distort the secondary-market trend.
+
+TREND_SALE_TYPES = {"2", "3"}        # sub-sale + resale only
+HALF_YEAR_TXN_THRESHOLD = 40         # >= this many txns over >= 2 yrs → half-yearly buckets
+
+
+def price_trend(development_name: str) -> dict:
+    """
+    Build an over-time average-PSF trend for a development.
+
+    Buckets adaptively: yearly by default, switching to half-yearly when there
+    is enough volume (HALF_YEAR_TXN_THRESHOLD txns spanning >= 2 years) for the
+    finer resolution to be meaningful. Empty periods are dropped.
+
+    Returns:
+      {"error": str} / {"ambiguous": ...}  — mirrors search_property's contract
+      {"development", "street", "fuzzy_match",
+       "periods": [{"label", "avg_psf", "count"}, ...],   # ascending in time
+       "pct_change": int|None, "span_label": str, "total_txns": int}
+    """
+    matched = _collect_matched_transactions(development_name)
+    if "error" in matched or "ambiguous" in matched:
+        return matched
+
+    # (year, half) -> list of PSF values.  half is 1 (Jan–Jun) or 2 (Jul–Dec).
+    psf_by_period: dict[tuple[int, int], list[int]] = {}
+    total = 0
+
+    for item in matched["matched_transactions"]:
+        txn = item["txn"]
+
+        if str(txn.get("typeOfSale", "")) not in TREND_SALE_TYPES:
+            continue
+
+        property_type = txn.get("propertyType", "")
+        if any(t in property_type.lower() for t in ["detached", "terrace", "bungalow"]):
+            continue
+
+        area_sqm = parse_float(txn.get("area", 0))
+        if area_sqm is None or area_sqm <= 0:
+            continue
+        area_sqft = sqm_to_sqft(area_sqm)
+
+        price = parse_float(txn.get("price", 0))
+        if not price:
+            continue
+
+        dt = parse_mmyy_date(txn.get("contractDate", ""))
+        if not dt:
+            continue
+
+        psf = round(price / area_sqft)
+        half = 1 if dt.month <= 6 else 2
+        psf_by_period.setdefault((dt.year, half), []).append(psf)
+        total += 1
+
+    if total == 0:
+        return {"error": f'No resale or sub-sale transactions found for "{development_name}" to build a price trend.'}
+
+    year_span = max(y for y, _ in psf_by_period) - min(y for y, _ in psf_by_period)
+    half_yearly = total >= HALF_YEAR_TXN_THRESHOLD and year_span >= 1
+
+    # Re-key into the chosen granularity. For yearly, collapse both halves into half=0.
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for (year, half), psfs in psf_by_period.items():
+        key = (year, half) if half_yearly else (year, 0)
+        buckets.setdefault(key, []).extend(psfs)
+
+    periods = []
+    for (year, half) in sorted(buckets):
+        psfs = buckets[(year, half)]
+        label = f"{year} H{half}" if half_yearly else str(year)
+        periods.append({
+            "label": label,
+            "avg_psf": round(sum(psfs) / len(psfs)),
+            "count": len(psfs),
+        })
+
+    # Headline % change: first vs last populated period.
+    if len(periods) >= 2:
+        first, last = periods[0]["avg_psf"], periods[-1]["avg_psf"]
+        pct_change = round((last - first) / first * 100) if first else None
+    else:
+        pct_change = None
+
+    span_label = _trend_span_label(periods)
+
+    return {
+        "development": matched["matched_project_name"],
+        "street": matched["street"],
+        "fuzzy_match": matched["fuzzy_match"],
+        "periods": periods,
+        "pct_change": pct_change,
+        "span_label": span_label,
+        "total_txns": total,
+    }
+
+
+def _trend_span_label(periods: list[dict]) -> str:
+    """Human label for the time span covered, e.g. '4 yrs' or '8 mths'."""
+    if len(periods) < 2:
+        return ""
+
+    def start_month(label: str) -> tuple[int, int]:
+        parts = label.split()
+        year = int(parts[0])
+        month = 7 if (len(parts) > 1 and parts[1] == "H2") else 1
+        return year, month
+
+    fy, fm = start_month(periods[0]["label"])
+    ly, lm = start_month(periods[-1]["label"])
+    months = (ly - fy) * 12 + (lm - fm)
+    if months >= 12:
+        years = round(months / 12)
+        return f"{years} yr" if years == 1 else f"{years} yrs"
+    return f"{months} mths"
+
+
+def format_price_trend(result: dict) -> str:
+    """Render a price_trend() result as a Telegram (Markdown) message with text bars."""
+    if "error" in result:
+        return f"❌ {result['error']}"
+    if "ambiguous" in result:
+        return "❌ Multiple matching developments — please search by the exact name first."
+
+    development = result.get("development", "Unknown")
+    periods = result.get("periods", [])
+    pct = result.get("pct_change")
+    span = result.get("span_label", "")
+    total = result.get("total_txns", 0)
+    fuzzy = result.get("fuzzy_match")
+
+    lines = [f"📈 *{development} — PSF trend*"]
+    if fuzzy:
+        lines.append(f"⚠️ _Did you mean: {fuzzy}?_")
+
+    if pct is not None and span:
+        arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "→")
+        sign = "+" if pct > 0 else ""
+        lines.append(f"{arrow} {sign}{pct}% over {span} · {total} txns")
+    else:
+        lines.append(f"{total} txns · _not enough history for a trend_")
+
+    lines += ["_resale + sub-sale only_", "─────────────────────"]
+
+    max_psf = max((p["avg_psf"] for p in periods), default=0)
+    BAR_WIDTH = 8
+    for p in periods:
+        filled = round(BAR_WIDTH * p["avg_psf"] / max_psf) if max_psf else 0
+        filled = max(1, filled)  # always show at least one block
+        bar = "█" * filled + "░" * (BAR_WIDTH - filled)
+        lines.append(f"`{p['label']:<7}` S${p['avg_psf']:,} {bar} ({p['count']})")
+
+    return "\n".join(lines)
 
 
 def format_transactions(result: dict) -> str:
