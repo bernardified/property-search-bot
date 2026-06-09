@@ -348,6 +348,19 @@ class TestMapsHelpers(unittest.TestCase):
         self.assertIn("walking", link)
         self.assertIn("1.35153", link)
 
+    def test_google_maps_link_name_origin_is_encoded(self):
+        """A name origin is URL-encoded with the ', Singapore' suffix."""
+        from maps import build_google_maps_link
+        link = build_google_maps_link("THE SAIL", 1.28, 103.85)
+        self.assertIn("origin=THE%20SAIL%2C%20Singapore", link)
+
+    def test_google_maps_link_coord_origin(self):
+        """A (lat, lng) origin routes from the raw coordinate, not a name."""
+        from maps import build_google_maps_link
+        link = build_google_maps_link((1.2808, 103.8527), 1.35, 103.86, travel_mode="transit")
+        self.assertIn("origin=1.2808,103.8527", link)
+        self.assertIn("transit", link)
+
     def test_mrt_exit_label_format(self):
         """MRT result should include exit label if available."""
         mrt = {"name": "Lorong Chuan", "exit_label": " (Exit A)", "dest_lat": 1.35, "dest_lng": 103.86, "straight_dist": 100}
@@ -370,6 +383,67 @@ class TestMapsHelpers(unittest.TestCase):
 
     def test_unknown_station_returns_empty(self):
         self.assertEqual(get_line_for_exit("FAKE STATION MRT"), "")
+
+
+# ══════════════════════════════════════════════════════
+# 5b. POSTAL-CODE LOOKUP
+# ══════════════════════════════════════════════════════
+
+class TestPostalCodeLookup(unittest.TestCase):
+    """resolve_postal_code maps a 6-digit code to its OneMap building record."""
+
+    def _result(self, **overrides):
+        base = {
+            "BUILDING": "THE SAIL @ MARINA BAY",
+            "ROAD_NAME": "MARINA BOULEVARD",
+            "ADDRESS": "2 MARINA BOULEVARD THE SAIL @ MARINA BAY SINGAPORE 018987",
+            "POSTAL": "018987",
+            "LATITUDE": "1.28119",
+            "LONGITUDE": "103.85432",
+        }
+        base.update(overrides)
+        return base
+
+    def test_resolves_building_name(self):
+        from maps import resolve_postal_code
+        with patch("maps.get_onemap_token", return_value="tok"), \
+             patch("maps.search_onemap", return_value=[self._result()]):
+            res = resolve_postal_code("018987")
+        self.assertIsNotNone(res)
+        self.assertEqual(res["building"], "THE SAIL @ MARINA BAY")
+        self.assertEqual(res["postal"], "018987")
+        self.assertAlmostEqual(res["lat"], 1.28119)
+        self.assertAlmostEqual(res["lng"], 103.85432)
+
+    def test_prefers_exact_postal_match(self):
+        from maps import resolve_postal_code
+        nearby = self._result(BUILDING="WRONG BUILDING", POSTAL="018000")
+        exact = self._result()
+        with patch("maps.get_onemap_token", return_value="tok"), \
+             patch("maps.search_onemap", return_value=[nearby, exact]):
+            res = resolve_postal_code("018987")
+        self.assertEqual(res["building"], "THE SAIL @ MARINA BAY")
+
+    def test_nil_building_returns_empty_building(self):
+        from maps import resolve_postal_code
+        landed = self._result(BUILDING="NIL")
+        with patch("maps.get_onemap_token", return_value="tok"), \
+             patch("maps.search_onemap", return_value=[landed]):
+            res = resolve_postal_code("018987")
+        self.assertEqual(res["building"], "")
+        self.assertEqual(res["road"], "MARINA BOULEVARD")
+
+    def test_no_results_returns_none(self):
+        from maps import resolve_postal_code
+        with patch("maps.get_onemap_token", return_value="tok"), \
+             patch("maps.search_onemap", return_value=[]):
+            self.assertIsNone(resolve_postal_code("000000"))
+
+    def test_non_postal_input_returns_none(self):
+        from maps import resolve_postal_code
+        # Short-circuits before any OneMap call.
+        self.assertIsNone(resolve_postal_code("12345"))    # 5 digits
+        self.assertIsNone(resolve_postal_code("ABCDEF"))   # not numeric
 
 
 # ══════════════════════════════════════════════════════

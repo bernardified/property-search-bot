@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 from ura import search_property, format_transactions, price_trend, format_price_trend, render_price_trend_png
-from maps import get_nearby_info
+from maps import get_nearby_info, resolve_postal_code
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
 from cache.cache_rental import force_refresh_rental, rental_cache_status
@@ -90,6 +90,21 @@ def resolve_addr_key(context: ContextTypes.DEFAULT_TYPE, token: str) -> str | No
     return context.user_data.get("addr_keys", {}).get(token)
 
 
+def store_addr_coords(context: ContextTypes.DEFAULT_TYPE, token: str, lat: float, lng: float):
+    """Stash exact origin coords (from a postal-code lookup) under an addr token.
+
+    Lets the amenity buttons reuse the precise OneMap coordinate instead of
+    re-geocoding the development name via Google — keeping both the nearest-
+    amenity selection and the walk/transit times pinned to the searched address.
+    """
+    context.user_data.setdefault("addr_coords", {})[token] = (lat, lng)
+
+
+def resolve_addr_coords(context: ContextTypes.DEFAULT_TYPE, token: str | None):
+    """Look up stored origin coords by token, or None if none were stored."""
+    return context.user_data.get("addr_coords", {}).get(token) if token else None
+
+
 def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
     """Build the standard amenity button keyboard. `token` resolves to an addr_key."""
     return InlineKeyboardMarkup([
@@ -163,9 +178,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Distance to nearest shopping mall\n"
         "• Nearest supermarkets\n"
         "• Rental prices & gross yield\n\n"
-        "*Two ways to search:*\n"
+        "*Ways to search:*\n"
         "🔍 *By Name* — Search a specific development\n"
-        "📍 *By District* — Browse top developments by area\n\n"
+        "📍 *By District* — Browse top developments by area\n"
+        "📮 *By Postal Code* — Just send a 6-digit postal code\n\n"
         "Pick an option below to get started.\n\n"
         "Commands:\n"
         "/search — find a property\n"
@@ -334,7 +350,9 @@ async def search_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     mode = query.data.split(":")[1]
 
     if mode == "name":
-        await query.edit_message_text("🏠 Please enter the property or development name:")
+        await query.edit_message_text(
+            "🏠 Enter the property/development name — or a 6-digit postal code:"
+        )
 
     elif mode == "district":
         await query.edit_message_reply_markup(reply_markup=None)
@@ -449,7 +467,14 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # per-period bars would just duplicate the PNG, so drop them.
             text = format_price_trend(trend_result, include_bars=photo is None)
         else:
-            maps_result = get_nearby_info(address)
+            # Postal searches stash the exact OneMap coordinate — use it as the
+            # origin so amenity selection and walk/transit times match the real
+            # address; name searches fall back to geocoding `address` by name.
+            coords = resolve_addr_coords(context, token)
+            if coords:
+                maps_result = get_nearby_info(address, coords[0], coords[1])
+            else:
+                maps_result = get_nearby_info(address)
 
             if amenity == "mrt":
                 text = format_amenity_list(
@@ -540,6 +565,43 @@ async def handle_property_search(
     message=None
 ):
     msg = message or update.message
+
+    # Postal-code search: a bare 6-digit code is resolved to its development
+    # name via OneMap, then searched like any other name. Only free-text entry
+    # can produce a postal code — deep links / list buttons always pass names.
+    postal_coords = None   # exact OneMap origin, reused by the amenity buttons
+    postal_match = re.fullmatch(r"\s*(\d{6})\s*", development_name)
+    if postal_match:
+        postal = postal_match.group(1)
+        looking = await msg.reply_text(
+            f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
+        )
+        resolved = resolve_postal_code(postal)
+        await looking.delete()
+        if not resolved:
+            await msg.reply_text(
+                f"❌ Couldn't find any address for postal code *{postal}*.\n"
+                "Please double-check the 6-digit code and try again.",
+                parse_mode="Markdown",
+            )
+            return
+        if not resolved.get("building"):
+            road = resolved.get("road", "").title()
+            where = f" ({road})" if road else ""
+            await msg.reply_text(
+                f"❌ Postal code *{postal}*{where} doesn't map to a private "
+                "residential development — there's no building name on record "
+                "(it may be a landed home, HDB block, or commercial address).\n\n"
+                "Try searching by the development name instead.",
+                parse_mode="Markdown",
+            )
+            return
+        # OneMap building name becomes the search term; the loading message below
+        # then shows the resolved development name.
+        development_name = resolved["building"].title()
+        if resolved.get("lat") is not None and resolved.get("lng") is not None:
+            postal_coords = (resolved["lat"], resolved["lng"])
+
     loading_msg = await msg.reply_text(
         f"🔍 Searching for *{development_name}*...\nThis may take a few seconds.",
         parse_mode="Markdown",
@@ -600,6 +662,10 @@ async def handle_property_search(
         # Stash full names behind a short token — full addr_key would overflow
         # Telegram's 64-byte callback_data limit for longer property names.
         addr_token = store_addr_key(context, f"{project}|{street}")
+        # Postal searches carry the exact OneMap coordinate — stash it so the
+        # amenity buttons skip Google geocoding and pin to the real address.
+        if postal_coords:
+            store_addr_coords(context, addr_token, *postal_coords)
 
         # 5. Send transaction results
         await loading_msg.delete()
