@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from ura import search_property, format_transactions, price_trend, format_price_trend
+from ura import search_property, format_transactions, price_trend, format_price_trend, render_price_trend_png
 from maps import get_nearby_info
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
@@ -412,6 +412,8 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loading = await query.message.reply_text("🔍 Fetching...")
 
+    photo = None  # set by the trend branch when a PNG chart renders successfully
+
     try:
         if amenity == "rental":
             # Rental uses project name — indexed by development name in URA
@@ -437,7 +439,15 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = format_rental(rental_result)
         elif amenity == "trend":
             # Price trend uses project name — indexed by development name in URA
-            text = format_price_trend(price_trend(project_name))
+            trend_result = price_trend(project_name)
+            try:
+                photo = render_price_trend_png(trend_result)
+            except Exception as e:
+                logger.warning(f"PSF trend chart render failed: {e}")
+                photo = None
+            # With a chart, the caption only needs the header/stat summary; the
+            # per-period bars would just duplicate the PNG, so drop them.
+            text = format_price_trend(trend_result, include_bars=photo is None)
         else:
             maps_result = get_nearby_info(address)
 
@@ -493,7 +503,10 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "Unknown amenity type."
 
         await loading.delete()
-        await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+        if photo:
+            await query.message.reply_photo(photo=photo, caption=text, parse_mode="Markdown")
+        else:
+            await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Amenity callback failed: {e}", exc_info=True)

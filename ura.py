@@ -1,10 +1,13 @@
 import os
 import difflib
+import logging
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
 from cache.cache_ura import get_ura_data
 from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date, format_mmyy_date
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -428,14 +431,21 @@ def price_trend(development_name: str) -> dict:
         key = (year, half) if half_yearly else (year, 0)
         buckets.setdefault(key, []).extend(psfs)
 
+    # The most recent calendar period may still be in progress (e.g. 2026 H1
+    # queried in June 2026): flag it so the visual can mark it as incomplete.
+    now = datetime.now()
+    cur_half = 1 if now.month <= 6 else 2
+
     periods = []
     for (year, half) in sorted(buckets):
         psfs = buckets[(year, half)]
         label = f"{year} H{half}" if half_yearly else str(year)
+        partial = (year, half) == (now.year, cur_half) if half_yearly else (year == now.year)
         periods.append({
             "label": label,
             "avg_psf": round(sum(psfs) / len(psfs)),
             "count": len(psfs),
+            "partial": partial,
         })
 
     # Headline % change: first vs last populated period.
@@ -510,8 +520,14 @@ def _scaled_bar(value: float, lo: float, hi: float, width: int = 8) -> str:
     return bar + "░" * (width - full - (1 if rem else 0))
 
 
-def format_price_trend(result: dict) -> str:
-    """Render a price_trend() result as a Telegram (Markdown) message with text bars."""
+def format_price_trend(result: dict, include_bars: bool = True) -> str:
+    """
+    Render a price_trend() result as a Telegram (Markdown) message.
+
+    With include_bars=True (default) the full text chart is rendered. With
+    include_bars=False only the header/stat summary is produced — used as a
+    compact caption when the PNG chart carries the per-period detail instead.
+    """
     if "error" in result:
         return f"❌ {result['error']}"
     if "ambiguous" in result:
@@ -523,6 +539,7 @@ def format_price_trend(result: dict) -> str:
     span = result.get("span_label", "")
     total = result.get("total_txns", 0)
     fuzzy = result.get("fuzzy_match")
+    has_partial = any(p.get("partial") for p in periods)
 
     lines = [f"📈 *{development} — PSF trend*"]
     if fuzzy:
@@ -539,19 +556,110 @@ def format_price_trend(result: dict) -> str:
         stat = f"{total} txns · _not enough history for a trend_"
     lines.append(f"`{spark}`  {stat}" if spark else stat)
 
-    lines += ["_resale + sub-sale only_", "─────────────────────"]
+    lines.append("_resale + sub-sale only_")
 
-    if psf_values:
+    if include_bars and psf_values:
+        lines.append("─────────────────────")
         lo, hi = min(psf_values), max(psf_values)
         psf_w = max(len(f"{v:,}") for v in psf_values)
         cnt_w = max(len(str(p["count"])) for p in periods)
+        lbl_w = max(len(p["label"]) + (1 if p.get("partial") else 0) for p in periods)
         for p in periods:
             bar = _scaled_bar(p["avg_psf"], lo, hi)
             psf_str = f"{p['avg_psf']:,}".rjust(psf_w)
             cnt = str(p["count"]).rjust(cnt_w)
-            lines.append(f"`{p['label']:<7} S${psf_str} {bar} ({cnt})`")
+            label = p["label"] + ("*" if p.get("partial") else "")
+            lines.append(f"`{label:<{lbl_w}} S${psf_str} {bar} ({cnt})`")
+
+    if has_partial and include_bars:
+        lines.append("_\\* current period — still in progress_")
 
     return "\n".join(lines)
+
+
+def render_price_trend_png(result: dict) -> bytes | None:
+    """
+    Render a price_trend() result as a PNG line chart (bytes), or None when there
+    is nothing chartable (error/ambiguous result, or fewer than 2 periods).
+
+    matplotlib is imported lazily with the headless Agg backend so a missing or
+    broken install only disables the chart — callers fall back to the text view.
+    """
+    if "error" in result or "ambiguous" in result:
+        return None
+    periods = result.get("periods", [])
+    if len(periods) < 2:
+        return None
+
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        logger.warning("PSF trend chart disabled — matplotlib unavailable: %s", e)
+        return None
+
+    try:
+        development = result.get("development", "Unknown")
+        pct = result.get("pct_change")
+        span = result.get("span_label", "")
+        total = result.get("total_txns", 0)
+
+        labels = [p["label"] for p in periods]
+        psf = [p["avg_psf"] for p in periods]
+        x = list(range(len(periods)))
+
+        line_color = "#1f77b4"
+        up = pct is not None and pct > 0
+
+        fig, ax = plt.subplots(figsize=(8, 4.2), dpi=140)
+        ax.plot(x, psf, color=line_color, linewidth=2, zorder=2)
+
+        # Solid markers for completed periods; a hollow marker for an in-progress one.
+        for xi, p in zip(x, periods):
+            if p.get("partial"):
+                ax.plot(xi, p["avg_psf"], marker="o", markersize=9, markerfacecolor="white",
+                        markeredgecolor=line_color, markeredgewidth=2, zorder=3)
+            else:
+                ax.plot(xi, p["avg_psf"], marker="o", markersize=7, color=line_color, zorder=3)
+
+        # Annotate each point with its PSF value.
+        span_psf = (max(psf) - min(psf)) or 1
+        for xi, p in zip(x, periods):
+            note = f"{p['avg_psf']:,}" + (" *" if p.get("partial") else "")
+            ax.annotate(note, (xi, p["avg_psf"]), textcoords="offset points",
+                        xytext=(0, 9), ha="center", fontsize=9, color="#333")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45 if len(labels) > 6 else 0, ha="right" if len(labels) > 6 else "center")
+        ax.set_ylabel("Avg PSF (S$)", fontsize=10)
+        ax.set_ylim(min(psf) - span_psf * 0.18, max(psf) + span_psf * 0.22)
+        ax.margins(x=0.06)
+        ax.grid(axis="y", linestyle=":", alpha=0.5)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        if pct is not None and span:
+            arrow = "▲" if up else ("▼" if pct < 0 else "►")
+            sign = "+" if pct > 0 else ""
+            subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  resale + sub-sale only"
+        else:
+            subtitle = f"{total} txns  ·  resale + sub-sale only"
+        has_partial = any(p.get("partial") for p in periods)
+        if has_partial:
+            subtitle += "   (* current period still in progress)"
+
+        ax.set_title(f"{development} — PSF trend", fontsize=13, fontweight="bold", loc="left", pad=22)
+        ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color="#666", va="bottom")
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning("PSF trend chart render failed: %s", e, exc_info=True)
+        return None
 
 
 def format_transactions(result: dict) -> str:
