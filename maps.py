@@ -110,12 +110,19 @@ def get_exit_letter(name: str) -> str:
 # ── Google Places — mall only ─────────────────────────────────────────────────
 
 def find_nearest_mall(lat: float, lng: float) -> dict | None:
-    """Use Google Places to find nearest shopping mall."""
+    """Use Google Places to find nearest shopping mall.
+
+    Uses rankby=distance (not radius) so genuinely-nearest malls surface.
+    A radius+keyword search ranks by Google's "prominence" instead, which
+    drops small neighbourhood malls — e.g. Hougang 1 (388m) was being hidden
+    behind prominent malls 1.6km+ away. rankby=distance forbids `radius` and
+    needs a keyword/type; "shopping mall" keeps the list to real malls
+    (type=shopping_mall alone pulls in mis-tagged shops/warehouses).
+    """
     params = {
         "location": f"{lat},{lng}",
-        "radius": 2000,
+        "rankby": "distance",
         "keyword": "shopping mall",
-        "type": "shopping_mall",
         "key": GOOGLE_MAPS_API_KEY,
     }
     try:

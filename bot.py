@@ -399,8 +399,16 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_name = addr_key
         street_address = addr_key
 
-    # Use street for geocoding, project name for rental search
-    address = street_address if street_address else project_name
+    # Geocode with project + street, not street alone. A long road (e.g.
+    # "YIO CHU KANG ROAD") geocodes to an arbitrary midpoint far from the
+    # actual development — Hundred Palms Residences (264 Yio Chu Kang Rd) was
+    # resolving ~2.5km north next to Lentor MRT. The project name pins Google
+    # to the building; for generic placeholder names it harmlessly falls back
+    # to the street midpoint.
+    if project_name and street_address and project_name != street_address:
+        address = f"{project_name}, {street_address}"
+    else:
+        address = street_address if street_address else project_name
 
     loading = await query.message.reply_text("🔍 Fetching...")
 
