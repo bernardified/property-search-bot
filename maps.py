@@ -56,6 +56,59 @@ def geocode_address(address: str) -> tuple[float, float] | None:
 
 
 
+# ── Postal-code lookup ────────────────────────────────────────────────────────
+
+POSTAL_CODE_RE = re.compile(r"^\d{6}$")
+
+
+def resolve_postal_code(postal: str) -> dict | None:
+    """Resolve a 6-digit Singapore postal code to its building / development.
+
+    Uses OneMap's elastic-search endpoint, which returns the building name,
+    road, full address and coordinates for a postal code. Postal codes are a
+    unique key in OneMap, so the matching record (if any) is authoritative.
+
+    Returns:
+        {"building", "road", "address", "postal", "lat", "lng"}  — building may
+        be "" when OneMap has no building name on record (landed homes, some
+        HDB blocks), in which case it can't be matched to a private development.
+        None — when the postal code yields no OneMap result at all.
+    """
+    postal = postal.strip()
+    if not POSTAL_CODE_RE.match(postal):
+        return None
+
+    results = search_onemap(postal, get_onemap_token())
+    if not results:
+        return None
+
+    # OneMap can return nearby hits alongside the exact one — prefer the record
+    # whose POSTAL matches exactly, falling back to the top result.
+    match = next(
+        (r for r in results if str(r.get("POSTAL", "")).strip() == postal),
+        results[0],
+    )
+
+    building = str(match.get("BUILDING", "")).strip()
+    if building.upper() in ("NIL", "NA", ""):
+        building = ""
+
+    try:
+        lat = float(match["LATITUDE"])
+        lng = float(match["LONGITUDE"])
+    except (KeyError, TypeError, ValueError):
+        lat = lng = None
+
+    return {
+        "building": building,
+        "road": str(match.get("ROAD_NAME", "")).strip(),
+        "address": str(match.get("ADDRESS", "")).strip(),
+        "postal": postal,
+        "lat": lat,
+        "lng": lng,
+    }
+
+
 # ── OneMap MRT search ─────────────────────────────────────────────────────────
 
 def search_onemap(query: str, token: str) -> list:
@@ -221,11 +274,21 @@ def get_walking_distances_bulk(origin_lat, origin_lng, destinations) -> list:
         return [None] * len(destinations)
 
 
-def build_google_maps_link(origin_name, dest_lat, dest_lng, travel_mode: str = "walking") -> str:
-    encoded = quote(f"{origin_name}, Singapore")
+def build_google_maps_link(origin, dest_lat, dest_lng, travel_mode: str = "walking") -> str:
+    """Directions link from an origin to a destination.
+
+    `origin` may be a name string (geocoded by Google from the text) or a
+    (lat, lng) tuple. Use coords when the caller already knows the exact point
+    so the routed directions match the distance/time we computed from the same
+    coordinate; use a name when only the address text is known.
+    """
+    if isinstance(origin, (tuple, list)):
+        origin_param = f"{origin[0]},{origin[1]}"
+    else:
+        origin_param = quote(f"{origin}, Singapore")
     return (
         f"https://www.google.com/maps/dir/?api=1"
-        f"&origin={encoded}"
+        f"&origin={origin_param}"
         f"&destination={dest_lat},{dest_lng}"
         f"&travelmode={travel_mode}"
     )
@@ -313,11 +376,24 @@ def find_nearest_primary_schools(lat: float, lng: float) -> list:
 
 # ── Main function ─────────────────────────────────────────────────────────────
 
-def get_nearby_info(address: str) -> dict:
-    coords = geocode_address(address)
-    if not coords:
-        return {"error": f'Could not locate "{address}" on Google Maps.'}
-    lat, lng = coords
+def get_nearby_info(address: str, lat: float | None = None, lng: float | None = None) -> dict:
+    """Find nearby amenities (MRT, malls, schools, supermarkets) for a location.
+
+    The origin coordinate drives both candidate selection (nearest N) and the
+    walking/transit distances. When `lat`/`lng` are supplied (e.g. the exact
+    OneMap coordinate from a postal-code search) they are used directly —
+    skipping Google geocoding — and directions links are routed from those
+    coords so the displayed times match the tap-through. Otherwise `address`
+    is geocoded by name as before.
+    """
+    if lat is not None and lng is not None:
+        origin = (lat, lng)   # route links from the exact coordinate
+    else:
+        coords = geocode_address(address)
+        if not coords:
+            return {"error": f'Could not locate "{address}" on Google Maps.'}
+        lat, lng = coords
+        origin = address      # only the address text is known — geocode by name
 
     # ── MRT via OneMap cached station data ───────────────────────────────────
     mrt_candidates = onemap_find_nearest_mrts(lat, lng, top_n=3)
@@ -338,10 +414,10 @@ def get_nearby_info(address: str) -> dict:
                     "distance_m": dist["distance_m"],
                     "dest_lat": station["dest_lat"],
                     "dest_lng": station["dest_lng"],
-                    "maps_link": build_google_maps_link(address, station["dest_lat"], station["dest_lng"]),
+                    "maps_link": build_google_maps_link(origin, station["dest_lat"], station["dest_lng"]),
                 })
 
-        mrt_results = _enrich_with_transit(lat, lng, address, mrt_results)
+        mrt_results = _enrich_with_transit(lat, lng, origin, mrt_results)
 
     # ── Mall via Google Places ────────────────────────────────────────────────
     mall_results = []
@@ -361,9 +437,9 @@ def get_nearby_info(address: str) -> dict:
                 "distance_m": item["distance_m"],
                 "dest_lat": item["lat"],
                 "dest_lng": item["lng"],
-                "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
+                "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
             })
-        mall_results = _enrich_with_transit(lat, lng, address, mall_results)
+        mall_results = _enrich_with_transit(lat, lng, origin, mall_results)
 
     # ── Primary schools via OneMap ───────────────────────────────────────────
     school_results = []
@@ -380,10 +456,10 @@ def get_nearby_info(address: str) -> dict:
                     "distance_m": dist["distance_m"],
                     "dest_lat": school["lat"],
                     "dest_lng": school["lng"],
-                    "maps_link": build_google_maps_link(address, school["lat"], school["lng"]),
+                    "maps_link": build_google_maps_link(origin, school["lat"], school["lng"]),
                     "dist": school["dist"],
                 })
-        school_results = _enrich_with_transit(lat, lng, address, school_results)
+        school_results = _enrich_with_transit(lat, lng, origin, school_results)
 
     # ── Supermarkets via Google Places ──────────────────────────────────────────
     supermarket_results = []
@@ -403,8 +479,8 @@ def get_nearby_info(address: str) -> dict:
                 "distance_m": item["distance_m"],
                 "dest_lat": item["lat"],
                 "dest_lng": item["lng"],
-                "maps_link": build_google_maps_link(address, item["lat"], item["lng"]),
+                "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
             })
-        supermarket_results = _enrich_with_transit(lat, lng, address, supermarket_results)
+        supermarket_results = _enrich_with_transit(lat, lng, origin, supermarket_results)
 
     return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results}
