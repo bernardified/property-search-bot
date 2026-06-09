@@ -553,6 +553,61 @@ class TestPriceTrend(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
+# AMENITY CALLBACK BUTTONS
+# ══════════════════════════════════════════════════════
+
+class TestAmenityCallbackButtons(unittest.TestCase):
+    """Amenity button callback_data must stay within Telegram's 64-byte limit."""
+
+    @staticmethod
+    def _ctx():
+        """A minimal stand-in for ContextTypes.DEFAULT_TYPE (just needs user_data)."""
+        return MagicMock(user_data={})
+
+    def test_token_round_trips(self):
+        """store_addr_key → resolve_addr_key returns the original addr_key."""
+        from bot import store_addr_key, resolve_addr_key
+        ctx = self._ctx()
+        addr_key = "AFFINITY AT SERANGOON|SERANGOON NORTH AVENUE 1"
+        token = store_addr_key(ctx, addr_key)
+        self.assertEqual(resolve_addr_key(ctx, token), addr_key)
+
+    def test_token_is_deterministic(self):
+        """Same addr_key yields the same token (so dedupe works)."""
+        from bot import store_addr_key
+        addr_key = "THE SAIL @ MARINA BAY|MARINA BOULEVARD"
+        self.assertEqual(store_addr_key(self._ctx(), addr_key),
+                         store_addr_key(self._ctx(), addr_key))
+
+    def test_resolve_unknown_token_returns_none(self):
+        """A token absent from user_data (e.g. after restart) resolves to None."""
+        from bot import resolve_addr_key
+        self.assertIsNone(resolve_addr_key(self._ctx(), "deadbeef"))
+
+    def test_resolve_legacy_literal_addr_key(self):
+        """Backward-compat: a literal PROJECT|STREET passes through unchanged."""
+        from bot import resolve_addr_key
+        legacy = "OLD PROJECT|OLD STREET"
+        self.assertEqual(resolve_addr_key(self._ctx(), legacy), legacy)
+
+    def test_all_callback_data_within_64_bytes(self):
+        """Every button's callback_data must be ≤ 64 bytes, even for long names."""
+        from bot import store_addr_key, build_amenity_keyboard
+        ctx = self._ctx()
+        # A deliberately long project + street that overflowed the old scheme.
+        token = store_addr_key(
+            ctx, "AFFINITY AT SERANGOON DEVELOPMENT|SERANGOON NORTH AVENUE 1 SINGAPORE"
+        )
+        keyboard = build_amenity_keyboard(token)
+        for row in keyboard.inline_keyboard:
+            for button in row:
+                self.assertLessEqual(
+                    len(button.callback_data.encode("utf-8")), 64,
+                    f"callback_data too long: {button.callback_data!r}",
+                )
+
+
+# ══════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════
 
@@ -573,6 +628,7 @@ def run_tests():
         TestStorage,
         TestURACacheIntegration,
         TestPriceTrend,
+        TestAmenityCallbackButtons,
     ]
 
     for cls in test_classes:
