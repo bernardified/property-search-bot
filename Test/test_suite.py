@@ -293,7 +293,9 @@ class TestRentalLogic(unittest.TestCase):
             ("500-600", "<= 600 sqft"),
             ("600-700", "601 – 700 sqft"),
             ("700-800", "701 – 800 sqft"),
-            ("1000-1100", "> 1000 sqft"),
+            ("1000-1100", "1001 – 1100 sqft"),  # midpoint 1050
+            ("1100-1200", "1101 – 1200 sqft"),  # midpoint 1150
+            ("1300-1400", "> 1200 sqft"),       # midpoint 1350
         ]
         for area_str, expected_band in cases:
             midpoint = parse_sqft_range(area_str)
