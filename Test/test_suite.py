@@ -608,6 +608,163 @@ class TestAmenityCallbackButtons(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
+# RENTAL PROJECT MATCHING (cross-development bleed guard)
+# ══════════════════════════════════════════════════════
+
+class TestRentalMatching(unittest.TestCase):
+    """
+    find_rental_project must resolve to the SAME development as the transaction
+    search and must NOT pull a neighbouring development's rental records when the
+    searched project has none of its own (the Lentor Hills Residences bug).
+    """
+
+    def setUp(self):
+        # Minimal fake rental dataset (only the 'project' key matters for matching).
+        self.rental_data = [
+            {"project": "MARINA BAY RESIDENCES", "rental": []},
+            {"project": "LENTOR MODERN", "rental": []},
+            {"project": "LENTOR HILLS", "rental": []},
+            {"project": "THE FLORENCE RESIDENCES", "rental": []},
+            {"project": "AFFINITY AT SERANGOON", "rental": []},
+        ]
+
+    def _names(self, search, data=None):
+        from rental import find_rental_project
+        return [p["project"] for p in find_rental_project(search, data if data is not None else self.rental_data)]
+
+    def test_exact_match(self):
+        self.assertEqual(self._names("MARINA BAY RESIDENCES"), ["MARINA BAY RESIDENCES"])
+
+    def test_legitimate_prefix_match(self):
+        """'MARINA BAY' is a substring of 'MARINA BAY RESIDENCES' — must still match."""
+        self.assertEqual(self._names("MARINA BAY"), ["MARINA BAY RESIDENCES"])
+
+    def test_trailing_token_variant(self):
+        """'THE FOO' vs 'FOO RESIDENCES' (neither a substring) must still match via words."""
+        data = [{"project": "FLORENCE RESIDENCES", "rental": []}]
+        self.assertEqual(self._names("THE FLORENCE", data), ["FLORENCE RESIDENCES"])
+
+    def test_cross_development_no_false_positive(self):
+        """
+        Under-construction 'LENTOR HILLS RESIDENCES' has NO rental records of its
+        own here — it must NOT bleed into neighbouring 'LENTOR MODERN' or the
+        shorter 'LENTOR HILLS'. The matcher returns [] rather than wrong data.
+        """
+        self.assertEqual(self._names("LENTOR HILLS RESIDENCES"), [])
+
+    def test_no_match_returns_empty(self):
+        self.assertEqual(self._names("SOME NONEXISTENT CONDO"), [])
+
+    def test_only_top_scored_returned(self):
+        """A weak neighbour is never mixed in with a strong (exact) match."""
+        names = self._names("AFFINITY AT SERANGOON")
+        self.assertEqual(names, ["AFFINITY AT SERANGOON"])
+
+    def test_street_disambiguates_fuzzy_match(self):
+        """
+        A fuzzy (non-exact) name match must be corroborated by an agreeing street,
+        so a string-similar development on a different road can't slip through.
+        """
+        from rental import find_rental_project
+        data = [{"project": "FLORENCE RESIDENCES", "street": "FLORENCE ROAD", "rental": []}]
+        # 'THE FLORENCE' scores 0.85 (all words found) — fuzzy, so street is checked.
+        wrong_street = [p["project"] for p in find_rental_project("THE FLORENCE", data, "HOUGANG AVENUE 3")]
+        right_street = [p["project"] for p in find_rental_project("THE FLORENCE", data, "FLORENCE ROAD")]
+        self.assertEqual(wrong_street, [])
+        self.assertEqual(right_street, ["FLORENCE RESIDENCES"])
+
+    def test_exact_match_ignores_street(self):
+        """An exact name match is trusted even when no street is supplied."""
+        from rental import find_rental_project
+        data = [{"project": "MARINA BAY RESIDENCES", "street": "MARINA BOULEVARD", "rental": []}]
+        names = [p["project"] for p in find_rental_project("MARINA BAY RESIDENCES", data, "")]
+        self.assertEqual(names, ["MARINA BAY RESIDENCES"])
+
+
+# ══════════════════════════════════════════════════════
+# UNDER-CONSTRUCTION GATE (new launch → no rentals)
+# ══════════════════════════════════════════════════════
+
+class TestUnderConstructionGate(unittest.TestCase):
+    """
+    search_property.under_construction gates rental lookups. The signal is URA
+    pipeline membership (uncompleted projects), NOT the presence of a secondary
+    market — so a COMPLETED new-sale-only development (no resales yet) is allowed
+    through and still shows its rentals.
+    """
+
+    AREA_SQM = 92.903  # ~1000 sqft
+
+    def _txn(self, sale="3"):
+        return {
+            "area": str(self.AREA_SQM), "price": "2000000", "contractDate": "0324",
+            "typeOfSale": sale, "propertyType": "Condominium",
+            "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
+        }
+
+    def _patch(self, txns, pipeline=None, project="TEST PROJECT", street="TEST ST"):
+        data = ([{"project": project, "street": street, "transaction": txns}], pipeline or [])
+        return patch("ura.get_ura_data", return_value=data)
+
+    def _pipeline(self, project="TEST PROJECT", top="2028"):
+        return [{"project": project, "expectedTOPYear": top, "totalUnits": 100}]
+
+    def test_under_construction_when_in_pipeline(self):
+        """New launch present in the pipeline feed → under_construction True."""
+        from ura import search_property
+        with self._patch([self._txn(sale="1") for _ in range(5)], pipeline=self._pipeline()):
+            result = search_property("TEST PROJECT")
+        self.assertNotIn("error", result)
+        self.assertTrue(result["under_construction"])
+
+    def test_completed_new_sale_only_not_gated(self):
+        """
+        The key case from review: a COMPLETED development with only new-sale txns
+        (no resales yet) is NOT in the pipeline → under_construction False, so its
+        real rentals are NOT suppressed.
+        """
+        from ura import search_property
+        with self._patch([self._txn(sale="1") for _ in range(5)], pipeline=[]):
+            result = search_property("TEST PROJECT")
+        self.assertFalse(result["under_construction"])
+
+    def test_completed_resale_not_gated(self):
+        from ura import search_property
+        with self._patch([self._txn(sale="3") for _ in range(5)], pipeline=[]):
+            result = search_property("TEST PROJECT")
+        self.assertFalse(result["under_construction"])
+
+    def test_demolished_twin_excluded_and_gated(self):
+        """
+        Chuan Park bug: a redevelopment sharing its base name with an en-bloc'd
+        '(DEMOLISHED)' block resolves to the LIVE block, and (being in the pipeline)
+        is under construction — so rentals are gated and the demolished resales
+        don't leak in.
+        """
+        from ura import search_property
+        live = {"project": "CHUAN PARK", "street": "LORONG CHUAN",
+                "transaction": [self._txn(sale="1") for _ in range(5)]}
+        demolished = {"project": "CHUAN PARK (DEMOLISHED)", "street": "LORONG CHUAN",
+                      "transaction": [self._txn(sale="3") for _ in range(5)]}
+        pipeline = self._pipeline(project="CHUAN PARK", top="na")
+        with patch("ura.get_ura_data", return_value=([live, demolished], pipeline)):
+            result = search_property("CHUAN PARK")
+        self.assertEqual(result["development"], "CHUAN PARK")
+        self.assertTrue(result["under_construction"])
+
+    def test_demolished_block_still_searchable_explicitly(self):
+        """Searching the demolished block by name still resolves to it."""
+        from ura import search_property
+        live = {"project": "CHUAN PARK", "street": "LORONG CHUAN",
+                "transaction": [self._txn(sale="1") for _ in range(5)]}
+        demolished = {"project": "CHUAN PARK (DEMOLISHED)", "street": "LORONG CHUAN",
+                      "transaction": [self._txn(sale="3") for _ in range(5)]}
+        with patch("ura.get_ura_data", return_value=([live, demolished], [])):
+            result = search_property("CHUAN PARK (DEMOLISHED)")
+        self.assertEqual(result["development"], "CHUAN PARK (DEMOLISHED)")
+
+
+# ══════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════
 
@@ -629,6 +786,8 @@ def run_tests():
         TestURACacheIntegration,
         TestPriceTrend,
         TestAmenityCallbackButtons,
+        TestRentalMatching,
+        TestUnderConstructionGate,
     ]
 
     for cls in test_classes:

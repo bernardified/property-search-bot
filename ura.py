@@ -1,4 +1,5 @@
 import os
+import difflib
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
@@ -58,6 +59,55 @@ def get_project_info(project_name: str, pipeline_data: list) -> dict:
 
 
 
+def score_name_match(search_name: str, project_name: str) -> float:
+    """
+    Score how well a project name matches a search term (0.0–1.0).
+
+    Single source of truth for development-name matching — used by both the
+    transaction search (_collect_matched_transactions) and the rental matcher
+    (rental.find_rental_project) so a name resolves to the SAME development on
+    both the sale and rental sides.
+
+    Scoring tiers:
+      1.0     — exact match (search == project name)
+      0.95    — search is a substring of project (e.g. "MARINA BAY" in "MARINA BAY RESIDENCES")
+      0.7–0.9 — project is a substring of search, length-weighted (user typed extra words)
+      0.85    — all significant search words found in project name (stopwords excluded)
+      0.6+    — partial word overlap
+      <0.6    — fuzzy character similarity (difflib ratio)
+    """
+    pn = project_name.upper().strip()
+    sn = search_name.upper().strip()
+
+    # Exact match
+    if sn == pn:
+        return 1.0
+
+    # Search term is contained within project name (e.g. "THE SAIL" in "THE SAIL @ MARINA BAY")
+    if sn in pn:
+        return 0.95
+
+    # Project name is contained within search term
+    # Lower score — user typed extra words that aren't in the project name
+    # e.g. "FAR HORIZON GARDENS" contains "HORIZON GARDENS" — wrong match
+    if pn in sn:
+        # Reward closer length match — longer project name = better match
+        length_ratio = len(pn) / len(sn)
+        return 0.7 + (0.2 * length_ratio)  # 0.7–0.9 range
+
+    # All search words found in project name (stopwords excluded)
+    search_words = [w for w in sn.split() if len(w) > 2 and w not in SEARCH_STOPWORDS]
+    if search_words:
+        found = sum(1 for w in search_words if w in pn)
+        if found == len(search_words):
+            return 0.85
+        if found > 0:
+            return 0.6 + (0.2 * found / len(search_words))
+
+    # Fuzzy character similarity
+    return difflib.SequenceMatcher(None, sn, pn).ratio()
+
+
 def _collect_matched_transactions(development_name: str) -> dict:
     """
     Fuzzy-match a development name against the URA cache and collect every
@@ -80,55 +130,22 @@ def _collect_matched_transactions(development_name: str) -> dict:
     search_name = development_name.upper().strip()
     matched_transactions = []
 
-    # Score each project against the search term
-    # Scoring tiers:
-    # 1.0  — exact match (search == project name)
-    # 0.95 — search is substring of project (e.g. "The Sail" in "THE SAIL @ MARINA BAY")
-    # 0.90 — project is substring of search (e.g. "HORIZON GARDENS" in "FAR HORIZON GARDENS")
-    #         penalised vs above because user typed MORE words than the project name
-    # 0.85 — all search words found in project name
-    # 0.6+ — fuzzy character similarity
-    import difflib
-
-    def match_score(project_name: str) -> float:
-        pn = project_name.upper().strip()
-        sn = search_name
-
-        # Exact match
-        if sn == pn:
-            return 1.0
-
-        # Search term is contained within project name (e.g. "THE SAIL" in "THE SAIL @ MARINA BAY")
-        if sn in pn:
-            return 0.95
-
-        # Project name is contained within search term
-        # Lower score — user typed extra words that aren't in the project name
-        # e.g. "FAR HORIZON GARDENS" contains "HORIZON GARDENS" — wrong match
-        if pn in sn:
-            # Reward closer length match — longer project name = better match
-            length_ratio = len(pn) / len(sn)
-            return 0.7 + (0.2 * length_ratio)  # 0.7–0.9 range
-
-        # All search words found in project name (stopwords excluded)
-        search_words = [w for w in sn.split() if len(w) > 2 and w not in SEARCH_STOPWORDS]
-        if search_words:
-            found = sum(1 for w in search_words if w in pn)
-            if found == len(search_words):
-                return 0.85
-            if found > 0:
-                return 0.6 + (0.2 * found / len(search_words))
-
-        # Fuzzy character similarity
-        return difflib.SequenceMatcher(None, sn, pn).ratio()
-
-    # Collect all projects with score above threshold
+    # Score each project against the search term using the shared matcher
+    # (see score_name_match for the tier breakdown). Collect all above threshold.
     scored = []
     for project in all_results:
         project_name = project.get("project", "").upper().strip()
         if not project_name:
             continue
-        score = match_score(project_name)
+        # URA tags an en-bloc'd building with a "(DEMOLISHED)" suffix while its
+        # redevelopment carries the same base name (e.g. "CHUAN PARK" new launch +
+        # "CHUAN PARK (DEMOLISHED)" old resales). The defunct building is a separate
+        # development — don't let its old transactions merge into the live project
+        # (they would wrongly flip has_secondary_market and pollute the price trend).
+        # Only include it if the user explicitly searched for the demolished block.
+        if "DEMOLISHED" in project_name and "DEMOLISHED" not in search_name:
+            continue
+        score = score_name_match(search_name, project_name)
         if score >= 0.6:
             scored.append((score, project))
 
@@ -309,11 +326,14 @@ def search_property(development_name: str) -> dict:
     overall_avg_psf = round(sum(all_psf) / len(all_psf)) if all_psf else None
     overall_psf_count = len(all_psf)
 
-    # A development with ONLY new-sale transactions (typeOfSale 1) is a fresh
-    # launch / still under construction — it has no resale or rental market of
-    # its own yet. Used to gate rental lookups (see bot.py amenity_callback).
-    sale_types = {str(item["txn"].get("typeOfSale", "")) for item in matched_transactions}
-    has_secondary_market = bool(sale_types & {"2", "3"})
+    # Is this development still under construction (not yet TOP'd)? URA lists
+    # uncompleted projects in the pipeline feed, so presence there (expected_top
+    # is populated) means the building isn't finished. Such a project physically
+    # has no rental contracts of its own — any rental match for it is stale/wrong
+    # (e.g. an en-bloc'd predecessor of the same name), so rentals are suppressed
+    # upstream. A COMPLETED development — even a new-sale-only one with no resales
+    # yet — is NOT gated and goes to the rental matcher as normal.
+    under_construction = expected_top is not None
 
     return {
         "development": matched_project_name,
@@ -322,7 +342,7 @@ def search_property(development_name: str) -> dict:
         "band_avg_psf": band_avg_psf,
         "overall_avg_psf": overall_avg_psf,
         "overall_psf_count": overall_psf_count,
-        "has_secondary_market": has_secondary_market,
+        "under_construction": under_construction,
         "fuzzy_match": fuzzy_name,
         "alternatives": alternatives,
         "total_units": total_units,

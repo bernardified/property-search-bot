@@ -1,54 +1,105 @@
-import difflib
 import logging
 from datetime import datetime
 from cache.cache_rental import get_rental_data
+from ura import score_name_match
 from utils import SIZE_BANDS, get_band, parse_sqft_range, parse_mmyy_date, format_mmyy_date
 
 logger = logging.getLogger(__name__)
 
 # Shared utilities imported from utils.py
 
+# Minimum score to accept a rental project as a match. High enough to reject a
+# neighbouring development that merely shares a leading token — e.g. searching
+# "LENTOR HILLS RESIDENCES" must NOT pull a different Lentor-area development's
+# rentals. 0.85 admits exact (1.0), search-substring (0.95), close length-ratio
+# substrings, and all-words-found (0.85) matches, but rejects the partial-word
+# and loose-fuzzy collisions that previously bled across developments.
+RENTAL_MATCH_THRESHOLD = 0.85
 
-def find_rental_project(development_name: str, rental_data: list) -> list:
-    """Find matching project(s) in rental data using same fuzzy logic as ura.py."""
+# Generic road-type / directional words carry no development-identifying signal,
+# so two unrelated roads that share only e.g. "ROAD" must not look related. We
+# strip these before comparing streets.
+_STREET_STOPWORDS = frozenset({
+    "ROAD", "RD", "STREET", "ST", "AVENUE", "AVE", "DRIVE", "DR", "LANE",
+    "CLOSE", "CRESCENT", "WALK", "LINK", "RISE", "PLACE", "TERRACE", "LOOP",
+    "BOULEVARD", "BLVD", "WAY", "JALAN", "LORONG", "CENTRAL",
+    "NORTH", "SOUTH", "EAST", "WEST", "UPPER", "LOWER",
+})
+
+
+def _street_tokens(street: str) -> set:
+    return {w for w in street.upper().split() if len(w) > 2 and w not in _STREET_STOPWORDS}
+
+
+def _streets_agree(a: str, b: str) -> bool:
+    """
+    True if two streets plausibly belong to the same development — i.e. they share
+    a significant (non-road-type) token. Missing street info on either side is not
+    treated as a conflict (returns True), so we never block on absent data.
+    """
+    ta, tb = _street_tokens(a), _street_tokens(b)
+    if not ta or not tb:
+        return True
+    return bool(ta & tb)
+
+
+def find_rental_project(development_name: str, rental_data: list, street: str = "") -> list:
+    """
+    Find matching project(s) in rental data, using the SAME name-matching score
+    as the transaction search (ura.score_name_match) so a development resolves to
+    the same project on both the sale and rental sides.
+
+    For non-exact name matches, the `street` (if provided) must corroborate the
+    match — a surrounding property on a different road is rejected even when its
+    name is string-similar (e.g. "LENTOR HILLS RESIDENCES" on LENTOR HILLS ROAD
+    vs the 0.84-scoring "LEONIE HILL RESIDENCES" on LEONIE HILL ROAD).
+
+    Only projects tied at the single best score are returned — a weaker neighbour
+    match can never be mixed into a strong (exact/substring) one. If nothing clears
+    the bar (e.g. a development with no rental contracts of its own), returns []
+    rather than a fuzzy neighbour's records.
+    """
     search = development_name.upper().strip()
-    matched = []
+    if not search:
+        return []
+    search_street = (street or "").strip()
 
+    scored = []
     for project in rental_data:
         pname = project.get("project", "").upper().strip()
         if not pname:
             continue
-
-        # Exact match
-        if search == pname:
-            return [project]
-        # Substring match
-        if search in pname or pname in search:
-            matched.append((0.95, project))
+        score = score_name_match(search, pname)
+        if score < RENTAL_MATCH_THRESHOLD:
             continue
-        # Fuzzy
-        ratio = difflib.SequenceMatcher(None, search, pname).ratio()
-        if ratio >= 0.75:
-            matched.append((ratio, project))
+        # Exact name matches are trusted outright; anything fuzzier must be backed
+        # by an agreeing street so a string-similar neighbour can't slip through.
+        if score < 1.0 and search_street and not _streets_agree(search_street, project.get("street", "")):
+            continue
+        scored.append((score, project))
 
-    if not matched:
+    if not scored:
         return []
-    matched.sort(key=lambda x: x[0], reverse=True)
-    best_score = matched[0][0]
-    return [p for s, p in matched if s >= best_score * 0.95]
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score = scored[0][0]
+    # Keep only projects at the top score (handles a development split across
+    # multiple identically-named rental blocks); drop anything weaker.
+    return [p for s, p in scored if s >= best_score - 1e-9]
 
 
-def get_rental_by_band(development_name: str, sale_prices: dict) -> dict:
+def get_rental_by_band(development_name: str, sale_prices: dict, street: str = "") -> dict:
     """
     Find rental data for a development, grouped by size band.
     sale_prices: dict of band_label -> latest sale price (for yield calculation)
+    street: the development's street, used to disambiguate fuzzy name matches.
     Returns dict of band_label -> {latest_rent, avg_rent, count, yield_pct}
     """
     rental_data = get_rental_data()
     if not rental_data:
         return {"error": "Rental data unavailable. Please try again later."}
 
-    projects = find_rental_project(development_name, rental_data)
+    projects = find_rental_project(development_name, rental_data, street)
     if not projects:
         return {"error": f'No rental data found for "{development_name}".'}
 
