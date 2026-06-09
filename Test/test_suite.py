@@ -553,6 +553,48 @@ class TestPriceTrend(unittest.TestCase):
         self.assertIn("█", text)
         self.assertIn("resale + sub-sale only", text)
 
+    def test_partial_period_flagged_and_marked(self):
+        """The current calendar year is in progress → period.partial True and a '*' in the text."""
+        from datetime import datetime
+        from ura import price_trend, format_price_trend
+        this_year = datetime.now().strftime("%y")
+        txns = [self._txn(1_800_000, "0322") for _ in range(3)]       # 2022, complete
+        txns += [self._txn(2_000_000, f"03{this_year}") for _ in range(3)]  # current year, in progress
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+            text = format_price_trend(result)
+        self.assertFalse(result["periods"][0]["partial"])             # 2022 is done
+        self.assertTrue(result["periods"][-1]["partial"])             # current year still running
+        self.assertIn("*", text)
+        self.assertIn("still in progress", text)
+
+    def test_caption_mode_omits_bars(self):
+        """include_bars=False yields the header/stat summary without the per-period bar rows."""
+        from ura import price_trend, format_price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(3)]
+        txns += [self._txn(2_000_000, "0324") for _ in range(3)]
+        with self._patch(txns):
+            result = price_trend("TEST PROJECT")
+            caption = format_price_trend(result, include_bars=False)
+        self.assertIn("📈", caption)
+        self.assertIn("resale + sub-sale only", caption)
+        self.assertNotIn("S$", caption)                               # no per-period bar rows
+        self.assertNotIn("─────", caption)                            # no divider
+
+    def test_png_renders_bytes_for_multi_period(self):
+        """render_price_trend_png returns PNG bytes for a 2+ period series, None otherwise."""
+        from ura import price_trend, render_price_trend_png
+        multi = [self._txn(1_800_000, "0322") for _ in range(3)]
+        multi += [self._txn(2_000_000, "0324") for _ in range(3)]
+        single = [self._txn(2_000_000, "0323") for _ in range(4)]
+        with self._patch(multi):
+            png = render_price_trend_png(price_trend("TEST PROJECT"))
+        self.assertIsInstance(png, (bytes, bytearray))
+        self.assertTrue(png.startswith(b"\x89PNG"))                   # PNG magic number
+        with self._patch(single):
+            self.assertIsNone(render_price_trend_png(price_trend("TEST PROJECT")))
+        self.assertIsNone(render_price_trend_png({"error": "nope"}))
+
 
 # ══════════════════════════════════════════════════════
 # AMENITY CALLBACK BUTTONS
