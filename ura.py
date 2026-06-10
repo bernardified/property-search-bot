@@ -231,7 +231,8 @@ def search_property(development_name: str) -> dict:
 
     # Find the latest transaction per size band
     band_latest = {}
-    band_psf_list = {}  # band -> list of PSF values in last 12 months
+    band_psf_list = {}    # band -> list of PSF values in last 12 months
+    band_price_list = {}  # band -> list of prices in last 12 months (for avg price)
 
     for item in matched_transactions:
         txn = item["txn"]
@@ -281,7 +282,7 @@ def search_property(development_name: str) -> dict:
             if new and (not existing or new > existing):
                 band_latest[band] = entry
 
-        # Collect PSF for 12-month average
+        # Collect PSF + price for 12-month averages
         if psf and contract_date_parsed:
             cutoff = datetime.now().replace(day=1)
             from dateutil.relativedelta import relativedelta
@@ -290,6 +291,7 @@ def search_property(development_name: str) -> dict:
                 if band not in band_psf_list:
                     band_psf_list[band] = []
                 band_psf_list[band].append(psf)
+                band_price_list.setdefault(band, []).append(price)
 
     if not band_latest:
         return {"error": f'Found "{development_name}" but could not parse any valid transactions.\nThe project may only have landed housing records.'}
@@ -324,6 +326,16 @@ def search_property(development_name: str) -> dict:
                 "count": len(psf_list),
             }
 
+    # Compute average transacted price per band (last 12 months) — used by the
+    # mortgage helper when the user picks a size band to base the loan on.
+    band_avg_price = {}
+    for band, price_list in band_price_list.items():
+        if price_list:
+            band_avg_price[band] = {
+                "avg_price": round(sum(price_list) / len(price_list)),
+                "count": len(price_list),
+            }
+
     # Overall 12-month average PSF across all size bands (shown in the header)
     all_psf = [psf for psf_list in band_psf_list.values() for psf in psf_list]
     overall_avg_psf = round(sum(all_psf) / len(all_psf)) if all_psf else None
@@ -343,6 +355,7 @@ def search_property(development_name: str) -> dict:
         "street": matched_transactions[0]["street"],
         "bands": band_latest,
         "band_avg_psf": band_avg_psf,
+        "band_avg_price": band_avg_price,
         "overall_avg_psf": overall_avg_psf,
         "overall_psf_count": overall_psf_count,
         "under_construction": under_construction,

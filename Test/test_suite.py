@@ -266,6 +266,30 @@ class TestURADataParsing(unittest.TestCase):
         self.assertEqual(_sale_type_label("3"), "Resale")
         self.assertEqual(_sale_type_label("9"), "9")  # unknown fallback
 
+    def test_band_avg_price_computed(self):
+        """search_property returns the 12-month average price per size band."""
+        from ura import search_property
+        # 88.26 sqm ≈ 950 sqft → sits in the "901 – 1000 sqft" band.
+        recent = datetime.now().strftime("%m%y")  # within the 12-month window
+
+        def txn(price):
+            return {
+                "area": "88.26", "price": str(price), "contractDate": recent,
+                "typeOfSale": "3", "propertyType": "Condominium",
+                "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
+            }
+
+        data = ([{"project": "TEST PROJECT", "street": "TEST ST",
+                  "transaction": [txn(2_000_000), txn(2_200_000)]}], [])
+        with patch("ura.get_ura_data", return_value=data):
+            result = search_property("TEST PROJECT")
+
+        self.assertNotIn("error", result)
+        band_avg = result["band_avg_price"]
+        self.assertIn("901 – 1000 sqft", band_avg)
+        self.assertEqual(band_avg["901 – 1000 sqft"]["avg_price"], 2_100_000)
+        self.assertEqual(band_avg["901 – 1000 sqft"]["count"], 2)
+
 
 # ══════════════════════════════════════════════════════
 # 4. RENTAL LOGIC
@@ -886,6 +910,149 @@ class TestUnderConstructionGate(unittest.TestCase):
 # RUNNER
 # ══════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════
+# 13. MORTGAGE & AFFORDABILITY
+# ══════════════════════════════════════════════════════
+
+class TestMortgage(unittest.TestCase):
+
+    def setUp(self):
+        from mortgage import (
+            monthly_installment,
+            mortgage_summary,
+            format_mortgage_summary,
+            DEFAULT_RATE_PCT,
+            DEFAULT_TENURE_YEARS,
+            MAX_TENURE_YEARS,
+        )
+        self.monthly_installment = monthly_installment
+        self.mortgage_summary = mortgage_summary
+        self.format_mortgage_summary = format_mortgage_summary
+        self.DEFAULT_RATE_PCT = DEFAULT_RATE_PCT
+        self.DEFAULT_TENURE_YEARS = DEFAULT_TENURE_YEARS
+        self.MAX_TENURE_YEARS = MAX_TENURE_YEARS
+
+    def test_installment_known_value(self):
+        """1.35M @ 2.6% over 30y ≈ S$5,405/mo (standard amortisation)."""
+        m = self.monthly_installment(1_350_000, 2.6, 30)
+        self.assertAlmostEqual(m, 5405, delta=5)
+
+    def test_installment_zero_rate_is_straight_line(self):
+        """At 0% interest the repayment is just principal / months."""
+        self.assertAlmostEqual(self.monthly_installment(360_000, 0, 30), 1000, delta=0.01)
+
+    def test_installment_zero_loan_or_tenure(self):
+        self.assertEqual(self.monthly_installment(0, 2.6, 30), 0.0)
+        self.assertEqual(self.monthly_installment(500_000, 2.6, 0), 0.0)
+
+    def test_loan_and_ltv(self):
+        """25% down on a 1.8M property → 1.35M loan, 75% LTV, not exceeded."""
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30)
+        self.assertAlmostEqual(s["loan"], 1_350_000, delta=1)
+        self.assertAlmostEqual(s["ltv_pct"], 75.0, delta=0.1)
+        self.assertFalse(s["ltv_exceeded"])
+
+    def test_ltv_exceeded_below_25pct_down(self):
+        """A 10% down payment trips the 75% LTV cap."""
+        s = self.mortgage_summary(1_000_000, 100_000, 2.6, 30)
+        self.assertTrue(s["ltv_exceeded"])
+        self.assertAlmostEqual(s["ltv_pct"], 90.0, delta=0.1)
+
+    def test_tdsr_uses_4pct_stress_floor(self):
+        """Required income is derived from the 4% stress installment, not the actual rate."""
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30)
+        self.assertEqual(s["stress_rate_pct"], 4.0)
+        self.assertGreater(s["stress_installment"], s["monthly_installment"])
+        self.assertAlmostEqual(s["required_income"], s["stress_installment"] / 0.55, delta=1)
+
+    def test_stress_rate_uses_actual_when_higher(self):
+        """If the actual rate exceeds the 4% floor, the higher rate is used."""
+        s = self.mortgage_summary(1_000_000, 250_000, 5.0, 30)
+        self.assertEqual(s["stress_rate_pct"], 5.0)
+        self.assertAlmostEqual(s["stress_installment"], s["monthly_installment"], delta=1)
+
+    def test_tdsr_pass_and_fail(self):
+        s_pass = self.mortgage_summary(1_800_000, 450_000, 2.6, 30, monthly_income=15_000)
+        self.assertTrue(s_pass["tdsr_pass"])
+        self.assertAlmostEqual(s_pass["tdsr_ratio"], s_pass["stress_installment"] / 15_000, delta=1e-6)
+
+        s_fail = self.mortgage_summary(1_800_000, 450_000, 2.6, 30, monthly_income=8_000)
+        self.assertFalse(s_fail["tdsr_pass"])
+
+    def test_no_income_leaves_tdsr_none(self):
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30)
+        self.assertIsNone(s["monthly_income"])
+        self.assertIsNone(s["tdsr_pass"])
+        self.assertIsNone(s["tdsr_ratio"])
+        self.assertIsNone(s["eligible_income"])
+        self.assertEqual(s["variable_income"], 0.0)
+
+    def test_variable_income_haircut(self):
+        """Variable income is recognised at 70% (MAS 30% haircut)."""
+        s = self.mortgage_summary(
+            1_800_000, 450_000, 2.6, 30, monthly_income=15_000, variable_income=5_000
+        )
+        # 15000 − 0.30 × 5000 = 13500 eligible
+        self.assertEqual(s["variable_income"], 5_000)
+        self.assertAlmostEqual(s["eligible_income"], 13_500, delta=1)
+        self.assertAlmostEqual(s["tdsr_ratio"], s["stress_installment"] / 13_500, delta=1e-6)
+
+    def test_all_fixed_income_no_haircut(self):
+        """With no variable portion, eligible income equals gross income."""
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30, monthly_income=15_000)
+        self.assertEqual(s["variable_income"], 0.0)
+        self.assertAlmostEqual(s["eligible_income"], 15_000, delta=1)
+
+    def test_variable_income_capped_at_total(self):
+        """Variable can't exceed total income; haircut applies to the whole."""
+        s = self.mortgage_summary(
+            1_800_000, 450_000, 2.6, 30, monthly_income=10_000, variable_income=99_999
+        )
+        self.assertEqual(s["variable_income"], 10_000)
+        self.assertAlmostEqual(s["eligible_income"], 7_000, delta=1)
+
+    def test_haircut_can_flip_tdsr_verdict(self):
+        """A borderline income that passes when all-fixed can fail once haircut applies."""
+        # Income chosen so all-fixed passes but a large variable portion fails.
+        all_fixed = self.mortgage_summary(
+            1_800_000, 450_000, 2.6, 30, monthly_income=11_900
+        )
+        mostly_var = self.mortgage_summary(
+            1_800_000, 450_000, 2.6, 30, monthly_income=11_900, variable_income=11_900
+        )
+        self.assertTrue(all_fixed["tdsr_pass"])
+        self.assertFalse(mostly_var["tdsr_pass"])
+
+    def test_total_interest_positive(self):
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30)
+        self.assertGreater(s["total_interest"], 0)
+        self.assertAlmostEqual(
+            s["total_repayment"], s["monthly_installment"] * 30 * 12, delta=1
+        )
+
+    def test_format_contains_key_figures(self):
+        s = self.mortgage_summary(1_800_000, 450_000, 2.6, 30, monthly_income=15_000)
+        text = self.format_mortgage_summary(s)
+        self.assertIn("Monthly repayment", text)
+        self.assertIn("TDSR", text)
+        self.assertIn("Within TDSR", text)
+
+    def test_format_warns_on_ltv_exceeded(self):
+        s = self.mortgage_summary(1_000_000, 100_000, 2.6, 30)
+        text = self.format_mortgage_summary(s)
+        self.assertIn("LTV", text)
+        self.assertIn("25%", text)
+
+    def test_format_shows_haircut_when_variable(self):
+        s = self.mortgage_summary(
+            1_800_000, 450_000, 2.6, 30, monthly_income=15_000, variable_income=5_000
+        )
+        text = self.format_mortgage_summary(s)
+        self.assertIn("haircut", text.lower())
+        self.assertIn("variable", text.lower())
+        self.assertIn("eligible", text.lower())
+
+
 def run_tests():
     section("Property Bot Test Suite")
     print(f"Python {sys.version.split()[0]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -906,6 +1073,7 @@ def run_tests():
         TestAmenityCallbackButtons,
         TestRentalMatching,
         TestUnderConstructionGate,
+        TestMortgage,
     ]
 
     for cls in test_classes:
