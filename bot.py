@@ -19,9 +19,17 @@ from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
 from cache.cache_rental import force_refresh_rental, rental_cache_status
 from rental import get_rental_by_band, format_rental
+from mortgage import (
+    mortgage_summary,
+    format_mortgage_summary,
+    DEFAULT_RATE_PCT,
+    DEFAULT_TENURE_YEARS,
+    MAX_TENURE_YEARS,
+    MIN_DOWN_PAYMENT_PCT,
+)
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
-from utils import get_mongo_db, clear_mongo_collection
+from utils import get_mongo_db, clear_mongo_collection, SIZE_BANDS
 from district_search import (
     get_top_developments_by_district,
     format_district_results,
@@ -42,6 +50,15 @@ logger = logging.getLogger(__name__)
 
 WAITING_FOR_PROPERTY_NAME = 1
 WAITING_FOR_DISTRICT = 2
+
+# /mortgage conversation states
+MORTGAGE_BAND = 9
+MORTGAGE_PRICE = 10
+MORTGAGE_DOWNPAYMENT = 11
+MORTGAGE_RATE = 12
+MORTGAGE_TENURE = 13
+MORTGAGE_INCOME = 14
+MORTGAGE_VARIABLE = 15
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -105,6 +122,21 @@ def resolve_addr_coords(context: ContextTypes.DEFAULT_TYPE, token: str | None):
     return context.user_data.get("addr_coords", {}).get(token) if token else None
 
 
+def store_addr_band_prices(context: ContextTypes.DEFAULT_TYPE, token: str, band_prices: dict):
+    """Stash a {SIZE_BANDS index → avg price} map under an addr token.
+
+    The Affordability button lets the user pick a size band; the chosen band's
+    average price seeds the mortgage flow so they don't retype a figure they
+    just saw in the transaction results.
+    """
+    context.user_data.setdefault("addr_band_prices", {})[token] = band_prices
+
+
+def resolve_addr_band_prices(context: ContextTypes.DEFAULT_TYPE, token: str | None):
+    """Look up the stored {band index → price} map by token, or None if none."""
+    return context.user_data.get("addr_band_prices", {}).get(token) if token else None
+
+
 def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
     """Build the standard amenity button keyboard. `token` resolves to an addr_key."""
     return InlineKeyboardMarkup([
@@ -119,6 +151,9 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{token}"),
             InlineKeyboardButton("📈 Price Trend", callback_data=f"amenity:trend:{token}"),
+        ],
+        [
+            InlineKeyboardButton("🏦 Affordability", callback_data=f"mortgage:{token}"),
         ],
         [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
@@ -177,7 +212,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Primary schools within 2km\n"
         "• Distance to nearest shopping mall\n"
         "• Nearest supermarkets\n"
-        "• Rental prices & gross yield\n\n"
+        "• Rental prices & gross yield\n"
+        "• Mortgage & affordability (TDSR) check\n\n"
         "*Ways to search:*\n"
         "🔍 *By Name* — Search a specific development\n"
         "📍 *By District* — Browse top developments by area\n"
@@ -185,6 +221,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Pick an option below to get started.\n\n"
         "Commands:\n"
         "/search — find a property\n"
+        "/mortgage — affordability & monthly repayment\n"
         "/list — most searched developments\n"
         "/refresh — update property data\n"
         "/help — show this message",
@@ -281,6 +318,287 @@ async def received_property_name(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Search cancelled.")
+    return ConversationHandler.END
+
+
+# ── /mortgage Conversation ─────────────────────────────────────────────────────
+#
+# Two entry points: the /mortgage command (asks for everything) and the
+# Affordability button on a property result (pre-fills the price, then asks for
+# the rest). Each numeric step accepts "skip" (or "-") to take the default, so
+# the whole flow can be a few taps when the property price is already known.
+
+_SKIP_WORDS = {"skip", "-", "default", ""}
+
+
+def _parse_money(text: str) -> float | None:
+    """Parse a money/number entry: handles commas and k/m suffixes.
+
+    e.g. "1.8m" → 1_800_000, "300k" → 300_000, "1,500,000" → 1_500_000.
+    Returns None if it isn't a positive number.
+    """
+    t = text.strip().lower().replace(",", "").replace("$", "").replace("s$", "")
+    mult = 1
+    if t.endswith("m"):
+        mult, t = 1_000_000, t[:-1]
+    elif t.endswith("k"):
+        mult, t = 1_000, t[:-1]
+    try:
+        val = float(t) * mult
+    except ValueError:
+        return None
+    return val if val > 0 else None
+
+
+async def mortgage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/mortgage entry point — start from a blank slate and ask for the price."""
+    context.user_data["mortgage"] = {}
+    await update.message.reply_text(
+        "🏦 *Mortgage & Affordability*\n\n"
+        "What's the property price? (e.g. `1.8m`, `1800000`)\n\n"
+        "_Send /cancel anytime to stop._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_PRICE
+
+
+async def _prompt_for_price(message, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback when no per-band prices are available — ask the user to type one."""
+    context.user_data["mortgage"] = {}
+    await message.reply_text(
+        "🏦 *Mortgage & Affordability*\n\n"
+        "What's the property price? (e.g. `1.8m`, `1800000`)\n\n"
+        "_Send /cancel anytime to stop._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_PRICE
+
+
+async def mortgage_from_property(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affordability-button entry point — let the user pick a size band first.
+
+    The chosen band's average transacted price seeds the rest of the flow.
+    """
+    query = update.callback_query
+    await query.answer()
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    band_prices = resolve_addr_band_prices(context, token)
+
+    context.user_data["mortgage"] = {}
+    if not band_prices:
+        # Prices weren't stashed (e.g. bot restarted) — fall back to asking.
+        return await _prompt_for_price(query.message, context)
+
+    # One button per size band that has a price, in ascending size order.
+    keyboard = [
+        [InlineKeyboardButton(
+            f"{SIZE_BANDS[idx]['label']}  ·  ~S${price:,.0f}",
+            callback_data=f"mortgageband:{token}:{idx}",
+        )]
+        for idx, price in sorted(band_prices.items())
+    ]
+    await query.message.reply_text(
+        "🏦 *Mortgage & Affordability*\n\n"
+        "Which unit size do you want to base this on?\n"
+        "_Each option uses that band's 12-month average price._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return MORTGAGE_BAND
+
+
+async def mortgage_band_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Size-band picked — seed the flow with that band's average price."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    token = parts[1] if len(parts) > 1 else None
+    idx = int(parts[2]) if len(parts) > 2 else None
+
+    band_prices = resolve_addr_band_prices(context, token)
+    price = band_prices.get(idx) if band_prices else None
+    if not price:
+        return await _prompt_for_price(query.message, context)
+
+    context.user_data["mortgage"] = {"price": price}
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"📐 {SIZE_BANDS[idx]['label']} — avg price *S${price:,.0f}*\n\n"
+        f"{_downpayment_prompt(price)}",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_DOWNPAYMENT
+
+
+def _downpayment_prompt(price: float) -> str:
+    default = price * MIN_DOWN_PAYMENT_PCT
+    return (
+        f"How much is your *down payment*?\n"
+        f"Enter a percent (e.g. `25%`) or an amount (e.g. `450k`).\n"
+        f"_Send `skip` for the 25% minimum (S${default:,.0f})._"
+    )
+
+
+async def mortgage_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    price = _parse_money(update.message.text)
+    if price is None:
+        await update.message.reply_text(
+            "⚠️ I couldn't read that. Send the price as a number, e.g. `1.8m` or `1800000`.",
+            parse_mode="Markdown",
+        )
+        return MORTGAGE_PRICE
+    context.user_data["mortgage"]["price"] = price
+    await update.message.reply_text(_downpayment_prompt(price), parse_mode="Markdown")
+    return MORTGAGE_DOWNPAYMENT
+
+
+async def mortgage_downpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data["mortgage"]
+    price = data["price"]
+    text = update.message.text.strip().lower()
+
+    if text in _SKIP_WORDS:
+        down = price * MIN_DOWN_PAYMENT_PCT
+    elif text.endswith("%"):
+        try:
+            pct = float(text[:-1].strip())
+        except ValueError:
+            pct = None
+        if pct is None or pct < 0:
+            await update.message.reply_text("⚠️ Enter a valid percent, e.g. `25%`.", parse_mode="Markdown")
+            return MORTGAGE_DOWNPAYMENT
+        down = price * pct / 100
+    else:
+        down = _parse_money(text)
+        if down is None:
+            await update.message.reply_text(
+                "⚠️ Enter a percent (`25%`) or amount (`450k`), or `skip`.",
+                parse_mode="Markdown",
+            )
+            return MORTGAGE_DOWNPAYMENT
+
+    data["down_payment"] = min(down, price)  # can't put down more than the price
+    await update.message.reply_text(
+        f"Down payment: *S${data['down_payment']:,.0f}*\n\n"
+        f"What *interest rate* (% p.a.)?\n"
+        f"_Send `skip` for {DEFAULT_RATE_PCT}%._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_RATE
+
+
+async def mortgage_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower().rstrip("%")
+    if text in _SKIP_WORDS:
+        rate = DEFAULT_RATE_PCT
+    else:
+        try:
+            rate = float(text)
+        except ValueError:
+            rate = None
+        if rate is None or rate < 0 or rate > 20:
+            await update.message.reply_text(
+                "⚠️ Enter a rate between 0 and 20, e.g. `2.6`, or `skip`.",
+                parse_mode="Markdown",
+            )
+            return MORTGAGE_RATE
+    context.user_data["mortgage"]["rate"] = rate
+    await update.message.reply_text(
+        f"Rate: *{rate:.2f}%*\n\n"
+        f"What *loan tenure* in years?\n"
+        f"_Send `skip` for {DEFAULT_TENURE_YEARS} years (max {MAX_TENURE_YEARS})._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_TENURE
+
+
+async def mortgage_tenure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    if text in _SKIP_WORDS:
+        tenure = DEFAULT_TENURE_YEARS
+    else:
+        try:
+            tenure = float(text)
+        except ValueError:
+            tenure = None
+        if tenure is None or tenure <= 0:
+            await update.message.reply_text(
+                "⚠️ Enter a number of years, e.g. `25`, or `skip`.", parse_mode="Markdown"
+            )
+            return MORTGAGE_TENURE
+        tenure = min(tenure, MAX_TENURE_YEARS)  # regulatory cap
+    context.user_data["mortgage"]["tenure"] = tenure
+    await update.message.reply_text(
+        f"Tenure: *{tenure:.0f} years*\n\n"
+        f"Last one — your *gross monthly income* (for the TDSR check)?\n"
+        f"_Send `skip` to just see the income you'd need._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_INCOME
+
+
+async def _send_mortgage_result(message, context: ContextTypes.DEFAULT_TYPE):
+    """Compute and send the final summary from whatever is in user_data."""
+    data = context.user_data["mortgage"]
+    summary = mortgage_summary(
+        price=data["price"],
+        down_payment=data["down_payment"],
+        annual_rate_pct=data["rate"],
+        tenure_years=data["tenure"],
+        monthly_income=data.get("income"),
+        variable_income=data.get("variable_income", 0.0),
+    )
+    await message.reply_text(
+        format_mortgage_summary(summary),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Search another property", callback_data="new_search")
+        ]]),
+    )
+    return ConversationHandler.END
+
+
+async def mortgage_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    income = None if text in _SKIP_WORDS else _parse_money(text)
+    if text not in _SKIP_WORDS and income is None:
+        await update.message.reply_text(
+            "⚠️ Enter your monthly income, e.g. `12000`, or `skip`.", parse_mode="Markdown"
+        )
+        return MORTGAGE_INCOME
+
+    context.user_data["mortgage"]["income"] = income
+    # No income → no TDSR check to refine, so skip the variable-income question.
+    if income is None:
+        return await _send_mortgage_result(update.message, context)
+
+    await update.message.reply_text(
+        f"Income: *S${income:,.0f}/mo*\n\n"
+        f"How much of that is *variable* (bonus / commission)?\n"
+        f"_Variable income counts at 70% for TDSR (MAS 30% haircut). "
+        f"Send `skip` if it's all fixed salary._",
+        parse_mode="Markdown",
+    )
+    return MORTGAGE_VARIABLE
+
+
+async def mortgage_variable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    variable = 0.0 if text in _SKIP_WORDS else _parse_money(text)
+    if text not in _SKIP_WORDS and variable is None:
+        await update.message.reply_text(
+            "⚠️ Enter your variable income, e.g. `3000`, or `skip` if all fixed.",
+            parse_mode="Markdown",
+        )
+        return MORTGAGE_VARIABLE
+
+    income = context.user_data["mortgage"].get("income") or 0
+    context.user_data["mortgage"]["variable_income"] = min(variable, income)
+    return await _send_mortgage_result(update.message, context)
+
+
+async def mortgage_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Mortgage calculation cancelled.")
     return ConversationHandler.END
 
 
@@ -666,6 +984,21 @@ async def handle_property_search(
         # amenity buttons skip Google geocoding and pin to the real address.
         if postal_coords:
             store_addr_coords(context, addr_token, *postal_coords)
+        # Stash the per-band price map so the Affordability button can offer a
+        # size-band picker. Prefer each band's 12-month average price; fall back
+        # to its latest transacted price when there's no recent average.
+        band_label_to_idx = {b["label"]: i for i, b in enumerate(SIZE_BANDS)}
+        band_avg_price = ura_result.get("band_avg_price", {})
+        band_prices = {}
+        for label, txn in ura_result.get("bands", {}).items():
+            idx = band_label_to_idx.get(label)
+            if idx is None:
+                continue
+            price = band_avg_price.get(label, {}).get("avg_price") or txn.get("price")
+            if price:
+                band_prices[idx] = price
+        if band_prices:
+            store_addr_band_prices(context, addr_token, band_prices)
 
         # 5. Send transaction results
         await loading_msg.delete()
@@ -715,11 +1048,29 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_search)],
     )
 
+    mortgage_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("mortgage", mortgage_command),
+            CallbackQueryHandler(mortgage_from_property, pattern="^mortgage:"),
+        ],
+        states={
+            MORTGAGE_BAND: [CallbackQueryHandler(mortgage_band_chosen, pattern="^mortgageband:")],
+            MORTGAGE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_price)],
+            MORTGAGE_DOWNPAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_downpayment)],
+            MORTGAGE_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_rate)],
+            MORTGAGE_TENURE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_tenure)],
+            MORTGAGE_INCOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_income)],
+            MORTGAGE_VARIABLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mortgage_variable)],
+        },
+        fallbacks=[CommandHandler("cancel", mortgage_cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("refresh", refresh_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(search_conv)
+    app.add_handler(mortgage_conv)
     app.add_handler(CallbackQueryHandler(search_mode_callback, pattern="^search_mode:"))
     app.add_handler(CallbackQueryHandler(district_callback, pattern="^district:"))
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
