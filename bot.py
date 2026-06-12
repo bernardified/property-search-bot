@@ -27,6 +27,7 @@ from mortgage import (
     MAX_TENURE_YEARS,
     MIN_DOWN_PAYMENT_PCT,
 )
+from liquidity import liquidity_for_project, format_liquidity_summary
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection, SIZE_BANDS
@@ -154,6 +155,7 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🏦 Affordability", callback_data=f"mortgage:{token}"),
+            InlineKeyboardButton("📊 Liquidity", callback_data=f"liquidity:{token}"),
         ],
         [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
@@ -857,6 +859,38 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
 
+async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 📊 Liquidity button: turnover / take-up rate per size band.
+
+    Re-queries by project name at tap time (same pattern as the rental and
+    trend buttons) — the computation needs the full transaction history plus
+    pipeline and unit-count lookups, which is too bulky to stash per token.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    addr_key = resolve_addr_key(context, token) if token else None
+    if not addr_key:
+        await query.message.reply_text("⚠️ Could not identify property. Please search again.")
+        return
+
+    project_name = addr_key.split("|", 1)[0]
+    loading = await query.message.reply_text("🔍 Crunching sales velocity...")
+    try:
+        result = liquidity_for_project(project_name)
+        if "error" in result:
+            text = f"⚠️ {result['error']}"
+        else:
+            text = format_liquidity_summary(result["summary"], result["development"])
+        await loading.delete()
+        await query.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Liquidity callback failed: {e}", exc_info=True)
+        await loading.delete()
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     development_name = update.message.text.strip()
     if not development_name:
@@ -1077,6 +1111,7 @@ def main():
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
     app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
+    app.add_handler(CallbackQueryHandler(liquidity_callback, pattern="^liquidity:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 

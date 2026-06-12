@@ -296,26 +296,14 @@ def search_property(development_name: str) -> dict:
     if not band_latest:
         return {"error": f'Found "{development_name}" but could not parse any valid transactions.\nThe project may only have landed housing records.'}
 
-    # Get total units: first try pipeline (uncompleted), then sum noOfUnits from transactions
+    # Total units come from the pipeline feed (uncompleted projects only).
+    # Completed projects return None here — liquidity.py resolves those via
+    # the permanent unit_counts store instead.
     matched_project_name = matched_transactions[0]["project"]
     pipeline_info = get_project_info(matched_project_name, pipeline_data)
 
     total_units = pipeline_info.get("total_units")
     expected_top = pipeline_info.get("expected_top")
-
-    # Fallback: get noOfUnits from transaction records if not in pipeline
-    if not total_units:
-        unit_counts = set()
-        for item in matched_transactions:
-            val = item["txn"].get("noOfUnits")
-            if val:
-                try:
-                    unit_counts.add(int(val))
-                except (ValueError, TypeError):
-                    pass
-        # noOfUnits in URA txn data is per-transaction not total project units
-        # so we can't reliably sum them — leave as None if not in pipeline
-        total_units = None
 
     # Compute average PSF per band
     band_avg_psf = {}

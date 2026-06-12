@@ -907,10 +907,6 @@ class TestUnderConstructionGate(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
-# RUNNER
-# ══════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════
 # 13. MORTGAGE & AFFORDABILITY
 # ══════════════════════════════════════════════════════
 
@@ -1053,6 +1049,309 @@ class TestMortgage(unittest.TestCase):
         self.assertIn("eligible", text.lower())
 
 
+# ══════════════════════════════════════════════════════
+# 14. LIQUIDITY / ABSORPTION RATE
+# ══════════════════════════════════════════════════════
+
+class TestLiquidityMath(unittest.TestCase):
+    """Pure liquidity functions — no patching, explicit `now` everywhere."""
+
+    NOW = datetime(2026, 6, 1)
+    SQM_550 = 51.1   # ~550 sqft → "<= 600 sqft"
+    SQM_950 = 88.3   # ~950 sqft → "901 – 1000 sqft"
+
+    @staticmethod
+    def _txn(mmyy, sale="3", sqm=88.3, units="1", ptype="Condominium"):
+        return {
+            "area": str(sqm), "price": "1500000", "contractDate": mmyy,
+            "typeOfSale": sale, "propertyType": ptype,
+            "floorRange": "06-10", "noOfUnits": units, "tenure": "99 yrs",
+        }
+
+    def test_window_filtering(self):
+        from liquidity import count_sales_in_window, SECONDARY_SALE_TYPES
+        txns = [self._txn("0126"), self._txn("0426"), self._txn("0125")]  # 0125 outside 6mo
+        counts = count_sales_in_window(txns, SECONDARY_SALE_TYPES, 6, now=self.NOW)
+        self.assertEqual(counts, {"901 – 1000 sqft": 2})
+
+    def test_sale_type_filter(self):
+        from liquidity import count_sales_in_window, SECONDARY_SALE_TYPES, NEW_SALE_TYPES
+        txns = [self._txn("0426", sale="1"), self._txn("0426", sale="2"), self._txn("0426", sale="3")]
+        secondary = count_sales_in_window(txns, SECONDARY_SALE_TYPES, 6, now=self.NOW)
+        new = count_sales_in_window(txns, NEW_SALE_TYPES, 6, now=self.NOW)
+        self.assertEqual(secondary["901 – 1000 sqft"], 2)
+        self.assertEqual(new["901 – 1000 sqft"], 1)
+
+    def test_no_of_units_summed(self):
+        from liquidity import count_sales_in_window, NEW_SALE_TYPES
+        txns = [self._txn("0426", sale="1", units="3")]
+        counts = count_sales_in_window(txns, NEW_SALE_TYPES, 6, now=self.NOW)
+        self.assertEqual(counts["901 – 1000 sqft"], 3)
+
+    def test_landed_excluded(self):
+        from liquidity import count_sales_in_window, SECONDARY_SALE_TYPES
+        txns = [self._txn("0426", ptype="Terrace House"), self._txn("0426")]
+        counts = count_sales_in_window(txns, SECONDARY_SALE_TYPES, 6, now=self.NOW)
+        self.assertEqual(sum(counts.values()), 1)
+
+    def test_estimate_band_units_sums_exactly(self):
+        from liquidity import estimate_band_units
+        est = estimate_band_units({"a": 1, "b": 1, "c": 1}, 100)
+        self.assertEqual(sum(est.values()), 100)
+
+    def test_estimate_band_units_empty(self):
+        from liquidity import estimate_band_units
+        self.assertEqual(estimate_band_units({}, 100), {})
+        self.assertEqual(estimate_band_units({"a": 5}, 0), {})
+
+    def test_derive_trusted_when_launch_inside_cache(self):
+        from liquidity import derive_units_from_new_sales
+        cache_oldest = datetime(2021, 7, 1)
+        txns = [self._txn("0222", sale="1", units="50"), self._txn("0322", sale="1", units="30")]
+        self.assertEqual(derive_units_from_new_sales(txns, cache_oldest), 80)
+
+    def test_derive_untrusted_near_cache_edge(self):
+        from liquidity import derive_units_from_new_sales
+        cache_oldest = datetime(2021, 7, 1)
+        txns = [self._txn("0921", sale="1", units="50")]  # < oldest + 6 months
+        self.assertIsNone(derive_units_from_new_sales(txns, cache_oldest))
+        self.assertIsNone(derive_units_from_new_sales(txns, None))
+
+    def test_median_gap_days(self):
+        from liquidity import median_gap_days, SECONDARY_SALE_TYPES
+        txns = [self._txn("0126"), self._txn("0326"), self._txn("0526")]  # 2-month gaps
+        result = median_gap_days(txns, SECONDARY_SALE_TYPES, months=24, now=self.NOW)
+        self.assertAlmostEqual(result["overall"], 2 * 30.44, delta=1)
+        self.assertAlmostEqual(result["bands"]["901 – 1000 sqft"], 2 * 30.44, delta=1)
+
+    def test_median_gap_insufficient_sales(self):
+        from liquidity import median_gap_days, SECONDARY_SALE_TYPES
+        result = median_gap_days([self._txn("0426")], SECONDARY_SALE_TYPES, months=24, now=self.NOW)
+        self.assertIsNone(result["overall"])
+
+    def test_verdict_boundaries(self):
+        from liquidity import liquidity_verdict
+        self.assertEqual(liquidity_verdict("turnover", annualised_pct=5.0)[0], "🟢")
+        self.assertEqual(liquidity_verdict("turnover", annualised_pct=3.0)[0], "🟡")
+        self.assertEqual(liquidity_verdict("turnover", annualised_pct=1.9)[0], "🔴")
+        self.assertEqual(liquidity_verdict("take_up", six_month_pct=15.0)[0], "🟢")
+        self.assertEqual(liquidity_verdict("take_up", six_month_pct=4.9)[0], "🔴")
+        self.assertEqual(liquidity_verdict("turnover")[0], "⚪")
+
+
+class TestLiquiditySummaryIntegration(unittest.TestCase):
+    """liquidity_for_project end-to-end with the cache and Mongo patched out."""
+
+    SQM_950 = 88.3
+
+    @staticmethod
+    def _txn(mmyy, sale="3", units="1"):
+        return {
+            "area": "88.3", "price": "1500000", "contractDate": mmyy,
+            "typeOfSale": sale, "propertyType": "Condominium",
+            "floorRange": "06-10", "noOfUnits": units, "tenure": "99 yrs",
+        }
+
+    def _patch_ura(self, txns, pipeline=None, project="TEST PROJECT"):
+        # An old anchor project pushes cache_oldest well behind any launch date.
+        anchor = {"project": "OLD ANCHOR", "street": "OLD ST",
+                  "transaction": [self._txn("0721")]}
+        data = ([{"project": project, "street": "TEST ST", "transaction": txns}, anchor],
+                pipeline or [])
+        return patch("ura.get_ura_data", return_value=data)
+
+    def test_pipeline_project_take_up_mode(self):
+        from liquidity import liquidity_for_project
+        pipeline = [{"project": "TEST PROJECT", "expectedTOPYear": "2028", "totalUnits": 100}]
+        txns = [self._txn("0426", sale="1", units="10")]
+        with self._patch_ura(txns, pipeline), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = liquidity_for_project("TEST PROJECT")
+        s = result["summary"]
+        self.assertEqual(s["mode"], "take_up")
+        self.assertEqual(s["units_source"], "pipeline")
+        self.assertEqual(s["total_units"], 100)
+        self.assertEqual(s["overall"]["count_6m"], 10)
+
+    def test_completed_project_uses_pipeline_history(self):
+        from liquidity import liquidity_for_project
+        txns = [self._txn("0426"), self._txn("0326")]
+        with self._patch_ura(txns), \
+             patch("cache.unit_counts.get_unit_count",
+                   return_value={"total_units": 200, "source": "pipeline"}):
+            result = liquidity_for_project("TEST PROJECT")
+        s = result["summary"]
+        self.assertEqual(s["mode"], "turnover")
+        self.assertEqual(s["units_source"], "pipeline_history")
+        self.assertEqual(s["total_units"], 200)
+        self.assertIsNotNone(s["overall"]["annualised_pct"])
+
+    def test_derived_denominator(self):
+        from liquidity import liquidity_for_project
+        # Launch (first new sale) is 7 months after cache_oldest (0721) → trusted.
+        txns = [self._txn("0222", sale="1", units="80"), self._txn("0426")]
+        with self._patch_ura(txns), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = liquidity_for_project("TEST PROJECT")
+        s = result["summary"]
+        self.assertEqual(s["units_source"], "derived")
+        self.assertEqual(s["total_units"], 80)
+        self.assertTrue(s["units_estimated"])
+
+    def test_seed_used_when_derivation_untrusted(self):
+        from liquidity import liquidity_for_project
+        # New sales start AT cache_oldest → derivation untrusted → seed wins.
+        txns = [self._txn("0721", sale="1", units="50"), self._txn("0426")]
+        with self._patch_ura(txns), \
+             patch("cache.unit_counts.get_unit_count",
+                   return_value={"total_units": 300, "source": "seed"}):
+            result = liquidity_for_project("TEST PROJECT")
+        s = result["summary"]
+        self.assertEqual(s["units_source"], "seed")
+        self.assertEqual(s["total_units"], 300)
+
+    def test_fallback_when_no_denominator(self):
+        from liquidity import liquidity_for_project, format_liquidity_summary
+        # Resales only (nothing derivable), no pipeline, no Mongo.
+        txns = [self._txn("0126"), self._txn("0326"), self._txn("0526")]
+        with self._patch_ura(txns), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = liquidity_for_project("TEST PROJECT")
+        s = result["summary"]
+        self.assertIsNone(s["total_units"])
+        self.assertIsNone(s["overall"])
+        self.assertIsNotNone(s["fallback"])
+        text = format_liquidity_summary(s, result["development"])
+        self.assertTrue(text)
+        self.assertNotIn("None", text)
+
+    def test_unknown_project_returns_error(self):
+        from liquidity import liquidity_for_project
+        with self._patch_ura([self._txn("0426")]):
+            result = liquidity_for_project("ZZZZZZ NONEXISTENT")
+        self.assertIn("error", result)
+
+
+class TestLiquidityFormatting(unittest.TestCase):
+
+    def _summary(self, **overrides):
+        from liquidity import liquidity_summary, SECONDARY_SALE_TYPES  # noqa: F401
+        base = {
+            "mode": "turnover", "window_months": 6, "total_units": 400,
+            "units_source": "pipeline_history", "units_estimated": False,
+            "overall": {"count_6m": 8, "rate_6m_pct": 2.0, "annualised_pct": 4.0,
+                        "verdict_emoji": "🟡", "verdict": "Trades at a typical pace"},
+            "bands": {"901 – 1000 sqft": {"count_6m": 8, "est_units": 400,
+                                          "rate_6m_pct": 2.0, "annualised_pct": 4.0,
+                                          "all_time_count": 120}},
+            "band_mix_estimated": True, "fallback": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_turnover_message_contents(self):
+        from liquidity import format_liquidity_summary
+        text = format_liquidity_summary(self._summary(), "TEST PROJECT")
+        self.assertIn("Test Project", text)
+        self.assertIn("URA pipeline archive", text)
+        self.assertIn("%/yr", text)
+        self.assertIn("estimated from transaction history", text)
+        self.assertNotIn("None", text)
+
+    def test_take_up_message_contents(self):
+        from liquidity import format_liquidity_summary
+        s = self._summary(mode="take_up", units_source="pipeline")
+        s["overall"]["annualised_pct"] = None
+        s["bands"]["901 – 1000 sqft"]["annualised_pct"] = None
+        text = format_liquidity_summary(s, "TEST PROJECT")
+        self.assertIn("take-up", text.lower())
+        self.assertNotIn("None", text)
+
+    def test_fallback_message_contents(self):
+        from liquidity import format_liquidity_summary
+        s = self._summary(
+            total_units=None, units_source=None, overall=None,
+            band_mix_estimated=False,
+            bands={"901 – 1000 sqft": {"count_6m": 2, "est_units": None,
+                                       "rate_6m_pct": None, "annualised_pct": None,
+                                       "all_time_count": 12}},
+            fallback={"overall": 38.0, "bands": {"901 – 1000 sqft": 38.0},
+                      "window_months": 24},
+        )
+        text = format_liquidity_summary(s, "TEST PROJECT")
+        self.assertIn("sells every", text)
+        self.assertIn("weeks", text)
+        self.assertIn("last 24 months", text)
+        self.assertNotIn("None", text)
+
+
+class TestLiquidityButton(unittest.TestCase):
+
+    def test_keyboard_has_liquidity_button(self):
+        from bot import build_amenity_keyboard
+        keyboard = build_amenity_keyboard("abc12345")
+        callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+        self.assertIn("liquidity:abc12345", callbacks)
+        self.assertIn("mortgage:abc12345", callbacks)
+
+
+class TestUnitCountsHarvest(unittest.TestCase):
+
+    PIPELINE = [
+        {"project": "NEW LAUNCH", "expectedTOPYear": "2028", "totalUnits": 500},
+        {"project": "BAD ROW", "expectedTOPYear": "2028", "totalUnits": "n/a"},
+    ]
+
+    def test_noop_without_mongo(self):
+        from cache.unit_counts import harvest_pipeline_counts, merge_seed_file, get_unit_count
+        with patch("cache.unit_counts.get_mongo_db", return_value=None):
+            self.assertEqual(harvest_pipeline_counts(self.PIPELINE), 0)
+            self.assertEqual(merge_seed_file(), 0)
+            self.assertIsNone(get_unit_count("ANY"))
+
+    def test_harvest_upserts_pipeline_source(self):
+        from cache.unit_counts import harvest_pipeline_counts
+        collection = MagicMock()
+        db = MagicMock()
+        db.__getitem__.return_value = collection
+        with patch("cache.unit_counts.get_mongo_db", return_value=db):
+            saved = harvest_pipeline_counts(self.PIPELINE)
+        self.assertEqual(saved, 1)  # the "n/a" row is skipped
+        doc = collection.replace_one.call_args[0][1]
+        self.assertEqual(doc["_id"], "NEW LAUNCH")
+        self.assertEqual(doc["total_units"], 500)
+        self.assertEqual(doc["source"], "pipeline")
+
+    def test_seed_never_overwrites_pipeline_doc(self):
+        import json as _json
+        import tempfile
+        from cache.unit_counts import merge_seed_file
+        seed = {"_misses": ["X"], "OLD CONDO": {"total_units": 250, "source_url": "u"}}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            _json.dump(seed, f)
+            path = f.name
+        try:
+            collection = MagicMock()
+            db = MagicMock()
+            db.__getitem__.return_value = collection
+
+            # Existing pipeline-sourced doc → seed must not overwrite.
+            collection.find_one.return_value = {"_id": "OLD CONDO", "source": "pipeline"}
+            with patch("cache.unit_counts.get_mongo_db", return_value=db):
+                self.assertEqual(merge_seed_file(path), 0)
+            collection.replace_one.assert_not_called()
+
+            # No existing doc → seed fills the gap.
+            collection.find_one.return_value = None
+            with patch("cache.unit_counts.get_mongo_db", return_value=db):
+                self.assertEqual(merge_seed_file(path), 1)
+            doc = collection.replace_one.call_args[0][1]
+            self.assertEqual(doc["source"], "seed")
+            self.assertEqual(doc["total_units"], 250)
+        finally:
+            os.unlink(path)
+
+
 def run_tests():
     section("Property Bot Test Suite")
     print(f"Python {sys.version.split()[0]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -1074,6 +1373,11 @@ def run_tests():
         TestRentalMatching,
         TestUnderConstructionGate,
         TestMortgage,
+        TestLiquidityMath,
+        TestLiquiditySummaryIntegration,
+        TestLiquidityFormatting,
+        TestLiquidityButton,
+        TestUnitCountsHarvest,
     ]
 
     for cls in test_classes:

@@ -7,6 +7,7 @@ import os
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
 from cache.cache_ura import force_refresh, cache_status
+from cache.unit_counts import merge_seed_file
 from cache.cache_rental import force_refresh_rental, rental_cache_status
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
@@ -52,6 +53,12 @@ def main():
         logger.info(f"✅ URA — {status.get('projects', '?')} projects")
     else:
         logger.error("❌ URA refresh failed")
+
+    # 1b. Unit counts — merge offline-scraped seed entries (idempotent; the
+    # pipeline harvest itself happens inside the URA cache save above)
+    merged = merge_seed_file()
+    if merged:
+        logger.info(f"✅ Unit counts — merged {merged} seed entries")
 
     # 2. MRT stations
     logger.info("Refreshing MRT stations...")

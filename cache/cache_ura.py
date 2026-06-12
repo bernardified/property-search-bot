@@ -5,6 +5,7 @@ import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from utils import get_mongo_db, is_ura_transactions_stale
+from cache.unit_counts import harvest_pipeline_counts
 
 load_dotenv()
 
@@ -153,12 +154,18 @@ def _save_cache(transactions: list, pipeline: list):
         db['ura_cache'].replace_one(
             {"_id": "pipeline"},
             {
-                "_id": "pipeline", 
+                "_id": "pipeline",
                 "pipeline": pipeline,
-                "updated_at": current_time 
+                "updated_at": current_time
             },
             upsert=True
         )
+
+        # Pipeline snapshots are transient — a project's totalUnits vanishes
+        # from the feed once it TOPs. Persist every count into the permanent
+        # unit_counts store so the liquidity feature keeps a denominator for
+        # completed developments.
+        harvest_pipeline_counts(pipeline)
 
         db['ura_cache'].replace_one(
             {"_id": "meta"},
