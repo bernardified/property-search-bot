@@ -44,11 +44,12 @@ from cache.cache_ura import _load_cache  # read-only; never triggers an API refr
 from cache.unit_counts import SEED_FILE, get_unit_count
 
 PORTAL_URL_TEMPLATE = "https://www.99.co/singapore/condos-apartments/{slug}"
-# Tried in order against the page HTML; first capture group must be the count.
+# Tried in order against the page HTML; first capture group must be the count
+# and must start with a digit (a bare comma would survive [\d,]+ otherwise).
 UNITS_PATTERNS = [
-    r'"total_units"\s*:\s*"?([\d,]{1,6})',
-    r'"totalUnits"\s*:\s*"?([\d,]{1,6})',
-    r'([\d,]{1,6})\s*(?:total\s+)?units',
+    r'"total_units"\s*:\s*"?(\d[\d,]{0,5})',
+    r'"totalUnits"\s*:\s*"?(\d[\d,]{0,5})',
+    r'(\d[\d,]{0,5})\s*(?:total\s+)?units',
 ]
 REQUEST_DELAY_S = (4.0, 7.0)        # min, max jittered sleep between requests
 MAX_CONSECUTIVE_BLOCKS = 3          # 403/429 streak before giving up
@@ -81,9 +82,11 @@ def _save_seed(seed: dict):
 
 def _extract_units(html: str) -> int | None:
     for pattern in UNITS_PATTERNS:
-        m = re.search(pattern, html, re.IGNORECASE)
-        if m:
-            units = int(m.group(1).replace(",", ""))
+        for m in re.finditer(pattern, html, re.IGNORECASE):
+            try:
+                units = int(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
             if SANE_UNITS_RANGE[0] <= units <= SANE_UNITS_RANGE[1]:
                 return units
     return None
