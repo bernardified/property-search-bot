@@ -1,0 +1,48 @@
+{
+  "_misses": [],
+  "NORMANTON PARK": {
+    "total_units": 1862,
+    "source_url": "https://www.propertyguru.com.sg/project/normanton-park-226",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "PARC CLEMATIS": {
+    "total_units": 1468,
+    "source_url": "https://www.propertyguru.com.sg/project/parc-clematis-23763",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "PARC ESTA": {
+    "total_units": 1399,
+    "source_url": "https://www.propertyguru.com.sg/project/parc-esta-23534",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "RIVERCOVE RESIDENCES": {
+    "total_units": 628,
+    "source_url": "https://www.propertyguru.com.sg/project/rivercove-residences-ec-23385",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "RIVERFRONT RESIDENCES": {
+    "total_units": 1472,
+    "source_url": "https://www.propertyguru.com.sg/project/riverfront-residences-23460",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "STIRLING RESIDENCES": {
+    "total_units": 1259,
+    "source_url": "https://www.propertyguru.com.sg/project/stirling-residences-23462",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "THE FLORENCE RESIDENCES": {
+    "total_units": 1410,
+    "source_url": "https://www.propertyguru.com.sg/project/the-florence-residences-23599",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "THE GARDEN RESIDENCES": {
+    "total_units": 613,
+    "source_url": "https://www.propertyguru.com.sg/project/the-garden-residences-23440",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  },
+  "TREASURE AT TAMPINES": {
+    "total_units": 2203,
+    "source_url": "https://www.propertyguru.com.sg/project/treasure-at-tampines-23600",
+    "scraped_at": "2026-06-12T04:35:00+00:00"
+  }
+}

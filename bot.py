@@ -27,6 +27,7 @@ from mortgage import (
     MAX_TENURE_YEARS,
     MIN_DOWN_PAYMENT_PCT,
 )
+from liquidity import liquidity_for_project, format_liquidity_summary
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection, SIZE_BANDS
@@ -154,6 +155,7 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🏦 Affordability", callback_data=f"mortgage:{token}"),
+            InlineKeyboardButton("📊 Liquidity", callback_data=f"liquidity:{token}"),
         ],
         [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
@@ -735,6 +737,8 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_name = addr_key
         street_address = addr_key
 
+    display_name = project_name.title()
+
     # Geocode with project + street, not street alone. A long road (e.g.
     # "YIO CHU KANG ROAD") geocodes to an arbitrary midpoint far from the
     # actual development — Hundred Palms Residences (264 Yio Chu Kang Rd) was
@@ -772,7 +776,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     for band_label, txn in ura_result.get("bands", {}).items():
                         sale_prices[band_label] = {"price": txn.get("price")}
                 rental_result = get_rental_by_band(project_name, sale_prices, street_address)
-                text = format_rental(rental_result)
+                text = format_rental(rental_result, development=project_name)
         elif amenity == "trend":
             # Price trend uses project name — indexed by development name in URA
             trend_result = price_trend(project_name)
@@ -797,13 +801,13 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if amenity == "mrt":
                 text = format_amenity_list(
                     maps_result.get("mrts", []),
-                    "🚇 *Nearest MRT Stations*",
+                    f"🚇 *Nearest MRT Stations — {display_name}*",
                     "🚇 No MRT stations found within 2.5km"
                 )
             elif amenity == "schools":
                 schools = maps_result.get("schools", [])
                 if schools:
-                    lines = ["🏫 *Nearest Primary Schools*", "─────────────────────"]
+                    lines = [f"🏫 *Nearest Primary Schools — {display_name}*", "─────────────────────"]
                     for i, s in enumerate(schools, 1):
                         moe_dist = (
                             f"{int(s['dist'])}m" if s["dist"] < 1000
@@ -833,26 +837,69 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif amenity == "malls":
                 text = format_amenity_list(
                     maps_result.get("malls", []),
-                    "🛍️ *Nearest Shopping Malls*",
+                    f"🛍️ *Nearest Shopping Malls — {display_name}*",
                     "🛍️ No shopping malls found within 2km"
                 )
             elif amenity == "supermarkets":
                 text = format_amenity_list(
                     maps_result.get("supermarkets", []),
-                    "🛒 *Nearest Supermarkets* _(within 1km)_",
+                    f"🛒 *Nearest Supermarkets — {display_name}* _(within 1km)_",
                     "🛒 No major supermarkets found within 1km"
                 )
             else:
                 text = "Unknown amenity type."
 
         await loading.delete()
+        # Re-attach the amenity menu to the result so the user can tap the
+        # next button right here instead of scrolling back up.
+        keyboard = build_amenity_keyboard(token)
         if photo:
-            await query.message.reply_photo(photo=photo, caption=text, parse_mode="Markdown")
+            await query.message.reply_photo(
+                photo=photo, caption=text, parse_mode="Markdown", reply_markup=keyboard
+            )
         else:
-            await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+            await query.message.reply_text(
+                text, parse_mode="Markdown", disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
 
     except Exception as e:
         logger.error(f"Amenity callback failed: {e}", exc_info=True)
+        await loading.delete()
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
+
+
+async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 📊 Liquidity button: turnover / take-up rate per size band.
+
+    Re-queries by project name at tap time (same pattern as the rental and
+    trend buttons) — the computation needs the full transaction history plus
+    pipeline and unit-count lookups, which is too bulky to stash per token.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    addr_key = resolve_addr_key(context, token) if token else None
+    if not addr_key:
+        await query.message.reply_text("⚠️ Could not identify property. Please search again.")
+        return
+
+    project_name = addr_key.split("|", 1)[0]
+    loading = await query.message.reply_text("🔍 Crunching sales velocity...")
+    try:
+        result = liquidity_for_project(project_name)
+        if "error" in result:
+            text = f"⚠️ {result['error']}"
+        else:
+            text = format_liquidity_summary(result["summary"], result["development"])
+        await loading.delete()
+        # Same scroll-saving re-attach as the amenity buttons.
+        await query.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=build_amenity_keyboard(token)
+        )
+    except Exception as e:
+        logger.error(f"Liquidity callback failed: {e}", exc_info=True)
         await loading.delete()
         await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
@@ -1077,6 +1124,7 @@ def main():
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
     app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
+    app.add_handler(CallbackQueryHandler(liquidity_callback, pattern="^liquidity:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 

@@ -178,13 +178,14 @@ def get_rental_by_band(development_name: str, sale_prices: dict, street: str = "
     return {"development": development_name, "bands": band_data}
 
 
-def format_rental(result: dict) -> str:
+def format_rental(result: dict, development: str | None = None) -> str:
     """Format rental result into Telegram message."""
     if "error" in result:
         return f"❌ {result['error']}"
 
+    title_suffix = f" — {development.title()}" if development else ""
     lines = [
-        "🏠 *Rental Prices & Yield*",
+        f"🏠 *Rental Prices & Yield{title_suffix}*",
         "─────────────────────",
         "_Based on last 12 months of rental contracts_",
         "",
