@@ -737,6 +737,8 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_name = addr_key
         street_address = addr_key
 
+    display_name = project_name.title()
+
     # Geocode with project + street, not street alone. A long road (e.g.
     # "YIO CHU KANG ROAD") geocodes to an arbitrary midpoint far from the
     # actual development — Hundred Palms Residences (264 Yio Chu Kang Rd) was
@@ -774,7 +776,7 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     for band_label, txn in ura_result.get("bands", {}).items():
                         sale_prices[band_label] = {"price": txn.get("price")}
                 rental_result = get_rental_by_band(project_name, sale_prices, street_address)
-                text = format_rental(rental_result)
+                text = format_rental(rental_result, development=project_name)
         elif amenity == "trend":
             # Price trend uses project name — indexed by development name in URA
             trend_result = price_trend(project_name)
@@ -799,13 +801,13 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if amenity == "mrt":
                 text = format_amenity_list(
                     maps_result.get("mrts", []),
-                    "🚇 *Nearest MRT Stations*",
+                    f"🚇 *Nearest MRT Stations — {display_name}*",
                     "🚇 No MRT stations found within 2.5km"
                 )
             elif amenity == "schools":
                 schools = maps_result.get("schools", [])
                 if schools:
-                    lines = ["🏫 *Nearest Primary Schools*", "─────────────────────"]
+                    lines = [f"🏫 *Nearest Primary Schools — {display_name}*", "─────────────────────"]
                     for i, s in enumerate(schools, 1):
                         moe_dist = (
                             f"{int(s['dist'])}m" if s["dist"] < 1000
@@ -835,23 +837,31 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif amenity == "malls":
                 text = format_amenity_list(
                     maps_result.get("malls", []),
-                    "🛍️ *Nearest Shopping Malls*",
+                    f"🛍️ *Nearest Shopping Malls — {display_name}*",
                     "🛍️ No shopping malls found within 2km"
                 )
             elif amenity == "supermarkets":
                 text = format_amenity_list(
                     maps_result.get("supermarkets", []),
-                    "🛒 *Nearest Supermarkets* _(within 1km)_",
+                    f"🛒 *Nearest Supermarkets — {display_name}* _(within 1km)_",
                     "🛒 No major supermarkets found within 1km"
                 )
             else:
                 text = "Unknown amenity type."
 
         await loading.delete()
+        # Re-attach the amenity menu to the result so the user can tap the
+        # next button right here instead of scrolling back up.
+        keyboard = build_amenity_keyboard(token)
         if photo:
-            await query.message.reply_photo(photo=photo, caption=text, parse_mode="Markdown")
+            await query.message.reply_photo(
+                photo=photo, caption=text, parse_mode="Markdown", reply_markup=keyboard
+            )
         else:
-            await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+            await query.message.reply_text(
+                text, parse_mode="Markdown", disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
 
     except Exception as e:
         logger.error(f"Amenity callback failed: {e}", exc_info=True)
@@ -884,7 +894,10 @@ async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             text = format_liquidity_summary(result["summary"], result["development"])
         await loading.delete()
-        await query.message.reply_text(text, parse_mode="Markdown")
+        # Same scroll-saving re-attach as the amenity buttons.
+        await query.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=build_amenity_keyboard(token)
+        )
     except Exception as e:
         logger.error(f"Liquidity callback failed: {e}", exc_info=True)
         await loading.delete()

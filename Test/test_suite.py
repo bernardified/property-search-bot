@@ -1285,6 +1285,69 @@ class TestLiquidityFormatting(unittest.TestCase):
         self.assertNotIn("None", text)
 
 
+class TestSearchTotalUnits(unittest.TestCase):
+    """search_property resolves total units for COMPLETED condos through the
+    tiered unit-count store (not just the live pipeline feed)."""
+
+    @staticmethod
+    def _txn(mmyy, sale="3", units="1"):
+        return {
+            "area": "88.3", "price": "1500000", "contractDate": mmyy,
+            "typeOfSale": sale, "propertyType": "Condominium",
+            "floorRange": "06-10", "noOfUnits": units, "tenure": "99 yrs",
+        }
+
+    def _patch_ura(self, txns, pipeline=None):
+        anchor = {"project": "OLD ANCHOR", "street": "OLD ST",
+                  "transaction": [self._txn("0721")]}
+        data = ([{"project": "TEST PROJECT", "street": "TEST ST", "transaction": txns},
+                 anchor], pipeline or [])
+        return patch("ura.get_ura_data", return_value=data)
+
+    def test_completed_condo_gets_units_from_store(self):
+        from ura import search_property, format_transactions
+        with self._patch_ura([self._txn("0426")]), \
+             patch("cache.unit_counts.get_unit_count",
+                   return_value={"total_units": 613, "source": "pipeline"}):
+            result = search_property("TEST PROJECT")
+        self.assertEqual(result["total_units"], 613)
+        self.assertEqual(result["units_source"], "pipeline_history")
+        self.assertIn("Total units: 613", format_transactions(result))
+
+    def test_derived_units_marked_approximate(self):
+        from ura import search_property, format_transactions
+        txns = [self._txn("0222", sale="1", units="80"), self._txn("0426")]
+        with self._patch_ura(txns), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = search_property("TEST PROJECT")
+        self.assertEqual(result["total_units"], 80)
+        self.assertEqual(result["units_source"], "derived")
+        self.assertIn("Total units: ~80", format_transactions(result))
+
+    def test_no_units_anywhere_stays_blank(self):
+        from ura import search_property, format_transactions
+        with self._patch_ura([self._txn("0426")]), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = search_property("TEST PROJECT")
+        self.assertIsNone(result["total_units"])
+        self.assertNotIn("Total units", format_transactions(result))
+
+    def test_pipeline_still_wins(self):
+        from ura import search_property
+        pipeline = [{"project": "TEST PROJECT", "expectedTOPYear": "2028", "totalUnits": 100}]
+        with self._patch_ura([self._txn("0426", sale="1")], pipeline), \
+             patch("cache.unit_counts.get_unit_count", return_value=None):
+            result = search_property("TEST PROJECT")
+        self.assertEqual(result["total_units"], 100)
+        self.assertEqual(result["units_source"], "pipeline")
+        self.assertTrue(result["under_construction"])
+
+    def test_rental_header_includes_development(self):
+        from rental import format_rental
+        text = format_rental({"bands": {}}, development="THE GARDEN RESIDENCES")
+        self.assertIn("The Garden Residences", text)
+
+
 class TestLiquidityButton(unittest.TestCase):
 
     def test_keyboard_has_liquidity_button(self):
@@ -1375,6 +1438,7 @@ def run_tests():
         TestMortgage,
         TestLiquidityMath,
         TestLiquiditySummaryIntegration,
+        TestSearchTotalUnits,
         TestLiquidityFormatting,
         TestLiquidityButton,
         TestUnitCountsHarvest,

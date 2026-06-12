@@ -296,14 +296,21 @@ def search_property(development_name: str) -> dict:
     if not band_latest:
         return {"error": f'Found "{development_name}" but could not parse any valid transactions.\nThe project may only have landed housing records.'}
 
-    # Total units come from the pipeline feed (uncompleted projects only).
-    # Completed projects return None here — liquidity.py resolves those via
-    # the permanent unit_counts store instead.
+    # Total units: the pipeline feed covers uncompleted projects; completed
+    # ones fall through to the tiered unit-count resolution (harvested
+    # pipeline history → derived from new sales → scraped seed).
     matched_project_name = matched_transactions[0]["project"]
     pipeline_info = get_project_info(matched_project_name, pipeline_data)
 
-    total_units = pipeline_info.get("total_units")
     expected_top = pipeline_info.get("expected_top")
+
+    from liquidity import resolve_total_units
+    total_units, units_source = resolve_total_units(
+        matched_project_name,
+        [item["txn"] for item in matched_transactions],
+        pipeline_info.get("total_units"),
+        _all_results,
+    )
 
     # Compute average PSF per band
     band_avg_psf = {}
@@ -350,6 +357,7 @@ def search_property(development_name: str) -> dict:
         "fuzzy_match": fuzzy_name,
         "alternatives": alternatives,
         "total_units": total_units,
+        "units_source": units_source,
         "expected_top": expected_top,
     }
 
@@ -694,7 +702,9 @@ def format_transactions(result: dict) -> str:
     if meta:
         lines.append(f"🏷 _{meta}_")
     if total_units:
-        lines.append(f"🏗 _Total units: {total_units}_")
+        # Derived counts (summed from new-sale records) are approximate.
+        approx = "~" if result.get("units_source") == "derived" else ""
+        lines.append(f"🏗 _Total units: {approx}{total_units:,}_")
     if expected_top and expected_top != "na":
         lines.append(f"📆 _Expected TOP: {expected_top}_")
     lines += [

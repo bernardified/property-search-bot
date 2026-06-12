@@ -194,26 +194,15 @@ def liquidity_verdict(mode: str, annualised_pct: float | None = None,
 
 
 def liquidity_summary(txns: list, total_units: int | None, units_source: str | None,
-                      under_construction: bool, cache_oldest: datetime | None = None,
-                      now: datetime | None = None, seed_units: int | None = None) -> dict:
+                      under_construction: bool, now: datetime | None = None) -> dict:
     """Build the full liquidity picture for one development.
 
-    `total_units`/`units_source` carry the tier-1/2 resolution (live pipeline
-    or harvested history); tier 3 (derived) and tier 4 (`seed_units`) are
-    resolved here so the precedence lives in one place. With no denominator at
-    all, `fallback` carries the days-between-sales picture instead.
+    `total_units`/`units_source` come from `resolve_total_units`. With no
+    denominator at all, `fallback` carries the days-between-sales picture
+    instead.
     """
     mode = "take_up" if under_construction else "turnover"
     sale_types = NEW_SALE_TYPES if mode == "take_up" else SECONDARY_SALE_TYPES
-
-    if not total_units:
-        derived = derive_units_from_new_sales(txns, cache_oldest)
-        if derived:
-            total_units, units_source = derived, "derived"
-        elif seed_units:
-            total_units, units_source = int(seed_units), "seed"
-        else:
-            total_units, units_source = None, None
 
     counts_6m = count_sales_in_window(txns, sale_types, WINDOW_MONTHS, now)
     # Mix estimation uses ALL transactions (every sale type, all time) — the
@@ -382,7 +371,46 @@ def format_liquidity_summary(s: dict, development: str) -> str:
     return "\n".join(lines)
 
 
-# ── IO orchestrator ───────────────────────────────────────────────────────────
+# ── IO: unit-count resolution & orchestrator ──────────────────────────────────
+
+def cache_oldest_date(all_results: list) -> datetime | None:
+    """Oldest contract date in the whole cache — the trust anchor for deriving
+    totals from new-sale records (see derive_units_from_new_sales)."""
+    oldest = None
+    for project in all_results:
+        for txn in project.get("transaction", []):
+            dt = parse_mmyy_date(txn.get("contractDate", ""))
+            if dt and (oldest is None or dt < oldest):
+                oldest = dt
+    return oldest
+
+
+def resolve_total_units(development: str, txns: list, pipeline_total,
+                        all_results: list) -> tuple:
+    """Tiered denominator resolution. Returns (total_units, source).
+
+    Tiers, best wins: live pipeline feed → harvested pipeline history (Mongo)
+    → derived from cached new-sale records → scraped/verified seed (Mongo).
+    (None, None) when every tier misses.
+    """
+    from cache.unit_counts import get_unit_count
+
+    raw_total = parse_float(pipeline_total)
+    if raw_total and raw_total > 0:
+        return int(raw_total), "pipeline"
+
+    stored = get_unit_count(development)
+    if stored and stored["source"] == "pipeline":
+        return stored["total_units"], "pipeline_history"
+
+    derived = derive_units_from_new_sales(txns, cache_oldest_date(all_results))
+    if derived:
+        return derived, "derived"
+
+    if stored:
+        return stored["total_units"], "seed"
+    return None, None
+
 
 def liquidity_for_project(project_name: str) -> dict:
     """Resolve a development name and assemble its liquidity summary.
@@ -393,7 +421,6 @@ def liquidity_for_project(project_name: str) -> dict:
     target covers both the matcher and this loader).
     """
     from ura import _collect_matched_transactions, get_project_info, get_ura_data
-    from cache.unit_counts import get_unit_count
 
     matched = _collect_matched_transactions(project_name)
     if "error" in matched:
@@ -410,33 +437,9 @@ def liquidity_for_project(project_name: str) -> dict:
     pipeline_info = get_project_info(development, pipeline)
     under_construction = pipeline_info.get("expected_top") is not None
 
-    total_units = None
-    units_source = None
-    raw_total = parse_float(pipeline_info.get("total_units"))
-    if raw_total and raw_total > 0:
-        total_units, units_source = int(raw_total), "pipeline"
-
-    seed_units = None
-    if not total_units:
-        stored = get_unit_count(development)
-        if stored:
-            if stored["source"] == "pipeline":
-                total_units, units_source = stored["total_units"], "pipeline_history"
-            else:
-                # Seed counts rank below derivation — pass through for tier 4.
-                seed_units = stored["total_units"]
-
-    # Oldest contract date in the whole cache — the trust anchor for deriving
-    # totals from new-sale records (see derive_units_from_new_sales).
-    cache_oldest = None
-    for project in all_results:
-        for txn in project.get("transaction", []):
-            dt = parse_mmyy_date(txn.get("contractDate", ""))
-            if dt and (cache_oldest is None or dt < cache_oldest):
-                cache_oldest = dt
-
-    summary = liquidity_summary(
-        txns, total_units, units_source, under_construction,
-        cache_oldest=cache_oldest, seed_units=seed_units,
+    total_units, units_source = resolve_total_units(
+        development, txns, pipeline_info.get("total_units"), all_results
     )
+
+    summary = liquidity_summary(txns, total_units, units_source, under_construction)
     return {"summary": summary, "development": development}
