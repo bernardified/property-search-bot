@@ -133,5 +133,12 @@ def merge_seed_file(path: str = SEED_FILE) -> int:
 
 
 if __name__ == "__main__":
+    import sys
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
     logging.basicConfig(level=logging.INFO)
-    merge_seed_file()
+    # Optionally pass a seed-file path (default: cache/unit_counts_seed.json).
+    path = sys.argv[1] if len(sys.argv) > 1 else SEED_FILE
+    print(f"{merge_seed_file(path)} entries merged from {path}")
