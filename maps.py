@@ -109,6 +109,35 @@ def resolve_postal_code(postal: str) -> dict | None:
     }
 
 
+def geocode_building(query: str) -> dict | None:
+    """Geocode a free-text address (e.g. an HDB block + street) via OneMap's
+    elastic search — the same authoritative source as resolve_postal_code, but
+    keyed on a building/address string instead of a postal code.
+
+    Returns {"building", "road", "address", "lat", "lng"} for the top hit, or
+    None when there is no result or it carries no coordinate.
+    """
+    results = search_onemap(query, get_onemap_token())
+    if not results:
+        return None
+    m = results[0]
+    try:
+        lat = float(m["LATITUDE"])
+        lng = float(m["LONGITUDE"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    building = str(m.get("BUILDING", "")).strip()
+    if building.upper() in ("NIL", "NA", ""):
+        building = ""
+    return {
+        "building": building,
+        "road": str(m.get("ROAD_NAME", "")).strip(),
+        "address": str(m.get("ADDRESS", "")).strip(),
+        "lat": lat,
+        "lng": lng,
+    }
+
+
 # ── OneMap MRT search ─────────────────────────────────────────────────────────
 
 def search_onemap(query: str, token: str) -> list:

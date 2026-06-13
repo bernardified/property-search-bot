@@ -1562,6 +1562,23 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(resolve_hdb_target(ctx, token), "200|BISHAN ST 22")
         self.assertIsNone(resolve_hdb_target(ctx, "deadbeef"))
 
+    def test_expand_street(self):
+        import hdb
+        self.assertEqual(hdb.expand_street("ANG MO KIO AVE 10"), "ANG MO KIO AVENUE 10")
+        self.assertEqual(hdb.expand_street("bishan st 22"), "BISHAN STREET 22")
+
+    def test_hdb_amenity_keyboard_is_location_only(self):
+        from bot import build_hdb_amenity_keyboard
+        cbs = [b.callback_data for row in build_hdb_amenity_keyboard("tok123").inline_keyboard for b in row]
+        self.assertEqual(cbs, [
+            "amenity:mrt:tok123", "amenity:schools:tok123",
+            "amenity:malls:tok123", "amenity:supermarkets:tok123",
+            "new_search",
+        ])
+        # No private-only amenities leak into the HDB keyboard.
+        for bad in ("rental", "trend", "mortgage:", "liquidity:", "pg:"):
+            self.assertFalse(any(bad in c for c in cbs), f"{bad} leaked into HDB keyboard")
+
 
 def run_tests():
     section("Property Bot Test Suite")

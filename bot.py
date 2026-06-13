@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 from ura import search_property, format_transactions, price_trend, format_price_trend, render_price_trend_png
-from maps import get_nearby_info, resolve_postal_code
+from maps import get_nearby_info, resolve_postal_code, geocode_building
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
 from cache.cache_rental import force_refresh_rental, rental_cache_status
@@ -210,6 +210,26 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🟥 PropertyGuru", callback_data=f"pg:{token}"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
+        ],
+    ])
+
+
+def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Amenity keyboard for an HDB block. Reuses the private amenity_callback
+    (same `amenity:<type>:<token>` pattern, served from stashed coords), but
+    only the location amenities apply — HDB has no rental/trend/liquidity/PG
+    in v1."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{token}"),
+            InlineKeyboardButton("🏫 Primary Schools", callback_data=f"amenity:schools:{token}"),
+        ],
+        [
+            InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{token}"),
+            InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
         ],
         [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
@@ -798,14 +818,7 @@ async def hdb_block_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("⚠️ Could not identify block. Please search again.")
         return
     block, street = payload.split("|", 1)
-    result = hdb.block_detail(block, street)
-    await query.message.reply_text(
-        hdb.format_block_detail(result),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔍 Search another property", callback_data="new_search")
-        ]]),
-    )
+    await _send_hdb_block_detail(query.message, context, block, street)
 
 
 async def search_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -998,8 +1011,12 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await loading.delete()
         # Re-attach the amenity menu to the result so the user can tap the
-        # next button right here instead of scrolling back up.
-        keyboard = build_amenity_keyboard(token)
+        # next button right here instead of scrolling back up. HDB blocks get
+        # the location-only keyboard; private gets the full one.
+        if token in context.user_data.get("hdb_tokens", set()):
+            keyboard = build_hdb_amenity_keyboard(token)
+        else:
+            keyboard = build_amenity_keyboard(token)
         if photo:
             await query.message.reply_photo(
                 photo=photo, caption=text, parse_mode="Markdown", reply_markup=keyboard
@@ -1290,6 +1307,59 @@ async def _send_hdb_town_overview(message, context: ContextTypes.DEFAULT_TYPE, i
     )
 
 
+def _geocode_hdb_block(block: str, street: str):
+    """Resolve an HDB block to coordinates via OneMap. Tries the raw street
+    then its abbreviation-expanded form (e.g. ST → STREET). None on miss."""
+    seen = set()
+    for q in (f"{block} {street}", f"{block} {hdb.expand_street(street)}"):
+        if q in seen:
+            continue
+        seen.add(q)
+        loc = geocode_building(q)
+        if loc:
+            return loc
+    return None
+
+
+async def _send_hdb_block_detail(message, context: ContextTypes.DEFAULT_TYPE,
+                                 block: str, street: str):
+    """Render a block's per-flat-type detail and, when the block geocodes,
+    attach the location-amenity keyboard (reusing the private amenity engine)."""
+    result = hdb.block_detail(block, street)
+    if "error" in result:
+        await message.reply_text(hdb.format_block_detail(result), reply_markup=_HDB_NEW_SEARCH)
+        return
+
+    await message.reply_text(
+        hdb.format_block_detail(result),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+    # Geocode once and stash the exact coordinate under an addr token; the
+    # amenity buttons then read it (skipping any geocode) exactly like the
+    # postal-code flow. addr_key is "<display>|<street>" so the reused
+    # amenity_callback has a sensible display name + street fallback.
+    loc = _geocode_hdb_block(block, result["street"])
+    if not loc:
+        await message.reply_text(
+            "_Amenity lookup unavailable — couldn't locate this block._",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+        return
+
+    display = f"Block {block} {result['street'].title()}"
+    token = store_addr_key(context, f"{display}|{result['street']}")
+    store_addr_coords(context, token, loc["lat"], loc["lng"])
+    # Mark the token HDB so the reused amenity_callback re-attaches the HDB
+    # keyboard (location amenities only), not the private one.
+    context.user_data.setdefault("hdb_tokens", set()).add(token)
+    await message.reply_text(
+        "Tap to explore nearby amenities:",
+        reply_markup=build_hdb_amenity_keyboard(token),
+    )
+
+
 async def _send_hdb_street_summary(message, context: ContextTypes.DEFAULT_TYPE, street: str):
     """Render a street's per-flat-type aggregate plus a button per block."""
     result = hdb.street_summary(street)
@@ -1348,9 +1418,7 @@ async def handle_hdb_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if result["kind"] == "block":
-        detail = hdb.block_detail(result["block"], result["street"])
-        await msg.reply_text(hdb.format_block_detail(detail), parse_mode="Markdown",
-                             reply_markup=_HDB_NEW_SEARCH)
+        await _send_hdb_block_detail(msg, context, result["block"], result["street"])
     else:  # street
         await _send_hdb_street_summary(msg, context, result["street"])
 

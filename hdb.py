@@ -127,6 +127,12 @@ def _canon_tokens(text: str) -> list[str]:
     return [_STREET_ABBREV.get(t, t) for t in toks]
 
 
+def expand_street(street: str) -> str:
+    """Expand a street's abbreviations to full words ("ANG MO KIO AVE 10" →
+    "ANG MO KIO AVENUE 10"). Used to give OneMap a fuller string to geocode."""
+    return " ".join(_canon_tokens(street))
+
+
 # ── Towns (browse) — mirrors district_search ────────────────────────────────
 
 def hdb_towns(records: list | None = None) -> list[str]:
