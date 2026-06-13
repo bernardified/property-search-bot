@@ -1358,6 +1358,100 @@ class TestLiquidityButton(unittest.TestCase):
         self.assertIn("mortgage:abc12345", callbacks)
         self.assertIn("pg:abc12345", callbacks)
 
+    def test_pg_button_label_renamed(self):
+        from bot import build_amenity_keyboard
+        keyboard = build_amenity_keyboard("abc12345")
+        labels = [btn.text for row in keyboard.inline_keyboard for btn in row]
+        self.assertTrue(any("Available Listings" in l for l in labels))
+
+    def test_search_another_carries_token_for_nearby(self):
+        # The "Search another property" button must carry the origin token so the
+        # follow-up menu can offer a nearby search anchored to it.
+        from bot import build_amenity_keyboard
+        keyboard = build_amenity_keyboard("abc12345")
+        callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+        self.assertIn("new_search:abc12345", callbacks)
+
+
+class TestNearbySearch(unittest.TestCase):
+
+    TXNS = [
+        {"project": "ALPHA", "street": "A RD",
+         "transaction": [{"district": "15", "propertyType": "Condominium"},
+                         {"district": "15", "propertyType": "Apartment"}]},
+        {"project": "BETA", "street": "B RD",
+         "transaction": [{"district": "15", "propertyType": "Condominium"}]},
+        {"project": "LANDEDONLY", "street": "L RD",
+         "transaction": [{"district": "15", "propertyType": "Terrace"}]},
+        {"project": "FARAWAY", "street": "F RD",
+         "transaction": [{"district": "15", "propertyType": "Condominium"}]},
+        {"project": "OTHERDIST", "street": "O RD",
+         "transaction": [{"district": "09", "propertyType": "Condominium"}]},
+    ]
+
+    # Coords: BETA ~200m N of ALPHA (within 1km); FARAWAY > 1km away.
+    COORDS = {
+        "ALPHA": (1.3000, 103.8000),
+        "BETA": (1.3018, 103.8000),
+        "FARAWAY": (1.3200, 103.8200),
+    }
+
+    def test_is_landed(self):
+        from nearby import _is_landed
+        self.assertTrue(_is_landed("Terrace"))
+        self.assertTrue(_is_landed("Detached"))
+        self.assertFalse(_is_landed("Condominium"))
+        self.assertFalse(_is_landed(""))
+
+    def test_find_origin_case_insensitive(self):
+        from nearby import find_origin
+        self.assertEqual(find_origin(self.TXNS, "alpha")["project"], "ALPHA")
+        self.assertIsNone(find_origin(self.TXNS, "nope"))
+
+    def test_project_district_mode(self):
+        from nearby import project_district
+        rec = {"transaction": [{"district": "15"}, {"district": "15"}, {"district": "09"}]}
+        self.assertEqual(project_district(rec), 15)
+        self.assertIsNone(project_district({"transaction": []}))
+
+    def test_candidate_projects_filters_and_sorts(self):
+        from nearby import candidate_projects
+        cands = candidate_projects(self.TXNS, 15)
+        names = [c["project"] for c in cands]
+        self.assertIn("ALPHA", names)       # ALPHA has 2 txns -> first
+        self.assertIn("BETA", names)
+        self.assertIn("FARAWAY", names)
+        self.assertNotIn("LANDEDONLY", names)   # landed-only excluded
+        self.assertNotIn("OTHERDIST", names)    # different district
+        self.assertEqual(names[0], "ALPHA")     # sorted by txn volume desc
+
+    def test_nearby_for_project_filters_by_radius(self):
+        from unittest.mock import patch
+        import nearby
+
+        def fake_geocode(name, street, token):
+            return self.COORDS.get(name.strip().upper())
+
+        with patch("nearby.get_ura_data", return_value=(self.TXNS, [])), \
+             patch("nearby.get_mongo_db", return_value=None), \
+             patch("nearby.get_onemap_token", return_value="tok"), \
+             patch("nearby._geocode", side_effect=fake_geocode):
+            result = nearby.nearby_for_project("ALPHA")
+
+        self.assertEqual(result["district"], 15)
+        names = [r["project"] for r in result["results"]]
+        self.assertEqual(names, ["BETA"])          # within 1km, excludes self
+        self.assertNotIn("ALPHA", names)           # origin excluded
+        self.assertNotIn("FARAWAY", names)         # > 1km away
+        self.assertGreater(result["results"][0]["distance_m"], 0)
+
+    def test_nearby_for_project_unknown_name(self):
+        from unittest.mock import patch
+        import nearby
+        with patch("nearby.get_ura_data", return_value=(self.TXNS, [])):
+            result = nearby.nearby_for_project("DOES NOT EXIST")
+        self.assertIn("error", result)
+
 
 class TestPropertyGuruLinks(unittest.TestCase):
 
@@ -1475,6 +1569,7 @@ def run_tests():
         TestLiquidityFormatting,
         TestLiquidityButton,
         TestPropertyGuruLinks,
+        TestNearbySearch,
         TestUnitCountsHarvest,
     ]
 
