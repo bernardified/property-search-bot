@@ -4,6 +4,7 @@ Single source of truth for size bands, MongoDB connections,
 haversine distance, OneMap token, date helpers, and cache staleness logic.
 """
 import os
+import re
 import time
 import logging
 from datetime import datetime, date, timedelta
@@ -34,6 +35,46 @@ def get_band(sqft: float) -> str | None:
         if band["min"] <= sqft <= band["max"]:
             return band["label"]
     return None
+
+
+# ── HDB flat types ──────────────────────────────────────────────────────────
+# Ordered for display, parallel to SIZE_BANDS — HDB resale results are grouped
+# by flat type the way private transactions are grouped by size band. Values
+# match data.gov.sg's `flat_type` field exactly. Sourced from the live dataset
+# (Jun 2026): the 7 types below are the complete current set.
+FLAT_TYPES = [
+    "1 ROOM",
+    "2 ROOM",
+    "3 ROOM",
+    "4 ROOM",
+    "5 ROOM",
+    "EXECUTIVE",
+    "MULTI-GENERATION",
+]
+
+
+def parse_remaining_lease(text) -> float | None:
+    """Parse an HDB remaining-lease string to a number of years (float).
+
+    Handles the two forms data.gov.sg emits — "61 years 04 months" → 61.33
+    and "70 years" → 70.0 — plus the bare integer ("70") used by older eras.
+    Returns None if unparseable.
+    """
+    if text is None:
+        return None
+    s = str(text).strip().lower()
+    if not s:
+        return None
+    yrs = re.search(r"(\d+)\s*year", s)
+    mos = re.search(r"(\d+)\s*month", s)
+    if yrs or mos:
+        y = int(yrs.group(1)) if yrs else 0
+        m = int(mos.group(1)) if mos else 0
+        return round(y + m / 12, 2)
+    try:
+        return float(s)  # bare number = years
+    except ValueError:
+        return None
 
 
 # ── Unit conversions ──────────────────────────────────────────────────────────
@@ -270,6 +311,22 @@ def is_ura_transactions_stale(last_refresh_ts: float) -> bool:
                 return True
         check += timedelta(days=1)
     return False
+
+
+def is_hdb_resale_stale(last_refresh_ts: float) -> bool:
+    """
+    Return True if HDB resale data needs refreshing.
+
+    HDB resale prices (data.gov.sg CKAN) update roughly monthly, early in the
+    month. Unlike URA, there is no fixed published release time, so we use a
+    simple calendar-month heuristic: the cache is stale once the SGT calendar
+    month has advanced past the month it was last refreshed in. This avoids
+    over-fetching; intra-month corrections are picked up on the next month's
+    first query.
+    """
+    now_sgt = datetime.now(SGT)
+    since_sgt = datetime.fromtimestamp(last_refresh_ts, tz=SGT)
+    return (now_sgt.year, now_sgt.month) > (since_sgt.year, since_sgt.month)
 
 
 def is_rental_stale(last_refresh_ts: float) -> bool:

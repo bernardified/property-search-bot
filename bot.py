@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 from ura import search_property, format_transactions, price_trend, format_price_trend, render_price_trend_png
-from maps import get_nearby_info, resolve_postal_code
+from maps import get_nearby_info, resolve_postal_code, geocode_building
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
 from cache.cache_rental import force_refresh_rental, rental_cache_status
@@ -40,6 +40,7 @@ from district_search import (
     district_button_label,
     NUM_DISTRICTS,
 )
+import hdb
 
 load_dotenv()
 
@@ -66,12 +67,47 @@ MORTGAGE_VARIABLE = 15
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def build_market_keyboard() -> InlineKeyboardMarkup:
+    """Top-level market toggle shown by /start, /search, and New Search.
+
+    One bot serves both private and HDB; the choice sets context.user_data
+    ["market"], which routes subsequent free text to the right search layer.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏢 Private", callback_data="market:private")],
+        [InlineKeyboardButton("🏠 HDB", callback_data="market:hdb")],
+    ])
+
+
 def build_search_mode_keyboard() -> InlineKeyboardMarkup:
-    """The two top-level search options shown by /start and /search."""
+    """The two private-market search options (after the market toggle)."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Search by Name", callback_data="search_mode:name")],
         [InlineKeyboardButton("📍 Browse by District", callback_data="search_mode:district")],
     ])
+
+
+def build_hdb_mode_keyboard() -> InlineKeyboardMarkup:
+    """The two HDB-market discovery options (after the market toggle)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗺 Browse by Town", callback_data="hdbmode:town")],
+        [InlineKeyboardButton("🔍 Block / Street Lookup", callback_data="hdbmode:lookup")],
+    ])
+
+
+def build_hdb_town_keyboard() -> InlineKeyboardMarkup:
+    """Grid of HDB towns, 2 per row. Buttons carry the 1-based town index
+    (hdbtown:<idx>) — towns are derived from the data, so a new town appears
+    automatically once its first resale registers."""
+    towns = hdb.hdb_towns()
+    keyboard = []
+    for i, town in enumerate(towns, 1):
+        if (i - 1) % 2 == 0:
+            keyboard.append([])
+        keyboard[-1].append(
+            InlineKeyboardButton(town.title(), callback_data=f"hdbtown:{i}")
+        )
+    return InlineKeyboardMarkup(keyboard)
 
 
 def build_district_keyboard() -> InlineKeyboardMarkup:
@@ -108,6 +144,20 @@ def resolve_addr_key(context: ContextTypes.DEFAULT_TYPE, token: str) -> str | No
     if "|" in token:
         return token
     return context.user_data.get("addr_keys", {}).get(token)
+
+
+def store_hdb_target(context: ContextTypes.DEFAULT_TYPE, payload: str) -> str:
+    """Stash an HDB navigation target ("<STREET>" or "<BLOCK>|<STREET>") behind
+    a short token, mirroring store_addr_key — HDB street names overflow
+    Telegram's 64-byte callback_data limit (e.g. 'KALLANG/WHAMPOA ...')."""
+    token = hashlib.md5(payload.encode("utf-8")).hexdigest()[:8]
+    context.user_data.setdefault("hdb_targets", {})[token] = payload
+    return token
+
+
+def resolve_hdb_target(context: ContextTypes.DEFAULT_TYPE, token: str | None) -> str | None:
+    """Look up a stored HDB target by token. None if unknown (e.g. after restart)."""
+    return context.user_data.get("hdb_targets", {}).get(token) if token else None
 
 
 def store_addr_coords(context: ContextTypes.DEFAULT_TYPE, token: str, lat: float, lng: float):
@@ -160,11 +210,32 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Liquidity", callback_data=f"liquidity:{token}"),
         ],
         [
-            InlineKeyboardButton("🏘️ PropertyGuru (Available Listings)", callback_data=f"pg:{token}"),
+            InlineKeyboardButton("🟥 PropertyGuru (Available Listings)", callback_data=f"pg:{token}"),
         ],
         [
             # Carry the origin token so the follow-up menu can offer "Nearby".
             InlineKeyboardButton("🔍 Search another property", callback_data=f"new_search:{token}"),
+        ],
+    ])
+
+
+def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Amenity keyboard for an HDB block. Reuses the private amenity_callback
+    (same `amenity:<type>:<token>` pattern, served from stashed coords), but
+    only the location amenities apply — HDB has no rental/trend/liquidity/PG
+    in v1."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{token}"),
+            InlineKeyboardButton("🏫 Primary Schools", callback_data=f"amenity:schools:{token}"),
+        ],
+        [
+            InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{token}"),
+            InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
+        ],
+        [
+            # Bare new_search (no token) — HDB has no "nearby" follow-up.
+            InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
         ],
     ])
 
@@ -204,13 +275,19 @@ def get_username(msg) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Deep link from a district list: /start d<district>r<rank> → open that property
     if context.args:
-        m = re.fullmatch(r"d(\d+)r(\d+)", context.args[0].strip())
+        arg = context.args[0].strip()
+        m = re.fullmatch(r"d(\d+)r(\d+)", arg)
         if m:
             district, rank = int(m.group(1)), int(m.group(2))
             developments = get_top_developments_by_district(district, limit=10)
             if 1 <= rank <= len(developments):
                 await handle_property_search(update, context, developments[rank - 1]["project"])
                 return
+        # HDB deep link: /start t<NN> → open that town's resale overview
+        mt = re.fullmatch(r"t(\d+)", arg)
+        if mt:
+            await _send_hdb_town_overview(update.message, context, int(mt.group(1)))
+            return
 
     await update.message.reply_text(
         "🏠 *Singapore Private Property Search*\n\n"
@@ -226,7 +303,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 *By Name* — Search a specific development\n"
         "📍 *By District* — Browse top developments by area\n"
         "📮 *By Postal Code* — Just send a 6-digit postal code\n\n"
-        "Pick an option below to get started.\n\n"
+        "Pick a market below to get started.\n\n"
         "Commands:\n"
         "/search — find a property\n"
         "/mortgage — affordability & monthly repayment\n"
@@ -234,7 +311,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/refresh — update property data\n"
         "/help — show this message",
         parse_mode="Markdown",
-        reply_markup=build_search_mode_keyboard(),
+        reply_markup=build_market_keyboard(),
     )
 
 
@@ -313,14 +390,18 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "🏠 How would you like to search?",
-        reply_markup=build_search_mode_keyboard(),
+        "🏠 Which market?",
+        reply_markup=build_market_keyboard(),
     )
     return WAITING_FOR_PROPERTY_NAME
 
 
 async def received_property_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await handle_property_search(update, context, update.message.text.strip())
+    text = update.message.text.strip()
+    if context.user_data.get("market") == "hdb":
+        await handle_hdb_search(update, context, text)
+    else:
+        await handle_property_search(update, context, text)
     return ConversationHandler.END
 
 
@@ -659,24 +740,104 @@ async def new_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
 
-    # When invoked from a property result the callback carries that property's
-    # token ("new_search:<token>"), letting us offer a "nearby" search anchored
-    # to it. The bare "new_search" (district list, /list) has no such anchor.
+    # When invoked from a (private) property result the callback carries that
+    # property's token ("new_search:<token>"), letting us offer a "nearby"
+    # search anchored to it alongside the market toggle. The bare "new_search"
+    # (district list, /list, HDB results) has no such anchor.
     token = query.data.split(":", 1)[1] if ":" in query.data else None
     has_origin = bool(token and resolve_addr_key(context, token))
 
-    keyboard = [
-        [InlineKeyboardButton("🔍 Search by Name", callback_data="search_mode:name")],
-        [InlineKeyboardButton("📍 Browse by District", callback_data="search_mode:district")],
+    rows = [
+        [InlineKeyboardButton("🏢 Private", callback_data="market:private")],
+        [InlineKeyboardButton("🏠 HDB", callback_data="market:hdb")],
     ]
     if has_origin:
-        keyboard.append(
+        rows.append(
             [InlineKeyboardButton("📌 Search nearby (within 1km)", callback_data=f"nearby:{token}")]
         )
     await query.message.reply_text(
-        "🏠 How would you like to search?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "🏠 Which market?",
+        reply_markup=InlineKeyboardMarkup(rows),
     )
+
+
+async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 🏢 Private / 🏠 HDB toggle. Sets the market for subsequent
+    free-text routing and shows that market's discovery options."""
+    query = update.callback_query
+    await query.answer()
+
+    market = query.data.split(":")[1]
+    context.user_data["market"] = market
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if market == "hdb":
+        await query.message.reply_text(
+            "🏠 *HDB resale* — how would you like to search?",
+            parse_mode="Markdown",
+            reply_markup=build_hdb_mode_keyboard(),
+        )
+    else:
+        await query.message.reply_text(
+            "🏢 *Private property* — how would you like to search?",
+            parse_mode="Markdown",
+            reply_markup=build_search_mode_keyboard(),
+        )
+
+
+async def hdb_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle HDB discovery mode (browse-by-town vs block/street lookup)."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["market"] = "hdb"
+    mode = query.data.split(":")[1]
+
+    if mode == "town":
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "🗺 *Select a town:*",
+            parse_mode="Markdown",
+            reply_markup=build_hdb_town_keyboard(),
+        )
+    elif mode == "lookup":
+        await query.edit_message_text(
+            "🔍 Enter a block + street, e.g. *406 Ang Mo Kio Ave 10*\n"
+            "_(or just a street to see all its blocks)_",
+            parse_mode="Markdown",
+        )
+
+
+async def hdb_town_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle an HDB town-grid selection → that town's resale overview."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    idx = int(query.data.split(":")[1])
+    await _send_hdb_town_overview(query.message, context, idx)
+
+
+async def hdb_street_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle a disambiguation street button → that street's summary."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    street = resolve_hdb_target(context, query.data.split(":", 1)[1])
+    if not street:
+        await query.message.reply_text("⚠️ Could not identify street. Please search again.")
+        return
+    await _send_hdb_street_summary(query.message, context, street)
+
+
+async def hdb_block_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle a block button (under a street summary) → that block's detail."""
+    query = update.callback_query
+    await query.answer()
+    payload = resolve_hdb_target(context, query.data.split(":", 1)[1])
+    if not payload or "|" not in payload:
+        await query.message.reply_text("⚠️ Could not identify block. Please search again.")
+        return
+    block, street = payload.split("|", 1)
+    await _send_hdb_block_detail(query.message, context, block, street)
 
 
 async def nearby_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -741,6 +902,7 @@ async def search_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle search mode selection (name vs district)."""
     query = update.callback_query
     await query.answer()
+    context.user_data["market"] = "private"
 
     mode = query.data.split(":")[1]
 
@@ -926,8 +1088,12 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await loading.delete()
         # Re-attach the amenity menu to the result so the user can tap the
-        # next button right here instead of scrolling back up.
-        keyboard = build_amenity_keyboard(token)
+        # next button right here instead of scrolling back up. HDB blocks get
+        # the location-only keyboard; private gets the full one.
+        if token in context.user_data.get("hdb_tokens", set()):
+            keyboard = build_hdb_amenity_keyboard(token)
+        else:
+            keyboard = build_amenity_keyboard(token)
         if photo:
             await query.message.reply_photo(
                 photo=photo, caption=text, parse_mode="Markdown", reply_markup=keyboard
@@ -980,7 +1146,7 @@ async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the 🏘️ PropertyGuru button: per-bedroom search links.
+    """Handle the 🟥 PropertyGuru button: per-bedroom search links.
 
     Re-queries the project name from the token (same pattern as Liquidity). No
     network call — we only build PropertyGuru search URLs (no API; links open
@@ -1006,7 +1172,7 @@ async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TY
     rows.append([InlineKeyboardButton("🔍 Search another property", callback_data="new_search")])
 
     await query.message.reply_text(
-        f"🏘️ *{project_name.title()}* on PropertyGuru\n"
+        f"🟥 *{project_name.title()}* on PropertyGuru\n"
         "Tap a bedroom type to see live listings for sale or rent:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -1014,10 +1180,15 @@ async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    development_name = update.message.text.strip()
-    if not development_name:
+    text = update.message.text.strip()
+    if not text:
         return
-    await handle_property_search(update, context, development_name)
+    # Free text is routed by the active market toggle; private is the default
+    # so existing name/postal-code searches keep working unchanged.
+    if context.user_data.get("market") == "hdb":
+        await handle_hdb_search(update, context, text)
+    else:
+        await handle_property_search(update, context, text)
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1186,6 +1357,204 @@ async def handle_property_search(
         )
 
 
+# ── HDB search logic ──────────────────────────────────────────────────────────
+
+# A New-Search button reused across HDB result messages.
+_HDB_NEW_SEARCH = InlineKeyboardMarkup([[
+    InlineKeyboardButton("🔍 Search another property", callback_data="new_search")
+]])
+
+# Cap block buttons under a street summary so the keyboard stays tappable.
+MAX_HDB_BLOCK_BUTTONS = 12
+
+
+async def _send_hdb_town_overview(message, context: ContextTypes.DEFAULT_TYPE, idx: int):
+    """Render a town's per-flat-type resale overview (browse / t<NN> deep link)."""
+    town = hdb.town_by_index(idx)
+    if not town:
+        await message.reply_text("⚠️ Unknown town. Tap New Search to start over.",
+                                 reply_markup=_HDB_NEW_SEARCH)
+        return
+    result = hdb.town_overview(town)
+    await message.reply_text(
+        hdb.format_town_overview(result),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=_HDB_NEW_SEARCH,
+    )
+
+
+def _geocode_hdb_block(block: str, street: str):
+    """Resolve an HDB block to coordinates via OneMap. Tries the raw street
+    then its abbreviation-expanded form (e.g. ST → STREET). None on miss."""
+    seen = set()
+    for q in (f"{block} {street}", f"{block} {hdb.expand_street(street)}"):
+        if q in seen:
+            continue
+        seen.add(q)
+        loc = geocode_building(q)
+        if loc:
+            return loc
+    return None
+
+
+async def _send_hdb_block_detail(message, context: ContextTypes.DEFAULT_TYPE,
+                                 block: str, street: str, coords=None):
+    """Render a block's per-flat-type detail and, when the block has a
+    coordinate, attach the location-amenity keyboard (reusing the private
+    amenity engine). `coords` (lat, lng) skips geocoding — supplied by the
+    postal-code flow, which already has the exact OneMap coordinate."""
+    result = hdb.block_detail(block, street)
+    if "error" in result:
+        await message.reply_text(hdb.format_block_detail(result), reply_markup=_HDB_NEW_SEARCH)
+        return
+
+    await message.reply_text(
+        hdb.format_block_detail(result),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+    # Resolve a coordinate, then stash it under an addr token; the amenity
+    # buttons read it (skipping any geocode) exactly like the postal-code flow.
+    # addr_key is "<display>|<street>" so the reused amenity_callback has a
+    # sensible display name + street fallback.
+    if coords:
+        lat, lng = coords
+    else:
+        loc = _geocode_hdb_block(block, result["street"])
+        if not loc:
+            await message.reply_text(
+                "_Amenity lookup unavailable — couldn't locate this block._",
+                parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+            )
+            return
+        lat, lng = loc["lat"], loc["lng"]
+
+    display = f"Block {block} {result['street'].title()}"
+    token = store_addr_key(context, f"{display}|{result['street']}")
+    store_addr_coords(context, token, lat, lng)
+    # Mark the token HDB so the reused amenity_callback re-attaches the HDB
+    # keyboard (location amenities only), not the private one.
+    context.user_data.setdefault("hdb_tokens", set()).add(token)
+    await message.reply_text(
+        "Tap to explore nearby amenities:",
+        reply_markup=build_hdb_amenity_keyboard(token),
+    )
+
+
+async def _send_hdb_street_summary(message, context: ContextTypes.DEFAULT_TYPE, street: str):
+    """Render a street's per-flat-type aggregate plus a button per block."""
+    result = hdb.street_summary(street)
+    if "error" in result:
+        await message.reply_text(hdb.format_street_summary(result), reply_markup=_HDB_NEW_SEARCH)
+        return
+
+    await message.reply_text(
+        hdb.format_street_summary(result),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+    # One button per block (most-transacted first), each routing to block detail.
+    rows, row = [], []
+    for block, count in result["blocks"][:MAX_HDB_BLOCK_BUTTONS]:
+        token = store_hdb_target(context, f"{block}|{result['street']}")
+        row.append(InlineKeyboardButton(f"Blk {block} ({count})", callback_data=f"hdbblk:{token}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔍 Search another property", callback_data="new_search")])
+    await message.reply_text("Tap a block for its own transactions:",
+                             reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _hdb_search_by_postal(message, context: ContextTypes.DEFAULT_TYPE, postal: str):
+    """Resolve a 6-digit postal code to an HDB block via OneMap (block + road +
+    exact coord), then show that block's detail. The coord is reused for
+    amenities, so there's no second geocode."""
+    looking = await message.reply_text(
+        f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
+    )
+    resolved = resolve_postal_code(postal)
+    await looking.delete()
+
+    if not resolved or resolved.get("lat") is None:
+        await message.reply_text(
+            f"❌ Couldn't find any address for postal code *{postal}*.\n"
+            "Please double-check the 6-digit code and try again.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+        return
+
+    block, road = resolved.get("block", ""), resolved.get("road", "")
+    if not block or not road:
+        await message.reply_text(
+            f"❌ Postal code *{postal}* doesn't map to an HDB block.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+        return
+
+    # Match the OneMap block+road back to a block in the HDB resale data.
+    resolution = hdb.resolve_query(f"{block} {road}")
+    if resolution.get("kind") == "block":
+        await _send_hdb_block_detail(
+            message, context, resolution["block"], resolution["street"],
+            coords=(resolved["lat"], resolved["lng"]),
+        )
+    else:
+        await message.reply_text(
+            f"❌ No HDB resale transactions on record for *Block {block} {road.title()}* "
+            f"(postal *{postal}*).\nIt may be a private address — try the 🏢 Private market.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+
+
+async def handle_hdb_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            query_text: str, message=None):
+    """Route a free-text HDB block/street query via hdb.resolve_query."""
+    msg = message or update.message
+
+    # A bare 6-digit postal code resolves to a specific HDB block via OneMap
+    # (same detection as the private flow), then routes to block detail.
+    postal_match = re.fullmatch(r"\s*(\d{6})\s*", query_text)
+    if postal_match:
+        await _hdb_search_by_postal(msg, context, postal_match.group(1))
+        return
+
+    result = hdb.resolve_query(query_text)
+
+    if "error" in result:
+        await msg.reply_text(f"❌ {result['error']}", reply_markup=_HDB_NEW_SEARCH)
+        return
+
+    if result.get("ambiguous"):
+        block = result.get("block")
+        rows = []
+        for street in result["candidates"]:
+            if block:
+                token = store_hdb_target(context, f"{block}|{street}")
+                label, cb = f"Blk {block} · {street.title()}", f"hdbblk:{token}"
+            else:
+                token = store_hdb_target(context, street)
+                label, cb = street.title(), f"hdbst:{token}"
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="fuzzy_cancel")])
+        await msg.reply_text(
+            "🔍 *Multiple matches found* — which one did you mean?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if result["kind"] == "block":
+        await _send_hdb_block_detail(msg, context, result["block"], result["street"])
+    else:  # street
+        await _send_hdb_street_summary(msg, context, result["street"])
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1227,8 +1596,13 @@ def main():
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(search_conv)
     app.add_handler(mortgage_conv)
+    app.add_handler(CallbackQueryHandler(market_callback, pattern="^market:"))
     app.add_handler(CallbackQueryHandler(search_mode_callback, pattern="^search_mode:"))
     app.add_handler(CallbackQueryHandler(district_callback, pattern="^district:"))
+    app.add_handler(CallbackQueryHandler(hdb_mode_callback, pattern="^hdbmode:"))
+    app.add_handler(CallbackQueryHandler(hdb_town_callback, pattern="^hdbtown:"))
+    app.add_handler(CallbackQueryHandler(hdb_street_callback, pattern="^hdbst:"))
+    app.add_handler(CallbackQueryHandler(hdb_block_callback, pattern="^hdbblk:"))
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search"))
