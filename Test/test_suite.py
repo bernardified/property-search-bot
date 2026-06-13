@@ -1356,6 +1356,39 @@ class TestLiquidityButton(unittest.TestCase):
         callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
         self.assertIn("liquidity:abc12345", callbacks)
         self.assertIn("mortgage:abc12345", callbacks)
+        self.assertIn("pg:abc12345", callbacks)
+
+
+class TestPropertyGuruLinks(unittest.TestCase):
+
+    def test_returns_five_buckets(self):
+        from propertyguru import listing_links
+        rows = listing_links("MARINA BAY RESIDENCES")
+        self.assertEqual([label for label, _, _ in rows],
+                         ["Studio", "1 BR", "2 BR", "3 BR", "4+ BR"])
+
+    def test_project_name_encoded(self):
+        from propertyguru import listing_links
+        _, sale, rent = listing_links("MARINA BAY RESIDENCES")[1]
+        self.assertIn("freetext=MARINA+BAY+RESIDENCES", sale)
+        self.assertIn("freetext=MARINA+BAY+RESIDENCES", rent)
+        self.assertIn("property-for-sale", sale)
+        self.assertIn("property-for-rent", rent)
+
+    def test_bed_params_per_bucket(self):
+        from propertyguru import listing_links
+        rows = dict((label, sale) for label, sale, _ in listing_links("X"))
+        self.assertIn("beds[]=0", rows["Studio"])
+        self.assertIn("beds[]=2", rows["2 BR"])
+        # 4+ bucket fans out to cover larger units.
+        four_plus = rows["4+ BR"]
+        for b in (4, 5, 6):
+            self.assertIn(f"beds[]={b}", four_plus)
+
+    def test_special_chars_encoded(self):
+        from propertyguru import listing_links
+        _, sale, _ = listing_links("SKYSUITES@ANSON")[0]
+        self.assertIn("freetext=SKYSUITES%40ANSON", sale)
 
 
 class TestUnitCountsHarvest(unittest.TestCase):
@@ -1441,6 +1474,7 @@ def run_tests():
         TestSearchTotalUnits,
         TestLiquidityFormatting,
         TestLiquidityButton,
+        TestPropertyGuruLinks,
         TestUnitCountsHarvest,
     ]
 
