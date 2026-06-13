@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RADIUS_M = 1000
 DEFAULT_LIMIT = 10
-# Cap how many candidate projects we geocode on a cold cache, to bound OneMap
-# calls (and latency) on the first search in a district. The most-transacted
-# developments are kept first, so the cap drops only obscure projects.
-MAX_CANDIDATES_TO_GEOCODE = 80
 COORDS_COLLECTION = "project_coords"
 LANDED_TYPES = ("detached", "terrace", "bungalow")  # matches district_search
 
@@ -169,18 +165,19 @@ def nearby_for_project(name: str, radius_m: int = DEFAULT_RADIUS_M,
 
     candidates = candidate_projects(transactions, district)
     results = []
-    geocoded = 0
     for cand in candidates:
         key = cand["project"].strip().upper()
         if key == origin_key:
             continue  # exclude the origin itself
 
+        # Cache-first: most coords are pre-warmed (scripts/build_project_coords.py)
+        # or filled by earlier searches, so we rarely geocode live here. We never
+        # cap by transaction volume — proximity is uncorrelated with volume, and a
+        # close but low-volume neighbour must not be dropped (cf. Kensington Park
+        # Condominium 209 m from The Garden Residences in dense District 19).
         coords = _get_cached_coords(db, key)
         if coords is None:
-            if geocoded >= MAX_CANDIDATES_TO_GEOCODE:
-                continue  # cold-cache cap reached; skip the long tail
             coords = _geocode(cand["project"], cand["street"], token)
-            geocoded += 1
             if coords is not None:
                 _cache_coords(db, key, cand["project"], cand["street"], *coords)
         if coords is None:
