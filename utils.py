@@ -52,6 +52,37 @@ FLAT_TYPES = [
     "MULTI-GENERATION",
 ]
 
+# HDB street-name abbreviations → full words. Shared so both the resale search
+# layer (hdb.py) and the postal-routing block check (cache_hdb.py) canonicalise
+# streets the same way — OneMap spells out "AVENUE" while HDB data uses "AVE".
+STREET_ABBREV = {
+    "AVE": "AVENUE", "AVENUE": "AVENUE",
+    "ST": "STREET", "STREET": "STREET",
+    "RD": "ROAD", "ROAD": "ROAD",
+    "DR": "DRIVE", "DRIVE": "DRIVE",
+    "CRES": "CRESCENT", "CRESCENT": "CRESCENT",
+    "CL": "CLOSE", "CLOSE": "CLOSE",
+    "CTRL": "CENTRAL", "CENTRAL": "CENTRAL",
+    "BT": "BUKIT", "BUKIT": "BUKIT",
+    "JLN": "JALAN", "JALAN": "JALAN",
+    "LOR": "LORONG", "LORONG": "LORONG",
+    "NTH": "NORTH", "NORTH": "NORTH",
+    "STH": "SOUTH", "SOUTH": "SOUTH",
+    "UPP": "UPPER", "UPPER": "UPPER",
+    "GDNS": "GARDENS", "GARDENS": "GARDENS",
+    "TER": "TERRACE", "TERRACE": "TERRACE",
+    "PL": "PLACE", "PLACE": "PLACE",
+}
+
+
+def canon_street_tokens(text) -> list:
+    """Uppercase a street/road string, strip punctuation, and expand HDB
+    abbreviations to full words. Returns the significant tokens so two spellings
+    of the same road compare equal (e.g. "ANG MO KIO AVE 6" ↔ "...AVENUE 6")."""
+    import re as _re
+    toks = _re.sub(r"[^A-Z0-9 ]", " ", str(text).upper()).split()
+    return [STREET_ABBREV.get(t, t) for t in toks]
+
 
 def parse_remaining_lease(text) -> float | None:
     """Parse an HDB remaining-lease string to a number of years (float).

@@ -19,7 +19,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from utils import get_mongo_db, is_hdb_resale_stale, SGT
+from utils import get_mongo_db, is_hdb_resale_stale, SGT, canon_street_tokens
 
 load_dotenv()
 
@@ -36,6 +36,14 @@ DATASTORE_SEARCH_URL = "https://data.gov.sg/api/action/datastore_search"
 HDB_ROLLING_MONTHS = 36   # rolling window cached (3 years ≈ 75k rows)
 PAGE_SIZE = 10000         # data.gov.sg honours large page sizes; ~2.5k rows/month
 CHUNK_SIZE = 500          # Mongo doc chunking, well under the 16MB BSON limit
+
+# "HDB Property Information" — the authoritative list of every HDB block (blk_no
+# + street + residential flag), including newer BTOs that have not yet reached
+# MOP and so carry no resale transactions. Used to tell an HDB address apart
+# from a private one when routing a postal code: OneMap alone can't, because BTO
+# blocks return a building name (the project) exactly like a condo does.
+HDB_PROPERTY_INFO_RESOURCE = "d_17f5382f26140b1fdae0ba2ef6239d2f"
+_hdb_block_cache: dict = {}   # (blk_no, road) → bool, memoised per process
 
 
 # ── data.gov.sg helpers ─────────────────────────────────────────────────────
@@ -202,6 +210,51 @@ def _save_cache(records: list, resource_id: str, months: list[str]):
 
 
 # ── Public interface ────────────────────────────────────────────────────────
+
+def is_hdb_residential_block(blk_no: str, road: str) -> bool:
+    """Return True if (blk_no, road) is a residential HDB block.
+
+    Authoritative check against the HDB Property Information dataset, which lists
+    every HDB block — including newer BTOs that have no resale history yet. This
+    is the discriminator the postal-code router uses to route HDB vs private,
+    since OneMap returns a building name for BTO blocks just like for condos.
+
+    The dataset filters exactly on `blk_no` but stores streets abbreviated
+    ("ANG MO KIO AVE 6") while OneMap spells them out ("...AVENUE 6"), so we
+    filter on block number only and compare streets via canonicalised tokens.
+    Results are memoised per process; any network failure returns False (the
+    caller then falls back to private routing)."""
+    blk = str(blk_no).strip().upper()
+    road_toks = canon_street_tokens(road)
+    if not blk or not road_toks:
+        return False
+    key = (blk, " ".join(road_toks))
+    if key in _hdb_block_cache:
+        return _hdb_block_cache[key]
+
+    try:
+        r = requests.get(
+            DATASTORE_SEARCH_URL,
+            params={
+                "resource_id": HDB_PROPERTY_INFO_RESOURCE,
+                "filters": json.dumps({"blk_no": blk}),
+                "limit": 100,
+            },
+            timeout=15,
+        )
+        records = r.json().get("result", {}).get("records", [])
+        is_hdb = any(
+            str(rec.get("residential", "")).strip().upper() == "Y"
+            and canon_street_tokens(rec.get("street", "")) == road_toks
+            for rec in records
+        )
+    except Exception as e:
+        logger.warning(f"[HDB Cache] Block check failed for {key}: {e}")
+        is_hdb = False
+
+    _hdb_block_cache[key] = is_hdb
+    return is_hdb
+
 
 def get_hdb_resale_data() -> list:
     """
