@@ -1448,6 +1448,106 @@ class TestUnitCountsHarvest(unittest.TestCase):
             os.unlink(path)
 
 
+# ══════════════════════════════════════════════════════
+# HDB RESALE (search/format layer + cache freshness)
+# ══════════════════════════════════════════════════════
+
+class TestHDB(unittest.TestCase):
+    """Pure-function coverage for hdb.py — records injected, never hits network."""
+
+    def _recs(self):
+        # Synthetic data.gov.sg resale rows. Two streets, one shared town.
+        return [
+            {"month": "2026-05", "town": "BISHAN", "flat_type": "4 ROOM", "block": "200",
+             "street_name": "BISHAN ST 22", "storey_range": "10 TO 12", "floor_area_sqm": "90",
+             "flat_model": "Improved", "lease_commence_date": "1990",
+             "remaining_lease": "63 years 06 months", "resale_price": "800000"},
+            {"month": "2026-04", "town": "BISHAN", "flat_type": "4 ROOM", "block": "200",
+             "street_name": "BISHAN ST 22", "storey_range": "04 TO 06", "floor_area_sqm": "90",
+             "flat_model": "Improved", "lease_commence_date": "1990",
+             "remaining_lease": "63 years", "resale_price": "760000"},
+            {"month": "2026-03", "town": "BISHAN", "flat_type": "5 ROOM", "block": "201",
+             "street_name": "BISHAN ST 22", "storey_range": "01 TO 03", "floor_area_sqm": "120",
+             "flat_model": "Improved", "lease_commence_date": "1990",
+             "remaining_lease": "63 years", "resale_price": "1000000"},
+            {"month": "2026-05", "town": "ANG MO KIO", "flat_type": "3 ROOM", "block": "406",
+             "street_name": "ANG MO KIO AVE 10", "storey_range": "07 TO 09", "floor_area_sqm": "67",
+             "flat_model": "New Generation", "lease_commence_date": "1978",
+             "remaining_lease": "51 years", "resale_price": "420000"},
+        ]
+
+    NOW = datetime(2026, 6, 15)
+
+    def test_towns_sorted_and_indexed(self):
+        import hdb
+        recs = self._recs()
+        self.assertEqual(hdb.hdb_towns(recs), ["ANG MO KIO", "BISHAN"])
+        self.assertEqual(hdb.town_index("BISHAN", recs), 2)
+        self.assertEqual(hdb.town_by_index(1, recs), "ANG MO KIO")
+        self.assertIsNone(hdb.town_index("NOWHERE", recs))
+
+    def test_norm_computes_psf_and_lease(self):
+        import hdb
+        n = hdb._norm(self._recs()[0])
+        self.assertEqual(n["flat_type"], "4 ROOM")
+        self.assertAlmostEqual(n["lease_years"], 63.5, places=2)
+        self.assertGreater(n["psf"], 0)
+
+    def test_norm_rejects_bad_rows(self):
+        import hdb
+        self.assertIsNone(hdb._norm({"resale_price": "0", "floor_area_sqm": "90"}))
+        self.assertIsNone(hdb._norm({"resale_price": "500000", "floor_area_sqm": "0"}))
+
+    def test_resolve_query_block_street_ambiguous(self):
+        import hdb
+        recs = self._recs()
+        self.assertEqual(
+            hdb.resolve_query("406 ang mo kio ave 10", recs),
+            {"kind": "block", "block": "406", "street": "ANG MO KIO AVE 10"},
+        )
+        # "avenue" must expand to match data's "AVE"
+        self.assertEqual(hdb.resolve_query("ang mo kio avenue 10", recs)["kind"], "street")
+        # Two streets share the BISHAN token? No — only one street here, so a town
+        # word that is also a unique street token resolves to that street.
+        amb = hdb.resolve_query("bishan st 22", recs)
+        self.assertEqual(amb["kind"], "street")
+        self.assertEqual(hdb.resolve_query("zzz", recs).get("error", "").startswith("No HDB"), True)
+
+    def test_street_summary_aggregates_and_lists_blocks(self):
+        import hdb
+        res = hdb.street_summary("BISHAN ST 22", self._recs(), now=self.NOW)
+        self.assertEqual(res["town"], "BISHAN")
+        # 4 ROOM median of 800k & 760k = 780k
+        self.assertEqual(res["flat_types"]["4 ROOM"]["median_price"], 780000)
+        self.assertEqual(res["flat_types"]["4 ROOM"]["count"], 2)
+        blocks = dict(res["blocks"])
+        self.assertEqual(blocks["200"], 2)
+        self.assertIn("201", blocks)
+
+    def test_block_detail_uses_full_window(self):
+        import hdb
+        res = hdb.block_detail("200", "BISHAN ST 22", self._recs())
+        self.assertEqual(res["total_txns"], 2)
+        latest = res["flat_types"]["4 ROOM"]["latest"]
+        self.assertEqual(latest["month"], "2026-05")  # newest of the two
+
+    def test_format_helpers_render_without_error(self):
+        import hdb
+        recs = self._recs()
+        self.assertIn("Bishan", hdb.format_town_overview(hdb.town_overview("BISHAN", recs, now=self.NOW)))
+        self.assertIn("Bishan St 22", hdb.format_street_summary(hdb.street_summary("BISHAN ST 22", recs, now=self.NOW)))
+        self.assertIn("Block 200", hdb.format_block_detail(hdb.block_detail("200", "BISHAN ST 22", recs)))
+        self.assertTrue(hdb.format_town_overview({"error": "x"}).startswith("❌"))
+
+    def test_hdb_freshness_calendar_month(self):
+        from utils import is_hdb_resale_stale, SGT
+        now = datetime.now(SGT)
+        same_month = now.replace(day=1, hour=10).timestamp()
+        prev_month = now.replace(day=1).timestamp() - 86400
+        self.assertFalse(is_hdb_resale_stale(same_month))
+        self.assertTrue(is_hdb_resale_stale(prev_month))
+
+
 def run_tests():
     section("Property Bot Test Suite")
     print(f"Python {sys.version.split()[0]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -1476,6 +1576,7 @@ def run_tests():
         TestLiquidityButton,
         TestPropertyGuruLinks,
         TestUnitCountsHarvest,
+        TestHDB,
     ]
 
     for cls in test_classes:
