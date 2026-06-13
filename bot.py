@@ -1322,9 +1322,11 @@ def _geocode_hdb_block(block: str, street: str):
 
 
 async def _send_hdb_block_detail(message, context: ContextTypes.DEFAULT_TYPE,
-                                 block: str, street: str):
-    """Render a block's per-flat-type detail and, when the block geocodes,
-    attach the location-amenity keyboard (reusing the private amenity engine)."""
+                                 block: str, street: str, coords=None):
+    """Render a block's per-flat-type detail and, when the block has a
+    coordinate, attach the location-amenity keyboard (reusing the private
+    amenity engine). `coords` (lat, lng) skips geocoding — supplied by the
+    postal-code flow, which already has the exact OneMap coordinate."""
     result = hdb.block_detail(block, street)
     if "error" in result:
         await message.reply_text(hdb.format_block_detail(result), reply_markup=_HDB_NEW_SEARCH)
@@ -1336,21 +1338,25 @@ async def _send_hdb_block_detail(message, context: ContextTypes.DEFAULT_TYPE,
         disable_web_page_preview=True,
     )
 
-    # Geocode once and stash the exact coordinate under an addr token; the
-    # amenity buttons then read it (skipping any geocode) exactly like the
-    # postal-code flow. addr_key is "<display>|<street>" so the reused
-    # amenity_callback has a sensible display name + street fallback.
-    loc = _geocode_hdb_block(block, result["street"])
-    if not loc:
-        await message.reply_text(
-            "_Amenity lookup unavailable — couldn't locate this block._",
-            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
-        )
-        return
+    # Resolve a coordinate, then stash it under an addr token; the amenity
+    # buttons read it (skipping any geocode) exactly like the postal-code flow.
+    # addr_key is "<display>|<street>" so the reused amenity_callback has a
+    # sensible display name + street fallback.
+    if coords:
+        lat, lng = coords
+    else:
+        loc = _geocode_hdb_block(block, result["street"])
+        if not loc:
+            await message.reply_text(
+                "_Amenity lookup unavailable — couldn't locate this block._",
+                parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+            )
+            return
+        lat, lng = loc["lat"], loc["lng"]
 
     display = f"Block {block} {result['street'].title()}"
     token = store_addr_key(context, f"{display}|{result['street']}")
-    store_addr_coords(context, token, loc["lat"], loc["lng"])
+    store_addr_coords(context, token, lat, lng)
     # Mark the token HDB so the reused amenity_callback re-attaches the HDB
     # keyboard (location amenities only), not the private one.
     context.user_data.setdefault("hdb_tokens", set()).add(token)
@@ -1388,10 +1394,59 @@ async def _send_hdb_street_summary(message, context: ContextTypes.DEFAULT_TYPE, 
                              reply_markup=InlineKeyboardMarkup(rows))
 
 
+async def _hdb_search_by_postal(message, context: ContextTypes.DEFAULT_TYPE, postal: str):
+    """Resolve a 6-digit postal code to an HDB block via OneMap (block + road +
+    exact coord), then show that block's detail. The coord is reused for
+    amenities, so there's no second geocode."""
+    looking = await message.reply_text(
+        f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
+    )
+    resolved = resolve_postal_code(postal)
+    await looking.delete()
+
+    if not resolved or resolved.get("lat") is None:
+        await message.reply_text(
+            f"❌ Couldn't find any address for postal code *{postal}*.\n"
+            "Please double-check the 6-digit code and try again.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+        return
+
+    block, road = resolved.get("block", ""), resolved.get("road", "")
+    if not block or not road:
+        await message.reply_text(
+            f"❌ Postal code *{postal}* doesn't map to an HDB block.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+        return
+
+    # Match the OneMap block+road back to a block in the HDB resale data.
+    resolution = hdb.resolve_query(f"{block} {road}")
+    if resolution.get("kind") == "block":
+        await _send_hdb_block_detail(
+            message, context, resolution["block"], resolution["street"],
+            coords=(resolved["lat"], resolved["lng"]),
+        )
+    else:
+        await message.reply_text(
+            f"❌ No HDB resale transactions on record for *Block {block} {road.title()}* "
+            f"(postal *{postal}*).\nIt may be a private address — try the 🏢 Private market.",
+            parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+        )
+
+
 async def handle_hdb_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             query_text: str, message=None):
     """Route a free-text HDB block/street query via hdb.resolve_query."""
     msg = message or update.message
+
+    # A bare 6-digit postal code resolves to a specific HDB block via OneMap
+    # (same detection as the private flow), then routes to block detail.
+    postal_match = re.fullmatch(r"\s*(\d{6})\s*", query_text)
+    if postal_match:
+        await _hdb_search_by_postal(msg, context, postal_match.group(1))
+        return
+
     result = hdb.resolve_query(query_text)
 
     if "error" in result:

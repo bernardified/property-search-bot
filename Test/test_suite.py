@@ -457,6 +457,18 @@ class TestPostalCodeLookup(unittest.TestCase):
         self.assertEqual(res["building"], "")
         self.assertEqual(res["road"], "MARINA BOULEVARD")
 
+    def test_exposes_block_for_hdb(self):
+        # HDB postal codes carry BLK_NO + ROAD_NAME (BUILDING is NIL); the HDB
+        # postal flow needs block + road to resolve to a resale block.
+        from maps import resolve_postal_code
+        hdb_blk = self._result(BUILDING="NIL", BLK_NO="406",
+                               ROAD_NAME="ANG MO KIO AVENUE 10", POSTAL="560406")
+        with patch("maps.get_onemap_token", return_value="tok"), \
+             patch("maps.search_onemap", return_value=[hdb_blk]):
+            res = resolve_postal_code("560406")
+        self.assertEqual(res["block"], "406")
+        self.assertEqual(res["road"], "ANG MO KIO AVENUE 10")
+
     def test_no_results_returns_none(self):
         from maps import resolve_postal_code
         with patch("maps.get_onemap_token", return_value="tok"), \
@@ -1593,6 +1605,7 @@ def run_tests():
         TestURADataParsing,
         TestRentalLogic,
         TestMapsHelpers,
+        TestPostalCodeLookup,
         TestCacheFreshness,
         TestStorage,
         TestURACacheIntegration,

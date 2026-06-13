@@ -101,6 +101,7 @@ def resolve_postal_code(postal: str) -> dict | None:
 
     return {
         "building": building,
+        "block": str(match.get("BLK_NO", "")).strip(),
         "road": str(match.get("ROAD_NAME", "")).strip(),
         "address": str(match.get("ADDRESS", "")).strip(),
         "postal": postal,
