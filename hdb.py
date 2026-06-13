@@ -249,11 +249,11 @@ def resolve_query(query: str, records: list | None = None) -> dict:
             return {"kind": "block", "block": block, "street": with_block[0]}
         if not with_block:
             return {"error": f'No block {block} found on a matching street for "{query}".'}
-        return {"ambiguous": True, "candidates": with_block}
+        return {"ambiguous": True, "block": block, "candidates": with_block}
 
     if len(matches) == 1:
         return {"kind": "street", "street": matches[0]}
-    return {"ambiguous": True, "candidates": sorted(matches)[:8]}
+    return {"ambiguous": True, "block": None, "candidates": sorted(matches)[:8]}
 
 
 # ── Street summary ──────────────────────────────────────────────────────────

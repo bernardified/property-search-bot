@@ -1547,6 +1547,21 @@ class TestHDB(unittest.TestCase):
         self.assertFalse(is_hdb_resale_stale(same_month))
         self.assertTrue(is_hdb_resale_stale(prev_month))
 
+    def test_market_keyboard_routes(self):
+        from bot import build_market_keyboard, build_hdb_mode_keyboard
+        market = [b.callback_data for row in build_market_keyboard().inline_keyboard for b in row]
+        self.assertEqual(market, ["market:private", "market:hdb"])
+        hdb_modes = [b.callback_data for row in build_hdb_mode_keyboard().inline_keyboard for b in row]
+        self.assertEqual(hdb_modes, ["hdbmode:town", "hdbmode:lookup"])
+
+    def test_hdb_target_token_roundtrip(self):
+        from bot import store_hdb_target, resolve_hdb_target
+        ctx = MagicMock()
+        ctx.user_data = {}
+        token = store_hdb_target(ctx, "200|BISHAN ST 22")
+        self.assertEqual(resolve_hdb_target(ctx, token), "200|BISHAN ST 22")
+        self.assertIsNone(resolve_hdb_target(ctx, "deadbeef"))
+
 
 def run_tests():
     section("Property Bot Test Suite")
