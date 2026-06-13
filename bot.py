@@ -290,22 +290,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     await update.message.reply_text(
-        "🏠 *Singapore Private Property Search*\n\n"
-        "Get instant data on private residential developments:\n"
-        "• Latest transacted prices by unit size\n"
-        "• Distance to nearest MRT\n"
-        "• Primary schools within 2km\n"
-        "• Distance to nearest shopping mall\n"
-        "• Nearest supermarkets\n"
-        "• Rental prices & gross yield\n"
-        "• Mortgage & affordability (TDSR) check\n\n"
+        "🏠 *Singapore Property Search — Private & HDB*\n\n"
+        "Instant data on both private condos and HDB resale flats.\n\n"
+        "🏢 *Private* — transacted prices by unit size, rental & gross yield, "
+        "mortgage & affordability (TDSR), liquidity, nearby developments and "
+        "PropertyGuru listings.\n"
+        "🏠 *HDB* — resale prices by flat type, remaining lease & PSF, "
+        "town and block/street lookup.\n\n"
+        "Both markets also show: nearest MRT, primary schools within 2km, "
+        "shopping malls and supermarkets.\n\n"
         "*Ways to search:*\n"
-        "🔍 *By Name* — Search a specific development\n"
-        "📍 *By District* — Browse top developments by area\n"
-        "📮 *By Postal Code* — Just send a 6-digit postal code\n\n"
+        "🔍 *By Name / Block* — a specific development or HDB block\n"
+        "📍 *By District / Town* — browse the top transacted in an area\n"
+        "📮 *By Postal Code* — just send a 6-digit code; it auto-detects "
+        "condo vs HDB for you\n\n"
         "Pick a market below to get started.\n\n"
         "Commands:\n"
-        "/search — find a property\n"
+        "/search — find a property (private or HDB)\n"
         "/mortgage — affordability & monthly repayment\n"
         "/list — most searched developments\n"
         "/refresh — update property data\n"
@@ -398,7 +399,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def received_property_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if context.user_data.get("market") == "hdb":
+    # A bare 6-digit postal code auto-detects private vs HDB regardless of the
+    # toggle; other free text follows the chosen market.
+    postal_match = re.fullmatch(r"\s*(\d{6})\s*", text)
+    if postal_match:
+        await route_postal(update, context, postal_match.group(1), update.message)
+    elif context.user_data.get("market") == "hdb":
         await handle_hdb_search(update, context, text)
     else:
         await handle_property_search(update, context, text)
@@ -1179,12 +1185,53 @@ async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def route_postal(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                       postal: str, msg) -> None:
+    """Resolve a 6-digit postal code ONCE and auto-route to the right market,
+    ignoring the toggle. A postal code is a single address: OneMap returns a
+    BUILDING name for private developments and an empty building (block+road
+    only) for HDB blocks — so the building name is the discriminator. This lets
+    a postal code find both condo and HDB without the user picking a market."""
+    looking = await msg.reply_text(
+        f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
+    )
+    resolved = resolve_postal_code(postal)
+    await looking.delete()
+    if not resolved:
+        await msg.reply_text(
+            f"❌ Couldn't find any address for postal code *{postal}*.\n"
+            "Please double-check the 6-digit code and try again.",
+            parse_mode="Markdown",
+        )
+        return
+    if resolved.get("building"):
+        # Private development — feed the resolved building name + coord into the
+        # normal private search (skips a second OneMap lookup).
+        coords = None
+        if resolved.get("lat") is not None and resolved.get("lng") is not None:
+            coords = (resolved["lat"], resolved["lng"])
+        await handle_property_search(
+            update, context, resolved["building"].title(),
+            message=msg, postal_coords=coords,
+        )
+    else:
+        # No building name → HDB block (or landed/commercial, which the HDB flow
+        # reports as "no resale on record").
+        await _hdb_search_by_postal(msg, context, postal, resolved=resolved)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text:
         return
-    # Free text is routed by the active market toggle; private is the default
-    # so existing name/postal-code searches keep working unchanged.
+    # A bare 6-digit postal code is market-agnostic: auto-detect private vs HDB
+    # regardless of the toggle, so a postal code finds both condo and HDB.
+    postal_match = re.fullmatch(r"\s*(\d{6})\s*", text)
+    if postal_match:
+        await route_postal(update, context, postal_match.group(1), update.message)
+        return
+    # Other free text is routed by the active market toggle; private is the
+    # default so existing name searches keep working unchanged.
     if context.user_data.get("market") == "hdb":
         await handle_hdb_search(update, context, text)
     else:
@@ -1207,15 +1254,17 @@ async def handle_property_search(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     development_name: str,
-    message=None
+    message=None,
+    postal_coords=None,
 ):
     msg = message or update.message
 
     # Postal-code search: a bare 6-digit code is resolved to its development
     # name via OneMap, then searched like any other name. Only free-text entry
     # can produce a postal code — deep links / list buttons always pass names.
-    postal_coords = None   # exact OneMap origin, reused by the amenity buttons
-    postal_match = re.fullmatch(r"\s*(\d{6})\s*", development_name)
+    # When `postal_coords` is supplied the caller (route_postal) already resolved
+    # the code and passes the building name + origin coord, so skip the lookup.
+    postal_match = None if postal_coords else re.fullmatch(r"\s*(\d{6})\s*", development_name)
     if postal_match:
         postal = postal_match.group(1)
         looking = await msg.reply_text(
@@ -1471,15 +1520,18 @@ async def _send_hdb_street_summary(message, context: ContextTypes.DEFAULT_TYPE, 
                              reply_markup=InlineKeyboardMarkup(rows))
 
 
-async def _hdb_search_by_postal(message, context: ContextTypes.DEFAULT_TYPE, postal: str):
+async def _hdb_search_by_postal(message, context: ContextTypes.DEFAULT_TYPE, postal: str,
+                                resolved: dict | None = None):
     """Resolve a 6-digit postal code to an HDB block via OneMap (block + road +
     exact coord), then show that block's detail. The coord is reused for
-    amenities, so there's no second geocode."""
-    looking = await message.reply_text(
-        f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
-    )
-    resolved = resolve_postal_code(postal)
-    await looking.delete()
+    amenities, so there's no second geocode. `resolved` may be passed in by
+    route_postal to skip the lookup (it already resolved the code)."""
+    if resolved is None:
+        looking = await message.reply_text(
+            f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
+        )
+        resolved = resolve_postal_code(postal)
+        await looking.delete()
 
     if not resolved or resolved.get("lat") is None:
         await message.reply_text(
