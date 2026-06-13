@@ -18,6 +18,7 @@ from maps import get_nearby_info, resolve_postal_code, geocode_building
 from storage import record_search, get_recent_searches
 from cache.cache_ura import force_refresh, cache_status
 from cache.cache_rental import force_refresh_rental, rental_cache_status
+from cache.cache_hdb import is_hdb_residential_block
 from rental import get_rental_by_band, format_rental
 from mortgage import (
     mortgage_summary,
@@ -1188,10 +1189,14 @@ async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def route_postal(update: Update, context: ContextTypes.DEFAULT_TYPE,
                        postal: str, msg) -> None:
     """Resolve a 6-digit postal code ONCE and auto-route to the right market,
-    ignoring the toggle. A postal code is a single address: OneMap returns a
-    BUILDING name for private developments and an empty building (block+road
-    only) for HDB blocks — so the building name is the discriminator. This lets
-    a postal code find both condo and HDB without the user picking a market."""
+    ignoring the toggle, so a postal code finds both condo and HDB.
+
+    The discriminator is the authoritative HDB Property Information dataset, NOT
+    the OneMap building name: a newer BTO block (e.g. Woodleigh Glen) returns a
+    project name just like a condo does, so "building present → private" would
+    misroute it to a nearby condo. Instead we check whether OneMap's block+road
+    is a residential HDB block — which covers un-MOP'd BTOs that have no resale
+    transactions yet, and lets the HDB flow report exactly that."""
     looking = await msg.reply_text(
         f"🔍 Looking up postal code *{postal}*...", parse_mode="Markdown"
     )
@@ -1204,7 +1209,13 @@ async def route_postal(update: Update, context: ContextTypes.DEFAULT_TYPE,
             parse_mode="Markdown",
         )
         return
-    if resolved.get("building"):
+
+    block, road = resolved.get("block"), resolved.get("road")
+    if block and road and is_hdb_residential_block(block, road):
+        # Authoritative HDB block — includes BTOs with no resale history yet,
+        # which the HDB flow surfaces as "no resale transactions on record".
+        await _hdb_search_by_postal(msg, context, postal, resolved=resolved)
+    elif resolved.get("building"):
         # Private development — feed the resolved building name + coord into the
         # normal private search (skips a second OneMap lookup).
         coords = None
@@ -1215,9 +1226,14 @@ async def route_postal(update: Update, context: ContextTypes.DEFAULT_TYPE,
             message=msg, postal_coords=coords,
         )
     else:
-        # No building name → HDB block (or landed/commercial, which the HDB flow
-        # reports as "no resale on record").
-        await _hdb_search_by_postal(msg, context, postal, resolved=resolved)
+        # Not an HDB block and no building name → landed home or commercial.
+        where = f" ({road.title()})" if road else ""
+        await msg.reply_text(
+            f"❌ Postal code *{postal}*{where} doesn't map to a private "
+            "development or an HDB block — it may be a landed home or a "
+            "commercial address.\nTry searching by name instead.",
+            parse_mode="Markdown",
+        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1557,9 +1573,15 @@ async def _hdb_search_by_postal(message, context: ContextTypes.DEFAULT_TYPE, pos
             coords=(resolved["lat"], resolved["lng"]),
         )
     else:
+        # No resale data for a real HDB block almost always means a newer
+        # development that hasn't reached its 5-year MOP yet (e.g. a recent BTO).
+        building = resolved.get("building", "").title()
+        name = f"{building} (Block {block} {road.title()})" if building else f"Block {block} {road.title()}"
         await message.reply_text(
-            f"❌ No HDB resale transactions on record for *Block {block} {road.title()}* "
-            f"(postal *{postal}*).\nIt may be a private address — try the 🏢 Private market.",
+            f"🏠 *{name}* is an HDB block, but there are no resale transactions "
+            f"on record for it (postal *{postal}*).\n\n"
+            "This usually means it's a newer development that hasn't reached its "
+            "5-year MOP yet, so no flats can be sold on the resale market.",
             parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
         )
 
@@ -1569,11 +1591,12 @@ async def handle_hdb_search(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Route a free-text HDB block/street query via hdb.resolve_query."""
     msg = message or update.message
 
-    # A bare 6-digit postal code resolves to a specific HDB block via OneMap
-    # (same detection as the private flow), then routes to block detail.
+    # Postal codes are normally intercepted upstream (route_postal); this guard
+    # only fires if handle_hdb_search is ever called with one directly. Route it
+    # through the unified market-agnostic path so it isn't forced into HDB.
     postal_match = re.fullmatch(r"\s*(\d{6})\s*", query_text)
     if postal_match:
-        await _hdb_search_by_postal(msg, context, postal_match.group(1))
+        await route_postal(update, context, postal_match.group(1), msg)
         return
 
     result = hdb.resolve_query(query_text)

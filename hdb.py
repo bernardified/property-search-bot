@@ -28,7 +28,7 @@ from statistics import median
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from cache.cache_hdb import get_hdb_resale_data
-from utils import FLAT_TYPES, sqm_to_sqft, parse_float, parse_remaining_lease
+from utils import FLAT_TYPES, STREET_ABBREV, sqm_to_sqft, parse_float, parse_remaining_lease
 
 logger = logging.getLogger(__name__)
 
@@ -37,26 +37,9 @@ logger = logging.getLogger(__name__)
 # a 36-month rolling window, so this is the effective ceiling.
 DEFAULT_WINDOW_MONTHS = 12
 
-# Street-name abbreviations are expanded on BOTH the query and the data so a
-# user typing "avenue" matches data that stores "AVE" (and vice-versa).
-_STREET_ABBREV = {
-    "AVE": "AVENUE", "AVENUE": "AVENUE",
-    "ST": "STREET", "STREET": "STREET",
-    "RD": "ROAD", "ROAD": "ROAD",
-    "DR": "DRIVE", "DRIVE": "DRIVE",
-    "CRES": "CRESCENT", "CRESCENT": "CRESCENT",
-    "CL": "CLOSE", "CLOSE": "CLOSE",
-    "CTRL": "CENTRAL", "CENTRAL": "CENTRAL",
-    "BT": "BUKIT", "BUKIT": "BUKIT",
-    "JLN": "JALAN", "JALAN": "JALAN",
-    "LOR": "LORONG", "LORONG": "LORONG",
-    "NTH": "NORTH", "NORTH": "NORTH",
-    "STH": "SOUTH", "SOUTH": "SOUTH",
-    "UPP": "UPPER", "UPPER": "UPPER",
-    "GDNS": "GARDENS", "GARDENS": "GARDENS",
-    "TER": "TERRACE", "TERRACE": "TERRACE",
-    "PL": "PLACE", "PLACE": "PLACE",
-}
+# Street-name abbreviations (shared via utils.STREET_ABBREV) are expanded on
+# BOTH the query and the data so a user typing "avenue" matches data that stores
+# "AVE" (and vice-versa).
 
 # A leading HDB block token, e.g. "406", "216A", "1B".
 _BLOCK_RE = re.compile(r"^\d+[A-Z]?$")
@@ -124,7 +107,7 @@ def _recent(rows: list, months: int, now: datetime | None = None) -> list:
 def _canon_tokens(text: str) -> list[str]:
     """Uppercase, expand street abbreviations, return significant tokens."""
     toks = re.sub(r"[^A-Z0-9 ]", " ", str(text).upper()).split()
-    return [_STREET_ABBREV.get(t, t) for t in toks]
+    return [STREET_ABBREV.get(t, t) for t in toks]
 
 
 def expand_street(street: str) -> str:
