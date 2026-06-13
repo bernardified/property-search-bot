@@ -1452,6 +1452,39 @@ class TestNearbySearch(unittest.TestCase):
             result = nearby.nearby_for_project("DOES NOT EXIST")
         self.assertIn("error", result)
 
+    def test_low_volume_close_neighbour_not_dropped(self):
+        """Regression: a close but low-volume project must surface even behind
+        many higher-volume candidates (cf. Kensington Park 209 m from The Garden
+        Residences in dense District 19 — previously dropped by a volume cap)."""
+        from unittest.mock import patch
+        import nearby
+
+        # Origin + 120 far, high-volume projects + one close, single-txn project.
+        txns = [{"project": "ORIGIN", "street": "O",
+                 "transaction": [{"district": "19", "propertyType": "Apartment"}] * 50}]
+        for i in range(120):
+            txns.append({"project": f"FAR{i}", "street": "F",
+                         "transaction": [{"district": "19", "propertyType": "Apartment"}] * 10})
+        txns.append({"project": "QUIETNEIGHBOUR", "street": "Q",
+                     "transaction": [{"district": "19", "propertyType": "Condominium"}]})
+
+        def fake_geocode(name, street, token):
+            n = name.strip().upper()
+            if n == "ORIGIN":
+                return (1.3000, 103.8000)
+            if n == "QUIETNEIGHBOUR":
+                return (1.3009, 103.8000)   # ~100 m away
+            return (1.4000, 103.9000)        # everything else: far
+
+        with patch("nearby.get_ura_data", return_value=(txns, [])), \
+             patch("nearby.get_mongo_db", return_value=None), \
+             patch("nearby.get_onemap_token", return_value="tok"), \
+             patch("nearby._geocode", side_effect=fake_geocode):
+            result = nearby.nearby_for_project("ORIGIN")
+
+        names = [r["project"] for r in result["results"]]
+        self.assertIn("QUIETNEIGHBOUR", names)
+
 
 class TestPropertyGuruLinks(unittest.TestCase):
 
