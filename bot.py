@@ -29,6 +29,7 @@ from mortgage import (
 )
 from liquidity import liquidity_for_project, format_liquidity_summary
 from propertyguru import listing_links
+from nearby import nearby_for_project
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection, SIZE_BANDS
@@ -159,10 +160,11 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Liquidity", callback_data=f"liquidity:{token}"),
         ],
         [
-            InlineKeyboardButton("🏘️ PropertyGuru", callback_data=f"pg:{token}"),
+            InlineKeyboardButton("🏘️ PropertyGuru (Available Listings)", callback_data=f"pg:{token}"),
         ],
         [
-            InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
+            # Carry the origin token so the follow-up menu can offer "Nearby".
+            InlineKeyboardButton("🔍 Search another property", callback_data=f"new_search:{token}"),
         ],
     ])
 
@@ -656,14 +658,83 @@ async def new_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
+
+    # When invoked from a property result the callback carries that property's
+    # token ("new_search:<token>"), letting us offer a "nearby" search anchored
+    # to it. The bare "new_search" (district list, /list) has no such anchor.
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    has_origin = bool(token and resolve_addr_key(context, token))
+
     keyboard = [
         [InlineKeyboardButton("🔍 Search by Name", callback_data="search_mode:name")],
         [InlineKeyboardButton("📍 Browse by District", callback_data="search_mode:district")],
     ]
+    if has_origin:
+        keyboard.append(
+            [InlineKeyboardButton("📌 Search nearby (within 1km)", callback_data=f"nearby:{token}")]
+        )
     await query.message.reply_text(
         "🏠 How would you like to search?",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def nearby_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 📌 Search nearby: private developments within 1km of the origin.
+
+    Re-queries by project name at tap time (like Liquidity/PropertyGuru); the
+    coordinate work lives in nearby.py (OneMap geocode + Mongo coords cache).
+    """
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    addr_key = resolve_addr_key(context, token) if token else None
+    if not addr_key:
+        await query.message.reply_text("⚠️ Could not identify property. Please search again.")
+        return
+
+    project_name = addr_key.split("|", 1)[0]
+    await query.edit_message_reply_markup(reply_markup=None)
+    loading = await query.message.reply_text("📌 Finding properties within 1km...")
+    try:
+        result = nearby_for_project(project_name)
+        await loading.delete()
+
+        if "error" in result:
+            await query.message.reply_text(f"⚠️ {result['error']}")
+            return
+
+        results = result["results"]
+        if not results:
+            await query.message.reply_text(
+                f"No other private developments found within "
+                f"{result['radius_m'] // 1000}km of *{project_name.title()}*.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔍 Search another property", callback_data=f"new_search:{token}")]]
+                ),
+            )
+            return
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{r['project'].title()} · {r['distance_m']}m",
+                callback_data=f"search:{r['project']}",
+            )]
+            for r in results
+        ]
+        buttons.append([InlineKeyboardButton("🔍 Search another property", callback_data=f"new_search:{token}")])
+        await query.message.reply_text(
+            f"📌 *Within {result['radius_m'] // 1000}km of {project_name.title()}* "
+            f"(District {result['district']}):\n\nTap one to see its transactions:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception as e:
+        logger.error(f"Nearby callback failed: {e}", exc_info=True)
+        await loading.delete()
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
 
 async def search_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1160,7 +1231,8 @@ def main():
     app.add_handler(CallbackQueryHandler(district_callback, pattern="^district:"))
     app.add_handler(CallbackQueryHandler(list_callback, pattern="^search:"))
     app.add_handler(CallbackQueryHandler(fuzzy_confirm_callback, pattern="^fuzzy_"))
-    app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
+    app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search"))
+    app.add_handler(CallbackQueryHandler(nearby_callback, pattern="^nearby:"))
     app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
     app.add_handler(CallbackQueryHandler(liquidity_callback, pattern="^liquidity:"))
     app.add_handler(CallbackQueryHandler(propertyguru_callback, pattern="^pg:"))
