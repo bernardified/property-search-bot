@@ -28,6 +28,7 @@ from mortgage import (
     MIN_DOWN_PAYMENT_PCT,
 )
 from liquidity import liquidity_for_project, format_liquidity_summary
+from propertyguru import listing_links
 from cache.onemap_mrt import build_mrt_cache
 from cache.schools_cache import get_schools_cache
 from utils import get_mongo_db, clear_mongo_collection, SIZE_BANDS
@@ -156,6 +157,9 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🏦 Affordability", callback_data=f"mortgage:{token}"),
             InlineKeyboardButton("📊 Liquidity", callback_data=f"liquidity:{token}"),
+        ],
+        [
+            InlineKeyboardButton("🏘️ PropertyGuru", callback_data=f"pg:{token}"),
         ],
         [
             InlineKeyboardButton("🔍 Search another property", callback_data="new_search"),
@@ -904,6 +908,40 @@ async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
 
+async def propertyguru_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 🏘️ PropertyGuru button: per-bedroom search links.
+
+    Re-queries the project name from the token (same pattern as Liquidity). No
+    network call — we only build PropertyGuru search URLs (no API; links open
+    PropertyGuru's own app/site), so the reply is a URL-button keyboard.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    addr_key = resolve_addr_key(context, token) if token else None
+    if not addr_key:
+        await query.message.reply_text("⚠️ Could not identify property. Please search again.")
+        return
+
+    project_name = addr_key.split("|", 1)[0]
+    rows = [
+        [
+            InlineKeyboardButton(f"🛒 {label} · Sale", url=sale_url),
+            InlineKeyboardButton(f"🔑 {label} · Rent", url=rent_url),
+        ]
+        for label, sale_url, rent_url in listing_links(project_name)
+    ]
+    rows.append([InlineKeyboardButton("🔍 Search another property", callback_data="new_search")])
+
+    await query.message.reply_text(
+        f"🏘️ *{project_name.title()}* on PropertyGuru\n"
+        "Tap a bedroom type to see live listings for sale or rent:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     development_name = update.message.text.strip()
     if not development_name:
@@ -1125,6 +1163,7 @@ def main():
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search$"))
     app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
     app.add_handler(CallbackQueryHandler(liquidity_callback, pattern="^liquidity:"))
+    app.add_handler(CallbackQueryHandler(propertyguru_callback, pattern="^pg:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
