@@ -272,6 +272,22 @@ def is_ura_transactions_stale(last_refresh_ts: float) -> bool:
     return False
 
 
+def is_hdb_resale_stale(last_refresh_ts: float) -> bool:
+    """
+    Return True if HDB resale data needs refreshing.
+
+    HDB resale prices (data.gov.sg CKAN) update roughly monthly, early in the
+    month. Unlike URA, there is no fixed published release time, so we use a
+    simple calendar-month heuristic: the cache is stale once the SGT calendar
+    month has advanced past the month it was last refreshed in. This avoids
+    over-fetching; intra-month corrections are picked up on the next month's
+    first query.
+    """
+    now_sgt = datetime.now(SGT)
+    since_sgt = datetime.fromtimestamp(last_refresh_ts, tz=SGT)
+    return (now_sgt.year, now_sgt.month) > (since_sgt.year, since_sgt.month)
+
+
 def is_rental_stale(last_refresh_ts: float) -> bool:
     """
     Return True if rental contract data needs refreshing.
