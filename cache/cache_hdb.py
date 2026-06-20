@@ -33,7 +33,8 @@ HDB_RESALE_RESOURCE_FALLBACK = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
 COLLECTION_META_URL = "https://api-production.data.gov.sg/v2/public/api/collections/{cid}/metadata"
 DATASTORE_SEARCH_URL = "https://data.gov.sg/api/action/datastore_search"
 
-HDB_ROLLING_MONTHS = 36   # rolling window cached (3 years ≈ 75k rows)
+HDB_ROLLING_MONTHS = 60   # rolling window cached (5 years ≈ 125k rows) — wide
+                          # enough for a per-block 5-year resale price trend
 PAGE_SIZE = 10000         # data.gov.sg honours large page sizes; ~2.5k rows/month
 CHUNK_SIZE = 500          # Mongo doc chunking, well under the 16MB BSON limit
 

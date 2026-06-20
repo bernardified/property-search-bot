@@ -161,6 +161,18 @@ def resolve_hdb_target(context: ContextTypes.DEFAULT_TYPE, token: str | None) ->
     return context.user_data.get("hdb_targets", {}).get(token) if token else None
 
 
+def store_hdb_block_street(context: ContextTypes.DEFAULT_TYPE, token: str, block: str, street: str):
+    """Stash an HDB block's (block, street) under its addr token so the Price
+    Trend button can re-query the 5-year resale trend at tap time (the trend
+    needs full history, too much to encode in callback_data)."""
+    context.user_data.setdefault("hdb_block_street", {})[token] = (block, street)
+
+
+def resolve_hdb_block_street(context: ContextTypes.DEFAULT_TYPE, token: str | None):
+    """Look up the stored (block, street) for an HDB addr token, or None."""
+    return context.user_data.get("hdb_block_street", {}).get(token) if token else None
+
+
 def store_addr_coords(context: ContextTypes.DEFAULT_TYPE, token: str, lat: float, lng: float):
     """Stash exact origin coords (from a postal-code lookup) under an addr token.
 
@@ -222,9 +234,10 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
 
 def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
     """Amenity keyboard for an HDB block. Reuses the private amenity_callback
-    (same `amenity:<type>:<token>` pattern, served from stashed coords), but
-    only the location amenities apply — HDB has no rental/trend/liquidity/PG
-    in v1."""
+    (same `amenity:<type>:<token>` pattern, served from stashed coords) for the
+    location amenities; the 📈 Price Trend button is HDB-specific
+    (`hdbtrend:<token>`), drawing the block's 5-year resale PSF trend. HDB still
+    has no rental/liquidity/PG in v1."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🚇 Nearest MRT", callback_data=f"amenity:mrt:{token}"),
@@ -233,6 +246,9 @@ def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🛍️ Shopping Malls", callback_data=f"amenity:malls:{token}"),
             InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
+        ],
+        [
+            InlineKeyboardButton("📈 Price Trend (5yr)", callback_data=f"hdbtrend:{token}"),
         ],
         [
             # Bare new_search (no token) — HDB has no "nearby" follow-up.
@@ -1117,6 +1133,48 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ Something went wrong. Please try again.")
 
 
+async def hdbtrend_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 📈 Price Trend (5yr) button on an HDB block: the block's
+    average resale PSF over the last 5 years, rendered with the same chart/text
+    renderers the private trend uses (footnote overridden to "HDB resale")."""
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split(":", 1)[1] if ":" in query.data else None
+    bs = resolve_hdb_block_street(context, token)
+    if not bs:
+        await query.message.reply_text("⚠️ Could not identify this block. Please search again.")
+        return
+    block, street = bs
+
+    loading = await query.message.reply_text("📈 Building 5-year price trend...")
+    photo = None
+    try:
+        result = hdb.price_trend(block, street)
+        try:
+            photo = render_price_trend_png(result, footnote="HDB resale")
+        except Exception as e:
+            logger.warning(f"HDB PSF trend chart render failed: {e}")
+            photo = None
+        text = format_price_trend(result, include_bars=photo is None, footnote="HDB resale")
+
+        await loading.delete()
+        keyboard = build_hdb_amenity_keyboard(token)
+        if photo:
+            await query.message.reply_photo(
+                photo=photo, caption=text, parse_mode="Markdown", reply_markup=keyboard
+            )
+        else:
+            await query.message.reply_text(
+                text, parse_mode="Markdown", disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+    except Exception as e:
+        logger.error(f"HDB trend callback failed: {e}", exc_info=True)
+        await loading.delete()
+        await query.message.reply_text("⚠️ Something went wrong. Please try again.")
+
+
 async def liquidity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the 📊 Liquidity button: turnover / take-up rate per size band.
 
@@ -1480,30 +1538,40 @@ async def _send_hdb_block_detail(message, context: ContextTypes.DEFAULT_TYPE,
         disable_web_page_preview=True,
     )
 
-    # Resolve a coordinate, then stash it under an addr token; the amenity
-    # buttons read it (skipping any geocode) exactly like the postal-code flow.
-    # addr_key is "<display>|<street>" so the reused amenity_callback has a
-    # sensible display name + street fallback.
+    # Stash the addr token first; it carries the block+street the Price Trend
+    # button needs, independent of whether geocoding (for the amenity buttons)
+    # succeeds. addr_key is "<display>|<street>" so the reused amenity_callback
+    # has a sensible display name + street fallback.
+    display = f"Block {block} {result['street'].title()}"
+    token = store_addr_key(context, f"{display}|{result['street']}")
+    store_hdb_block_street(context, token, block, result["street"])
+    # Mark the token HDB so the reused amenity_callback re-attaches the HDB
+    # keyboard (location amenities + trend), not the private one.
+    context.user_data.setdefault("hdb_tokens", set()).add(token)
+
+    # Resolve a coordinate for the location amenities. The postal-code flow
+    # supplies the exact OneMap coord; otherwise geocode the block once. If that
+    # misses, the block still gets a Price Trend button (which needs no coord).
     if coords:
         lat, lng = coords
     else:
         loc = _geocode_hdb_block(block, result["street"])
         if not loc:
             await message.reply_text(
-                "_Amenity lookup unavailable — couldn't locate this block._",
-                parse_mode="Markdown", reply_markup=_HDB_NEW_SEARCH,
+                "_Couldn't locate this block — nearby amenities unavailable, "
+                "but its price trend is still available below._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📈 Price Trend (5yr)", callback_data=f"hdbtrend:{token}")],
+                    [InlineKeyboardButton("🔍 Search another property", callback_data="new_search")],
+                ]),
             )
             return
         lat, lng = loc["lat"], loc["lng"]
 
-    display = f"Block {block} {result['street'].title()}"
-    token = store_addr_key(context, f"{display}|{result['street']}")
     store_addr_coords(context, token, lat, lng)
-    # Mark the token HDB so the reused amenity_callback re-attaches the HDB
-    # keyboard (location amenities only), not the private one.
-    context.user_data.setdefault("hdb_tokens", set()).add(token)
     await message.reply_text(
-        "Tap to explore nearby amenities:",
+        "Tap to explore nearby amenities or its 5-year price trend:",
         reply_markup=build_hdb_amenity_keyboard(token),
     )
 
@@ -1683,6 +1751,7 @@ def main():
     app.add_handler(CallbackQueryHandler(new_search_callback, pattern="^new_search"))
     app.add_handler(CallbackQueryHandler(nearby_callback, pattern="^nearby:"))
     app.add_handler(CallbackQueryHandler(amenity_callback, pattern="^amenity:"))
+    app.add_handler(CallbackQueryHandler(hdbtrend_callback, pattern="^hdbtrend:"))
     app.add_handler(CallbackQueryHandler(liquidity_callback, pattern="^liquidity:"))
     app.add_handler(CallbackQueryHandler(propertyguru_callback, pattern="^pg:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
