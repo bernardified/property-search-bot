@@ -529,13 +529,18 @@ def _scaled_bar(value: float, lo: float, hi: float, width: int = 8) -> str:
     return bar + "░" * (width - full - (1 if rem else 0))
 
 
-def format_price_trend(result: dict, include_bars: bool = True) -> str:
+def format_price_trend(result: dict, include_bars: bool = True,
+                       footnote: str = "resale + sub-sale only") -> str:
     """
     Render a price_trend() result as a Telegram (Markdown) message.
 
     With include_bars=True (default) the full text chart is rendered. With
     include_bars=False only the header/stat summary is produced — used as a
     compact caption when the PNG chart carries the per-period detail instead.
+
+    `footnote` is the small italic qualifier under the headline stat; it differs
+    by market (private counts resale + sub-sale; HDB is resale-only), so the HDB
+    caller overrides the default.
     """
     if "error" in result:
         return f"❌ {result['error']}"
@@ -565,7 +570,7 @@ def format_price_trend(result: dict, include_bars: bool = True) -> str:
         stat = f"{total} txns · _not enough history for a trend_"
     lines.append(f"`{spark}`  {stat}" if spark else stat)
 
-    lines.append("_resale + sub-sale only_")
+    lines.append(f"_{footnote}_")
 
     if include_bars and psf_values:
         lines.append("─────────────────────")
@@ -586,10 +591,13 @@ def format_price_trend(result: dict, include_bars: bool = True) -> str:
     return "\n".join(lines)
 
 
-def render_price_trend_png(result: dict) -> bytes | None:
+def render_price_trend_png(result: dict, footnote: str = "resale + sub-sale only") -> bytes | None:
     """
     Render a price_trend() result as a PNG line chart (bytes), or None when there
     is nothing chartable (error/ambiguous result, or fewer than 2 periods).
+
+    `footnote` is the trailing qualifier in the chart subtitle; HDB overrides the
+    private default ("resale + sub-sale only") with "HDB resale".
 
     matplotlib is imported lazily with the headless Agg backend so a missing or
     broken install only disables the chart — callers fall back to the text view.
@@ -652,9 +660,9 @@ def render_price_trend_png(result: dict) -> bytes | None:
         if pct is not None and span:
             arrow = "▲" if up else ("▼" if pct < 0 else "►")
             sign = "+" if pct > 0 else ""
-            subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  resale + sub-sale only"
+            subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  {footnote}"
         else:
-            subtitle = f"{total} txns  ·  resale + sub-sale only"
+            subtitle = f"{total} txns  ·  {footnote}"
         has_partial = any(p.get("partial") for p in periods)
         if has_partial:
             subtitle += "   (* current period still in progress)"

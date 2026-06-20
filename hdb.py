@@ -299,6 +299,115 @@ def block_detail(block: str, street: str, records: list | None = None) -> dict:
     }
 
 
+# ── Price trend (parallel to ura.price_trend) ───────────────────────────────
+#
+# Average resale PSF over time for one block (or a whole street). PSF is already
+# size-normalised, so it cleanly mixes the different flat types in a block. HDB
+# blocks transact rarely, so the default granularity is yearly, stepping up to
+# half-yearly only when there is enough volume for the finer resolution to mean
+# something. The result dict mirrors ura.price_trend's shape so the same
+# renderers (ura.format_price_trend / render_price_trend_png) draw it.
+
+TREND_WINDOW_MONTHS = 60        # 5 years — the depth the HDB cache now holds
+HALF_YEAR_TXN_THRESHOLD = 40    # >= this many txns over >= 2 yrs → half-yearly
+
+
+def price_trend(block: str | None, street: str, records: list | None = None,
+                months: int = TREND_WINDOW_MONTHS, now: datetime | None = None) -> dict:
+    """Average-PSF-over-time trend for a single block (block given) or a whole
+    street (block=None), over the last `months` (default 5 years).
+
+    Returns a dict shaped like ura.price_trend's so the shared trend renderers
+    can draw it:
+      {"error": str}
+      {"development", "periods": [{"label", "avg_psf", "count", "partial"}, ...],
+       "pct_change": int|None, "span_label": str, "total_txns": int,
+       "fuzzy_match": None}
+    """
+    b = block.strip().upper() if block else None
+    s = street.strip().upper()
+    rows = [r for r in _normalise_all(records)
+            if r["street"] == s and (b is None or r["block"] == b)]
+    target = f"Block {block} {street.title()}" if block else street.title()
+    if not rows:
+        return {"error": f'No resale transactions for {target} to build a price trend.'}
+
+    rows = _recent(rows, months, now)
+
+    # (year, half) -> list of PSF values. half is 1 (Jan–Jun) or 2 (Jul–Dec).
+    psf_by_period: dict[tuple[int, int], list[int]] = {}
+    total = 0
+    for r in rows:
+        if not r["month_dt"] or not r["psf"]:
+            continue
+        dt = r["month_dt"]
+        half = 1 if dt.month <= 6 else 2
+        psf_by_period.setdefault((dt.year, half), []).append(r["psf"])
+        total += 1
+
+    if total == 0:
+        return {"error": f'No resale transactions for {target} to build a price trend.'}
+
+    year_span = max(y for y, _ in psf_by_period) - min(y for y, _ in psf_by_period)
+    half_yearly = total >= HALF_YEAR_TXN_THRESHOLD and year_span >= 1
+
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for (year, half), psfs in psf_by_period.items():
+        key = (year, half) if half_yearly else (year, 0)
+        buckets.setdefault(key, []).extend(psfs)
+
+    now = now or datetime.now()
+    cur_half = 1 if now.month <= 6 else 2
+
+    periods = []
+    for (year, half) in sorted(buckets):
+        psfs = buckets[(year, half)]
+        label = f"{year} H{half}" if half_yearly else str(year)
+        partial = (year, half) == (now.year, cur_half) if half_yearly else (year == now.year)
+        periods.append({
+            "label": label,
+            "avg_psf": round(sum(psfs) / len(psfs)),
+            "count": len(psfs),
+            "partial": partial,
+        })
+
+    if len(periods) >= 2:
+        first, last = periods[0]["avg_psf"], periods[-1]["avg_psf"]
+        pct_change = round((last - first) / first * 100) if first else None
+    else:
+        pct_change = None
+
+    return {
+        "development": target,
+        "street": s,
+        "fuzzy_match": None,
+        "periods": periods,
+        "pct_change": pct_change,
+        "span_label": _trend_span_label(periods),
+        "total_txns": total,
+    }
+
+
+def _trend_span_label(periods: list[dict]) -> str:
+    """Human label for the time span covered, e.g. '4 yrs' or '8 mths'."""
+    if len(periods) < 2:
+        return ""
+
+    def start_month(label: str) -> tuple[int, int]:
+        parts = label.split()
+        year = int(parts[0])
+        month = 7 if (len(parts) > 1 and parts[1] == "H2") else 1
+        return year, month
+
+    fy, fm = start_month(periods[0]["label"])
+    ly, lm = start_month(periods[-1]["label"])
+    n = (ly - fy) * 12 + (lm - fm)
+    if n >= 12:
+        years = round(n / 12)
+        return f"{years} yr" if years == 1 else f"{years} yrs"
+    return f"{n} mths"
+
+
 # ── Formatting (Telegram Markdown, parallel to ura.format_transactions) ──────
 
 def _lease_str(years: float | None) -> str:

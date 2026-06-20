@@ -1678,6 +1678,63 @@ class TestHDB(unittest.TestCase):
         self.assertIn("Block 200", hdb.format_block_detail(hdb.block_detail("200", "BISHAN ST 22", recs)))
         self.assertTrue(hdb.format_town_overview({"error": "x"}).startswith("❌"))
 
+    def _trend_recs(self):
+        # One 4 ROOM resale per year on block 200 (rising), plus an unrelated
+        # block/street row that must not bleed into a block-level trend.
+        def row(month, block, street, price):
+            return {"month": month, "town": "BISHAN", "flat_type": "4 ROOM",
+                    "block": block, "street_name": street, "storey_range": "04 TO 06",
+                    "floor_area_sqm": "90", "flat_model": "Improved",
+                    "lease_commence_date": "1990", "remaining_lease": "63 years",
+                    "resale_price": price}
+        return [
+            row("2022-03", "200", "BISHAN ST 22", "600000"),
+            row("2023-05", "200", "BISHAN ST 22", "660000"),
+            row("2024-06", "200", "BISHAN ST 22", "720000"),
+            row("2025-07", "200", "BISHAN ST 22", "780000"),
+            row("2026-02", "200", "BISHAN ST 22", "840000"),
+            row("2024-01", "201", "BISHAN ST 22", "700000"),   # other block
+        ]
+
+    def test_price_trend_block_yearly(self):
+        import hdb
+        res = hdb.price_trend("200", "BISHAN ST 22", self._trend_recs(), now=self.NOW)
+        self.assertEqual(res["development"], "Block 200 Bishan St 22")
+        self.assertEqual([p["label"] for p in res["periods"]],
+                         ["2022", "2023", "2024", "2025", "2026"])
+        self.assertEqual(res["total_txns"], 5)            # block 200 only, 201 excluded
+        self.assertTrue(res["periods"][-1]["partial"])    # 2026 still in progress
+        self.assertFalse(res["periods"][0]["partial"])
+        self.assertGreater(res["pct_change"], 0)          # rising series
+        self.assertEqual(res["span_label"], "4 yrs")
+
+    def test_price_trend_street_level_and_errors(self):
+        import hdb
+        # block=None aggregates every block on the street (200 + 201 = 6 txns).
+        street = hdb.price_trend(None, "BISHAN ST 22", self._trend_recs(), now=self.NOW)
+        self.assertEqual(street["development"], "Bishan St 22")
+        self.assertEqual(street["total_txns"], 6)
+        # Unknown block/street → error contract.
+        self.assertIn("error", hdb.price_trend("999", "NOWHERE RD", self._trend_recs(), now=self.NOW))
+
+    def test_price_trend_renders_with_shared_renderers(self):
+        import hdb, ura
+        res = hdb.price_trend("200", "BISHAN ST 22", self._trend_recs(), now=self.NOW)
+        text = ura.format_price_trend(res, include_bars=True, footnote="HDB resale")
+        self.assertIn("PSF trend", text)
+        self.assertIn("HDB resale", text)
+        self.assertNotIn("sub-sale", text)               # footnote override took effect
+        self.assertIsNotNone(ura.render_price_trend_png(res, footnote="HDB resale"))
+
+    def test_hdb_block_street_token_roundtrip(self):
+        from bot import store_hdb_block_street, resolve_hdb_block_street
+        ctx = MagicMock()
+        ctx.user_data = {}
+        token = "tok123"
+        store_hdb_block_street(ctx, token, "200", "BISHAN ST 22")
+        self.assertEqual(resolve_hdb_block_street(ctx, token), ("200", "BISHAN ST 22"))
+        self.assertIsNone(resolve_hdb_block_street(ctx, "unknown"))
+
     def test_hdb_freshness_calendar_month(self):
         from utils import is_hdb_resale_stale, SGT
         now = datetime.now(SGT)
@@ -1706,16 +1763,18 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(hdb.expand_street("ANG MO KIO AVE 10"), "ANG MO KIO AVENUE 10")
         self.assertEqual(hdb.expand_street("bishan st 22"), "BISHAN STREET 22")
 
-    def test_hdb_amenity_keyboard_is_location_only(self):
+    def test_hdb_amenity_keyboard_is_location_plus_trend(self):
         from bot import build_hdb_amenity_keyboard
         cbs = [b.callback_data for row in build_hdb_amenity_keyboard("tok123").inline_keyboard for b in row]
         self.assertEqual(cbs, [
             "amenity:mrt:tok123", "amenity:schools:tok123",
             "amenity:malls:tok123", "amenity:supermarkets:tok123",
+            "hdbtrend:tok123",
             "new_search",
         ])
-        # No private-only amenities leak into the HDB keyboard.
-        for bad in ("rental", "trend", "mortgage:", "liquidity:", "pg:"):
+        # HDB has its own 5-year price trend (hdbtrend), but none of the other
+        # private-only amenities leak in.
+        for bad in ("amenity:rental", "amenity:trend", "mortgage:", "liquidity:", "pg:"):
             self.assertFalse(any(bad in c for c in cbs), f"{bad} leaked into HDB keyboard")
 
 
