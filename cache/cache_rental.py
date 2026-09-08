@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -104,22 +105,33 @@ def _fetch_all_rentals(token: str) -> list:
 
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
+def _meta_timestamp() -> float | None:
+    """Last-refresh timestamp from the meta doc, or None if unavailable."""
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        doc = db['rental_cache'].find_one({"_id": "meta"}, {"timestamp": 1})
+        return doc.get("timestamp", 0) if doc else None
+    except Exception:
+        return None
+
+
 def _is_cache_fresh() -> bool:
     """
     Return True if the cache is up-to-date — i.e. no URA rental release
     (15th of month 09:00 SGT, shifted for public holidays) has occurred since last refresh.
     """
-    db = get_mongo_db()
-    if db is None:
-        return False
-    try:
-        doc = db['rental_cache'].find_one({"_id": "meta"})
-        if not doc:
-            return False
-        last_refresh_ts = doc.get("timestamp", 0)
-        return not is_rental_stale(last_refresh_ts)
-    except Exception:
-        return False
+    ts = _meta_timestamp()
+    return ts is not None and not is_rental_stale(ts)
+
+
+# In-process memo keyed by the meta timestamp — same pattern (and same
+# READ-ONLY contract) as cache_ura; a refresh from any process writes a new
+# timestamp, which invalidates the memo on the next call.
+_memo_lock = threading.Lock()
+_memo_ts: float | None = None
+_memo_data: list | None = None
 
 
 def _load_cache() -> list:
@@ -178,10 +190,22 @@ def _save_cache(projects: list):
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def get_rental_data() -> list:
-    """Return rental data from cache, refreshing if stale."""
-    if _is_cache_fresh():
+    """Return rental data from cache, refreshing if stale.
+    Memoized in-process per meta timestamp — see _memo_* above."""
+    global _memo_ts, _memo_data
+
+    ts = _meta_timestamp()
+    if ts is not None and not is_rental_stale(ts):
+        with _memo_lock:
+            if _memo_ts == ts and _memo_data is not None:
+                logger.info("[Rental Cache] Using in-process memo")
+                return _memo_data
         logger.info("[Rental Cache] Using cached data")
-        return _load_cache()
+        projects = _load_cache()
+        if projects:
+            with _memo_lock:
+                _memo_ts, _memo_data = ts, projects
+        return projects
 
     logger.info("[Rental Cache] Refreshing rental data...")
     token = _get_token()
@@ -192,6 +216,8 @@ def get_rental_data() -> list:
     projects = _fetch_all_rentals(token)
     if projects:
         _save_cache(projects)
+        with _memo_lock:
+            _memo_ts, _memo_data = _meta_timestamp(), projects
 
     return projects
 
