@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -81,23 +82,37 @@ def _fetch_pipeline(token: str) -> list:
 
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
+def _meta_timestamp() -> float | None:
+    """Last-refresh timestamp from the meta doc, or None if unavailable."""
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        doc = db['ura_cache'].find_one({"_id": "meta"}, {"timestamp": 1})
+        return doc.get("timestamp", 0) if doc else None
+    except Exception as e:
+        logger.error(f"[URA Cache] Freshness check failed: {e}")
+        return None
+
+
 def _is_cache_fresh() -> bool:
     """
     Return True if the cache is up-to-date — i.e. no URA transaction release
     (Tue/Fri 09:00 SGT, shifted for public holidays) has occurred since last refresh.
     """
-    db = get_mongo_db()
-    if db is None:
-        return False
-    try:
-        doc = db['ura_cache'].find_one({"_id": "meta"})
-        if not doc:
-            return False
-        last_refresh_ts = doc.get("timestamp", 0)
-        return not is_ura_transactions_stale(last_refresh_ts)
-    except Exception as e:
-        logger.error(f"[URA Cache] Freshness check failed: {e}")
-        return False
+    ts = _meta_timestamp()
+    return ts is not None and not is_ura_transactions_stale(ts)
+
+
+# In-process memo of the loaded cache, keyed by the meta timestamp. Loading
+# ~100 Mongo chunks per call dominated search latency (~15–20s from Railway);
+# a memo hit costs one small meta read instead. Any refresh — here, the cron
+# job, or /refresh from another process — writes a new timestamp, which
+# invalidates the memo on the next call. Memoized data is shared across
+# callers: treat it as READ-ONLY (consumers already do).
+_memo_lock = threading.Lock()
+_memo_ts: float | None = None
+_memo_data: tuple[list, list] | None = None
 
 
 def _load_cache() -> tuple[list, list]:
@@ -188,10 +203,22 @@ def get_ura_data() -> tuple[list, list]:
     """
     Return (transactions, pipeline) from MongoDB cache.
     Refreshes automatically if cache is stale or missing.
+    Memoized in-process per meta timestamp — see _memo_* above.
     """
-    if _is_cache_fresh():
+    global _memo_ts, _memo_data
+
+    ts = _meta_timestamp()
+    if ts is not None and not is_ura_transactions_stale(ts):
+        with _memo_lock:
+            if _memo_ts == ts and _memo_data is not None:
+                logger.info("[URA Cache] Using in-process memo")
+                return _memo_data
         logger.info("[URA Cache] Using cached data")
-        return _load_cache()
+        data = _load_cache()
+        if data[0]:
+            with _memo_lock:
+                _memo_ts, _memo_data = ts, data
+        return data
 
     logger.info("[URA Cache] Cache stale or missing — refreshing from URA API...")
     token = _get_token()
@@ -204,6 +231,10 @@ def get_ura_data() -> tuple[list, list]:
 
     if transactions:
         _save_cache(transactions, pipeline)
+        data = (transactions, pipeline)
+        with _memo_lock:
+            _memo_ts, _memo_data = _meta_timestamp(), data
+        return data
 
     return transactions, pipeline
 
