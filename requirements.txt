@@ -15,3 +15,5 @@ urllib3==2.7.0
 pymongo==4.7.0
 dnspython==2.6.1
 matplotlib==3.10.7
+fastapi==0.141.1
+uvicorn==0.52.4

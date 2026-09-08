@@ -1,0 +1,179 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #1e2430;
+  background: #f6f7f9;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+#sidebar {
+  width: 400px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 16px;
+  background: #fff;
+  border-right: 1px solid #e3e6ea;
+}
+
+#sidebar h1 {
+  font-size: 1.15rem;
+  margin: 0 0 12px;
+}
+
+#search-form {
+  display: flex;
+  gap: 8px;
+}
+
+#search-input {
+  flex: 1;
+  padding: 9px 12px;
+  font-size: 0.95rem;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+}
+
+#search-form button {
+  padding: 9px 16px;
+  font-size: 0.95rem;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+#search-form button:disabled { background: #9db5e8; cursor: wait; }
+
+#recent { margin-top: 10px; }
+#recent .chip {
+  display: inline-block;
+  margin: 3px 4px 0 0;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  background: #eef2f8;
+  border: 1px solid #dbe2ee;
+  border-radius: 999px;
+  cursor: pointer;
+}
+#recent .chip:hover { background: #e0e8f5; }
+
+#status {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  background: #fff7e6;
+  border: 1px solid #f0dfb6;
+  white-space: pre-line;
+}
+#status.error { background: #fdeaea; border-color: #f2c4c4; }
+
+#results { margin-top: 14px; font-size: 0.88rem; }
+
+#results h2 {
+  font-size: 1.05rem;
+  margin: 0 0 2px;
+}
+#results .street { color: #5b6472; margin: 0 0 8px; }
+#results .meta { color: #444d5c; margin: 0 0 10px; line-height: 1.5; }
+#results .note { color: #8a6d1a; font-size: 0.8rem; margin: 6px 0; }
+
+#results h3 {
+  font-size: 0.92rem;
+  margin: 16px 0 6px;
+  border-bottom: 1px solid #e3e6ea;
+  padding-bottom: 4px;
+}
+
+#results table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+#results th, #results td {
+  text-align: left;
+  padding: 5px 6px;
+  border-bottom: 1px solid #eef0f3;
+  vertical-align: top;
+}
+#results th { color: #5b6472; font-weight: 600; white-space: nowrap; }
+#results td.num, #results th.num { text-align: right; white-space: nowrap; }
+
+.candidates button {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 0.85rem;
+  background: #fff;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.candidates button:hover { background: #f0f4fb; }
+.candidates .cand-street { color: #5b6472; font-size: 0.75rem; }
+
+#map-wrap { flex: 1; position: relative; }
+#map { position: absolute; inset: 0; }
+
+#map-loading {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  background: #fff;
+  border: 1px solid #e3e6ea;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+
+#legend {
+  position: absolute;
+  bottom: 20px;
+  left: 12px;
+  z-index: 1000;
+  display: flex;
+  gap: 12px;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  background: #fff;
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+#legend[hidden] { display: none; }
+#legend span { display: flex; align-items: center; gap: 4px; }
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot.mrt { background: #dc2626; }
+.dot.school { background: #2563eb; }
+.dot.mall { background: #9333ea; }
+.dot.mart { background: #16a34a; }
+
+.popup-name { font-weight: 600; }
+.popup-line { color: #444d5c; font-size: 0.8rem; }
+
+@media (max-width: 760px) {
+  #app { flex-direction: column; }
+  #sidebar {
+    width: 100%;
+    max-height: 45vh;
+    border-right: none;
+    border-bottom: 1px solid #e3e6ea;
+  }
+  #map-wrap { min-height: 55vh; }
+}

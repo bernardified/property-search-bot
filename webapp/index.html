@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SG Property Map</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <h1>🏙️ SG Property Map</h1>
+      <form id="search-form" autocomplete="off">
+        <input id="search-input" type="text" placeholder="Development name, e.g. Parc Esta" required>
+        <button type="submit">Search</button>
+      </form>
+      <div id="recent"></div>
+      <div id="status" hidden></div>
+      <div id="results" hidden></div>
+    </aside>
+    <main id="map-wrap">
+      <div id="map"></div>
+      <div id="map-loading" hidden>Loading amenities…</div>
+      <div id="legend" hidden>
+        <span><i class="dot mrt"></i>MRT</span>
+        <span><i class="dot school"></i>Schools</span>
+        <span><i class="dot mall"></i>Malls</span>
+        <span><i class="dot mart"></i>Supermarkets</span>
+      </div>
+    </main>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="map.js"></script>
+</body>
+</html>
