@@ -36,6 +36,7 @@ class TestUtils(unittest.TestCase):
     def setUp(self):
         from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float
         from utils import parse_sqft_range, parse_mmyy_date, format_mmyy_date, haversine_m
+        from utils import svy21_to_wgs84
         self.SIZE_BANDS = SIZE_BANDS
         self.get_band = get_band
         self.sqm_to_sqft = sqm_to_sqft
@@ -44,6 +45,7 @@ class TestUtils(unittest.TestCase):
         self.parse_mmyy_date = parse_mmyy_date
         self.format_mmyy_date = format_mmyy_date
         self.haversine_m = haversine_m
+        self.svy21_to_wgs84 = svy21_to_wgs84
 
     def test_size_bands_no_gaps(self):
         """Every integer sqft from 1 to 2000 should map to a band."""
@@ -109,6 +111,38 @@ class TestUtils(unittest.TestCase):
         dist = self.haversine_m(1.2830, 103.8513, 1.2765, 103.8545)
         self.assertGreater(dist, 400)
         self.assertLess(dist, 1000)  # ~805m actual distance
+
+    def test_svy21_known_projects(self):
+        """URA x/y must land on the real building, to ~1 m."""
+        # THE SUMMIT, Upper East Coast Road (D16) — the project whose OneMap
+        # name-geocode used to return a namesake 22 km west.
+        lat, lng = self.svy21_to_wgs84(39959.61909, 33220.65997)
+        self.assertAlmostEqual(lat, 1.31671, places=4)
+        self.assertAlmostEqual(lng, 103.94078, places=4)
+        # THE VISION, West Coast Crescent (D05).
+        lat, lng = self.svy21_to_wgs84(20388.76516, 31186.76012)
+        self.assertAlmostEqual(lat, 1.29831, places=4)
+        self.assertAlmostEqual(lng, 103.76493, places=4)
+
+    def test_svy21_projection_origin(self):
+        """The false easting/northing map back to the projection origin."""
+        lat, lng = self.svy21_to_wgs84(28001.642, 38744.572)
+        self.assertAlmostEqual(lat, 1.366666, places=6)
+        self.assertAlmostEqual(lng, 103.833333, places=6)
+
+    def test_svy21_accepts_strings(self):
+        """URA sometimes serialises x/y as strings."""
+        self.assertEqual(
+            self.svy21_to_wgs84("39959.61909", "33220.65997"),
+            self.svy21_to_wgs84(39959.61909, 33220.65997),
+        )
+
+    def test_svy21_missing_values_return_none(self):
+        """~12% of URA project-dicts carry no position — callers must fall back."""
+        self.assertIsNone(self.svy21_to_wgs84(None, None))
+        self.assertIsNone(self.svy21_to_wgs84(39959.6, None))
+        self.assertIsNone(self.svy21_to_wgs84("", ""))
+        self.assertIsNone(self.svy21_to_wgs84("n/a", "n/a"))
 
 
 # ══════════════════════════════════════════════════════
@@ -1496,6 +1530,85 @@ class TestNearbySearch(unittest.TestCase):
 
         names = [r["project"] for r in result["results"]]
         self.assertIn("QUIETNEIGHBOUR", names)
+
+    # ── URA surveyed coordinates take precedence over name-geocoding ────────
+
+    def test_ura_coords_from_svy21(self):
+        from nearby import ura_coords
+        # THE SUMMIT's real position (Upper East Coast Road, D16).
+        lat, lng = ura_coords({"x": 39959.61909, "y": 33220.65997})
+        self.assertAlmostEqual(lat, 1.31671, places=4)
+        self.assertAlmostEqual(lng, 103.94078, places=4)
+
+    def test_ura_coords_absent_returns_none(self):
+        from nearby import ura_coords
+        self.assertIsNone(ura_coords({}))
+        self.assertIsNone(ura_coords(None))
+        self.assertIsNone(ura_coords({"x": 39959.6}))       # y missing
+
+    def test_candidate_projects_carries_ura_coords(self):
+        from nearby import candidate_projects
+        txns = [
+            {"project": "WITHXY", "street": "W RD", "x": 39959.61909, "y": 33220.65997,
+             "transaction": [{"district": "16", "propertyType": "Condominium"}]},
+            {"project": "NOXY", "street": "N RD",
+             "transaction": [{"district": "16", "propertyType": "Condominium"}]},
+        ]
+        rows = {c["project"]: c for c in candidate_projects(txns, 16)}
+        self.assertAlmostEqual(rows["WITHXY"]["coords"][0], 1.31671, places=4)
+        self.assertIsNone(rows["NOXY"]["coords"])
+
+    def test_ura_xy_beats_wrong_cached_geocode(self):
+        """Regression: THE SUMMIT (D16) was cached at a namesake 22 km west,
+        which both mislocated the origin and wrongly filtered its neighbours.
+        URA's surveyed x/y must win over any cached name-geocode."""
+        from unittest.mock import patch
+        import nearby
+
+        txns = [
+            # Origin and neighbour ~450 m apart on Upper East Coast Road.
+            {"project": "THE SUMMIT", "street": "UPPER EAST COAST ROAD",
+             "x": 39959.61909, "y": 33220.65997,
+             "transaction": [{"district": "16", "propertyType": "Condominium"}]},
+            {"project": "NEIGHBOUR", "street": "UPPER EAST COAST ROAD",
+             "x": 40400.0, "y": 33220.65997,
+             "transaction": [{"district": "16", "propertyType": "Condominium"}]},
+        ]
+        # Mongo holds the real (bad) cache: THE SUMMIT geocoded to its western
+        # namesake, NEIGHBOUR correctly on Upper East Coast Road. Trusting the
+        # cache puts them 22 km apart and returns nothing; trusting URA's x/y
+        # puts them ~450 m apart. The two must disagree for the test to bite.
+        cached = {
+            "THE SUMMIT": {"_id": "THE SUMMIT", "lat": 1.33121, "lng": 103.74187},
+            "NEIGHBOUR": {"_id": "NEIGHBOUR", "lat": 1.31671, "lng": 103.94474},
+        }
+        db = MagicMock()
+        db.__getitem__.return_value.find_one.side_effect = (
+            lambda query, *a, **kw: cached.get(query["_id"])
+        )
+
+        with patch("nearby.get_ura_data", return_value=(txns, [])), \
+             patch("nearby.get_mongo_db", return_value=db), \
+             patch("nearby.get_onemap_token", return_value="tok"), \
+             patch("nearby._geocode", side_effect=AssertionError("must not geocode")):
+            result = nearby.nearby_for_project("THE SUMMIT")
+
+        self.assertEqual([r["project"] for r in result["results"]], ["NEIGHBOUR"])
+        self.assertLess(result["results"][0]["distance_m"], 600)
+
+    def test_falls_back_to_geocode_without_ura_xy(self):
+        """The ~12% of projects URA gives no position for still use OneMap."""
+        from unittest.mock import patch
+        import nearby
+
+        with patch("nearby.get_ura_data", return_value=(self.TXNS, [])), \
+             patch("nearby.get_mongo_db", return_value=None), \
+             patch("nearby.get_onemap_token", return_value="tok"), \
+             patch("nearby._geocode",
+                   side_effect=lambda n, s, t: self.COORDS.get(n.strip().upper())):
+            result = nearby.nearby_for_project("ALPHA")
+
+        self.assertEqual([r["project"] for r in result["results"]], ["BETA"])
 
 
 class TestPropertyGuruLinks(unittest.TestCase):
