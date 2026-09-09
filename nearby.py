@@ -1,9 +1,18 @@
 """Nearby-properties search: private developments within a radius of a project.
 
-URA transaction records carry no coordinates, so we geocode project addresses
-via OneMap (free, no Google cost) and cache the result permanently in the Mongo
-`project_coords` collection (same survive-forever idea as `unit_counts`). When
-Mongo is unavailable we still geocode live — we just don't persist.
+Coordinates come from two sources, in strict order of trust:
+
+1. **URA's own surveyed position** — `x`/`y` SVY21 grid values carried on ~88%
+   of project-dicts, converted by `utils.svy21_to_wgs84`. Exact, free, offline.
+2. **OneMap geocoding** — only for the ~12% of projects URA gives no position
+   for. Cached permanently in the Mongo `project_coords` collection (same
+   survive-forever idea as `unit_counts`); when Mongo is unavailable we still
+   geocode live, we just don't persist.
+
+The order matters: OneMap is searched by *project name*, and generic names have
+namesakes across the island. Geocoding "THE SUMMIT" (Upper East Coast Road,
+D16) used to return a western building 22 km away, silently corrupting every
+neighbour list computed from it. URA's x/y removes that whole class of error.
 
 Candidates are bounded to the origin's **district** (read straight from URA's
 `district` field) and capped by transaction volume, to keep the first (cold)
@@ -15,7 +24,7 @@ only IO entry point.
 
 import logging
 
-from utils import haversine_m, get_mongo_db, get_onemap_token
+from utils import haversine_m, get_mongo_db, get_onemap_token, svy21_to_wgs84
 from ura import get_ura_data
 from district_search import _normalize_district
 from maps import search_onemap
@@ -25,6 +34,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_RADIUS_M = 1000
 DEFAULT_LIMIT = 10
 COORDS_COLLECTION = "project_coords"
+# How a cached coordinate was obtained. URA's surveyed position is exact; a
+# OneMap name-geocode is a guess that can land on a namesake building, so the
+# repair pass in scripts/build_project_coords.py only ever overwrites the latter.
+SOURCE_URA = "ura"
+SOURCE_ONEMAP = "onemap"
 LANDED_TYPES = ("detached", "terrace", "bungalow")  # matches district_search
 
 
@@ -39,6 +53,16 @@ def find_origin(transactions: list, name: str) -> dict | None:
         if (pd.get("project") or "").strip().upper() == target:
             return pd
     return None
+
+
+def ura_coords(record: dict) -> tuple[float, float] | None:
+    """(lat, lng) from a URA project-dict's surveyed SVY21 `x`/`y`, if present.
+
+    Authoritative — prefer this over any name-based geocode.
+    """
+    if not record:
+        return None
+    return svy21_to_wgs84(record.get("x"), record.get("y"))
 
 
 def project_district(record: dict) -> int | None:
@@ -56,7 +80,9 @@ def project_district(record: dict) -> int | None:
 def candidate_projects(transactions: list, district: int) -> list[dict]:
     """Non-landed projects in `district`, sorted by transaction volume desc.
 
-    Returns [{"project", "street", "txn_count"}], one row per project name.
+    Returns [{"project", "street", "txn_count", "coords"}], one row per project
+    name. `coords` is URA's surveyed (lat, lng) when the record carries x/y, and
+    None otherwise — callers fall back to the geocode cache for those.
     """
     bucket: dict[str, dict] = {}
     for pd in transactions:
@@ -70,9 +96,14 @@ def candidate_projects(transactions: list, district: int) -> list[dict]:
             if _is_landed(txn.get("propertyType", "")):
                 continue
             row = bucket.setdefault(
-                name.upper(), {"project": name, "street": street, "txn_count": 0}
+                name.upper(),
+                {"project": name, "street": street, "txn_count": 0, "coords": None},
             )
             row["txn_count"] += 1
+            # A project name can span several project-dicts (different streets
+            # or property types); keep the first surveyed position offered.
+            if row["coords"] is None:
+                row["coords"] = ura_coords(pd)
     rows = [r for r in bucket.values() if r["txn_count"] > 0]
     rows.sort(key=lambda r: r["txn_count"], reverse=True)
     return rows
@@ -93,13 +124,15 @@ def _get_cached_coords(db, key: str):
     return None
 
 
-def _cache_coords(db, key: str, name: str, street: str, lat: float, lng: float):
+def _cache_coords(db, key: str, name: str, street: str, lat: float, lng: float,
+                  source: str = SOURCE_ONEMAP):
     if db is None:
         return
     try:
         db[COORDS_COLLECTION].replace_one(
             {"_id": key},
-            {"_id": key, "project": name, "street": street, "lat": lat, "lng": lng},
+            {"_id": key, "project": name, "street": street,
+             "lat": lat, "lng": lng, "source": source},
             upsert=True,
         )
     except Exception as e:
@@ -123,8 +156,15 @@ def _geocode(name: str, street: str, token: str):
     return None
 
 
-def _resolve_coords(db, token, key, name, street):
-    """Cache-first coords: read Mongo, else geocode live and (if possible) persist."""
+def _resolve_coords(db, token, key, name, street, ura=None):
+    """Best available coords for one project, in order of trust.
+
+    `ura` — URA's surveyed position — short-circuits everything and needs no IO
+    at all. Otherwise fall back to the Mongo geocode cache, then to a live
+    OneMap lookup (persisted when Mongo is available).
+    """
+    if ura is not None:
+        return ura
     coords = _get_cached_coords(db, key)
     if coords is not None:
         return coords
@@ -158,7 +198,8 @@ def nearby_for_project(name: str, radius_m: int = DEFAULT_RADIUS_M,
     origin_key = (origin.get("project") or "").strip().upper()
 
     origin_coords = _resolve_coords(
-        db, token, origin_key, origin.get("project", ""), origin.get("street", "")
+        db, token, origin_key, origin.get("project", ""), origin.get("street", ""),
+        ura=ura_coords(origin),
     )
     if origin_coords is None:
         return {"error": "Could not pinpoint this property on the map."}
@@ -170,16 +211,15 @@ def nearby_for_project(name: str, radius_m: int = DEFAULT_RADIUS_M,
         if key == origin_key:
             continue  # exclude the origin itself
 
-        # Cache-first: most coords are pre-warmed (scripts/build_project_coords.py)
-        # or filled by earlier searches, so we rarely geocode live here. We never
+        # URA's surveyed position first (free, exact, ~88% of projects); then the
+        # pre-warmed geocode cache (scripts/build_project_coords.py) or entries
+        # filled by earlier searches, so we rarely geocode live here. We never
         # cap by transaction volume — proximity is uncorrelated with volume, and a
         # close but low-volume neighbour must not be dropped (cf. Kensington Park
         # Condominium 209 m from The Garden Residences in dense District 19).
-        coords = _get_cached_coords(db, key)
-        if coords is None:
-            coords = _geocode(cand["project"], cand["street"], token)
-            if coords is not None:
-                _cache_coords(db, key, cand["project"], cand["street"], *coords)
+        coords = _resolve_coords(
+            db, token, key, cand["project"], cand["street"], ura=cand.get("coords")
+        )
         if coords is None:
             continue
 
