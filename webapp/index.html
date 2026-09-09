@@ -12,13 +12,14 @@
     <aside id="sidebar">
       <h1>🏙️ SG Property Map</h1>
       <form id="search-form" autocomplete="off">
-        <input id="search-input" type="text" placeholder="Development name, e.g. Parc Esta" required>
+        <input id="search-input" type="text" placeholder="Development name or 6-digit postal code" required>
         <button type="submit">Search</button>
       </form>
       <div id="recent"></div>
       <div id="status" hidden></div>
       <div id="results" hidden></div>
     </aside>
+    <button id="drawer-toggle" type="button" aria-label="Collapse panel" aria-expanded="true">◀</button>
     <main id="map-wrap">
       <div id="map"></div>
       <div id="map-loading" hidden>Loading amenities…</div>
@@ -31,6 +32,7 @@
     </main>
   </div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="map.js"></script>
 </body>
 </html>

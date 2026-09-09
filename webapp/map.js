@@ -1,12 +1,17 @@
-/* Single-property map view (Phase 1).
+/* Single-property map view.
  *
  * Flow: /api/property answers fast (URA cache + OneMap pin) → render panel +
  * property marker immediately, then /api/amenities (slow: Google Places /
- * Distance Matrix) fills the amenity pins. The street — never the project
- * name — is what gets geocoded server-side, same convention as the bot.
+ * Distance Matrix) fills the amenity pins and /api/trend fills the price-trend
+ * chart. Name searches geocode the street server-side (bot convention); a
+ * 6-digit postal code resolves to the exact address coordinate, which is also
+ * fed to /api/amenities so pin and distances agree.
  */
 
 const SG_CENTER = [1.3521, 103.8198];
+const BRAND = "#2563eb";      // single-series hue for both charts
+const INK_MUTED = "#5b6472";  // tick/label ink — text never wears series color
+const GRID = "#eef0f3";
 
 const map = L.map("map").setView(SG_CENTER, 12);
 L.tileLayer("https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png", {
@@ -34,11 +39,16 @@ const resultsBox = el("results");
 
 let markerLayer = L.layerGroup().addTo(map);
 let propertyMarker = null;
-let amenityAbort = null; // cancels a stale amenity fetch when a new search starts
+let amenityAbort = null;   // cancels stale amenity fetches when a new search starts
+let trendAbort = null;
+let bandsChart = null;     // Chart.js instances — destroyed on each new search
+let trendChart = null;
 
 const fmtMoney = (n) => (n == null ? "–" : "S$" + Math.round(n).toLocaleString("en-SG"));
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const shortBand = (label) =>
+  label.replace(" sqft", "").replace("<= ", "≤").replace(" – ", "–").replace("> ", ">");
 
 function setStatus(text, isError = false) {
   statusBox.hidden = !text;
@@ -46,13 +56,40 @@ function setStatus(text, isError = false) {
   statusBox.classList.toggle("error", isError);
 }
 
+function destroyCharts() {
+  if (bandsChart) { bandsChart.destroy(); bandsChart = null; }
+  if (trendChart) { trendChart.destroy(); trendChart = null; }
+}
+
 function resetMap() {
   if (amenityAbort) amenityAbort.abort();
+  if (trendAbort) trendAbort.abort();
   markerLayer.clearLayers();
   propertyMarker = null;
   el("legend").hidden = true;
   el("map-loading").hidden = true;
 }
+
+// ── Drawer toggle ────────────────────────────────────────────────────────────
+
+const appBox = el("app");
+const drawerBtn = el("drawer-toggle");
+const isMobile = () => window.matchMedia("(max-width: 760px)").matches;
+
+function setDrawerGlyph() {
+  const closed = appBox.classList.contains("drawer-closed");
+  drawerBtn.textContent = isMobile() ? (closed ? "▼" : "▲") : (closed ? "▶" : "◀");
+  drawerBtn.setAttribute("aria-expanded", String(!closed));
+  drawerBtn.setAttribute("aria-label", closed ? "Open panel" : "Collapse panel");
+}
+
+drawerBtn.addEventListener("click", () => {
+  appBox.classList.toggle("drawer-closed");
+  setDrawerGlyph();
+  map.invalidateSize();  // the map pane just changed size
+});
+window.addEventListener("resize", setDrawerGlyph);
+setDrawerGlyph();
 
 // ── Recent searches ──────────────────────────────────────────────────────────
 
@@ -85,8 +122,9 @@ async function runSearch(q) {
   if (!q) return;
   input.value = q;
   searchBtn.disabled = true;
-  setStatus("Searching…");
+  setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
   resultsBox.hidden = true;
+  destroyCharts();
   resetMap();
 
   try {
@@ -107,6 +145,7 @@ async function runSearch(q) {
     renderProperty(data);
     placePropertyPin(data);
     loadAmenities(data);
+    loadTrend(data);
   } catch (err) {
     setStatus("Search failed — is the API running? " + err.message, true);
   } finally {
@@ -135,6 +174,7 @@ function renderCandidates(candidates) {
 
 function renderProperty(d) {
   const metaBits = [];
+  if (d.postal) metaBits.push(`Postal ${esc(d.postal)}`);
   if (d.total_units) metaBits.push(`${d.total_units} units`);
   if (d.expected_top) metaBits.push(`Expected TOP: ${esc(d.expected_top)}`);
   if (d.under_construction) metaBits.push("Under construction");
@@ -144,19 +184,22 @@ function renderProperty(d) {
   let html = `<h2>${esc(d.development)}</h2><p class="street">${esc(d.street)}</p>`;
   if (metaBits.length) html += `<p class="meta">${metaBits.join("<br>")}</p>`;
 
-  html += "<h3>Latest transactions by size</h3>";
-  html +=
-    "<table><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th class='num'>12-mo avg PSF</th><th>Date</th></tr>";
+  // PSF by size band — chart first, full transaction table behind a toggle
+  html += "<h3>PSF by size band</h3>";
+  html += `<div class="chart-box"><canvas id="bands-chart" height="${40 + Object.keys(d.bands || {}).length * 34}"></canvas></div>`;
+  html += "<details><summary>All transaction details</summary>";
+  html += "<table><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
   for (const [band, txn] of Object.entries(d.bands || {})) {
-    const avg = (d.band_avg_psf || {})[band];
     html +=
-      `<tr><td>${esc(band)}<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft</span></td>` +
+      `<tr><td>${esc(band)}<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft · ${esc(txn.type_of_sale)}</span></td>` +
       `<td class="num">${fmtMoney(txn.price)}</td>` +
       `<td class="num">${txn.psf ? fmtMoney(txn.psf) : "–"}</td>` +
-      `<td class="num">${avg ? fmtMoney(avg.avg_psf) + `<br><span class="popup-line">${avg.count} txns</span>` : "–"}</td>` +
       `<td>${esc(txn.contract_date_display)}</td></tr>`;
   }
-  html += "</table>";
+  html += "</table></details>";
+
+  // Price trend — filled in async by loadTrend()
+  html += "<h3>Price trend</h3><div id='trend-area'><p class='note'>Loading trend…</p></div>";
 
   html += "<h3>Rental &amp; yield (last 12 months)</h3>";
   const rental = d.rental || {};
@@ -185,6 +228,146 @@ function renderProperty(d) {
 
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;
+  renderBandsChart(d);
+}
+
+// ── Charts (single series, one hue; text stays in ink tokens) ───────────────
+
+function renderBandsChart(d) {
+  const entries = Object.entries(d.bands || {});
+  if (!entries.length) return;
+
+  // 12-mo average PSF where it exists, latest transaction PSF otherwise —
+  // the tooltip says which one each bar is.
+  const rows = entries.map(([band, txn]) => {
+    const avg = (d.band_avg_psf || {})[band];
+    return {
+      band,
+      psf: avg ? avg.avg_psf : txn.psf,
+      isAvg: Boolean(avg),
+      count: avg ? avg.count : null,
+      txn,
+    };
+  }).filter((r) => r.psf != null);
+  if (!rows.length) return;
+
+  bandsChart = new Chart(el("bands-chart"), {
+    type: "bar",
+    data: {
+      labels: rows.map((r) => shortBand(r.band)),
+      datasets: [{
+        data: rows.map((r) => r.psf),
+        backgroundColor: BRAND,
+        barThickness: 16,
+        borderRadius: 4,
+        borderSkipped: "start", // rounded data-end only, flat at the baseline
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }, // single series — the section title names it
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const r = rows[ctx.dataIndex];
+              const lines = [
+                r.isAvg
+                  ? `12-mo avg: ${fmtMoney(r.psf)} psf (${r.count} txns)`
+                  : `Latest txn PSF: ${fmtMoney(r.psf)} (no 12-mo data)`,
+                `Latest: ${fmtMoney(r.txn.price)} · ${r.txn.area_sqft} sqft`,
+                `${r.txn.floor_range} flr · ${r.txn.contract_date_display}`,
+              ];
+              return lines;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          beginAtZero: true, // bars encode magnitude by length
+          grid: { color: GRID },
+          ticks: { color: INK_MUTED, callback: (v) => "$" + v.toLocaleString("en-SG") },
+        },
+        y: {
+          grid: { display: false },
+          ticks: { color: INK_MUTED },
+        },
+      },
+    },
+  });
+}
+
+async function loadTrend(d) {
+  trendAbort = new AbortController();
+  const { signal } = trendAbort;
+  let t;
+  try {
+    const r = await fetch("/api/trend?q=" + encodeURIComponent(d.development), { signal });
+    t = await r.json();
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    t = { error: "Trend failed to load: " + err.message };
+  }
+  const area = el("trend-area");
+  if (!area) return; // panel was replaced by a newer search
+
+  const periods = t.periods || [];
+  if (t.error || t.ambiguous || periods.length < 2) {
+    area.innerHTML = `<p class='note'>${esc(t.error || "Not enough resale history to chart a trend.")}</p>`;
+    return;
+  }
+
+  let headline = `Avg resale PSF, ${esc(t.span_label || "over time")} · ${t.total_txns} txns`;
+  if (t.pct_change != null) {
+    const cls = t.pct_change >= 0 ? "delta-up" : "delta-down";
+    const arrow = t.pct_change >= 0 ? "▲" : "▼";
+    headline = `<span class="${cls}">${arrow} ${t.pct_change > 0 ? "+" : ""}${t.pct_change}%</span> ${headline}`;
+  }
+  area.innerHTML =
+    `<p class="trend-headline">${headline}</p>` +
+    `<div class="chart-box"><canvas id="trend-chart" height="180"></canvas></div>`;
+
+  trendChart = new Chart(el("trend-chart"), {
+    type: "line",
+    data: {
+      labels: periods.map((p) => p.label),
+      datasets: [{
+        data: periods.map((p) => p.avg_psf),
+        borderColor: BRAND,
+        backgroundColor: BRAND,
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        tension: 0.15,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false }, // crosshair-style hover
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const p = periods[ctx.dataIndex];
+              return `${fmtMoney(p.avg_psf)} psf · ${p.count} txns`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: INK_MUTED, maxRotation: 0, autoSkip: true } },
+        y: {
+          grid: { color: GRID },
+          ticks: { color: INK_MUTED, callback: (v) => "$" + v.toLocaleString("en-SG") },
+        },
+      },
+    },
+  });
 }
 
 // ── Map pins ─────────────────────────────────────────────────────────────────
@@ -203,7 +386,13 @@ async function loadAmenities(d) {
   amenityAbort = new AbortController();
   const { signal } = amenityAbort;
   try {
-    const r = await fetch("/api/amenities?street=" + encodeURIComponent(d.street), { signal });
+    // Postal searches carry the exact address coordinate — pass it so
+    // distances are measured from the real address (bot convention).
+    let url = "/api/amenities?street=" + encodeURIComponent(d.street);
+    if (d.exact_coords && d.lat != null && d.lng != null) {
+      url += `&lat=${d.lat}&lng=${d.lng}`;
+    }
+    const r = await fetch(url, { signal });
     const a = await r.json();
     if (signal.aborted) return;
     el("map-loading").hidden = true;
@@ -213,9 +402,10 @@ async function loadAmenities(d) {
       return;
     }
 
-    // Google's street geocode is the origin the distances were measured from —
-    // snap the property pin to it if it drifted from the quick OneMap pin.
-    if (a.lat != null && a.lng != null) {
+    // Name searches: Google's street geocode is the origin the distances were
+    // measured from — snap the quick OneMap pin to it. Postal searches already
+    // pinned the exact coordinate; leave it.
+    if (!d.exact_coords && a.lat != null && a.lng != null) {
       if (propertyMarker) propertyMarker.setLatLng([a.lat, a.lng]);
       else placePropertyPin({ ...d, lat: a.lat, lng: a.lng });
     }
