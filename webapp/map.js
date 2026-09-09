@@ -34,6 +34,10 @@ const AMENITY_STYLES = {
   supermarkets: { color: "#16a34a", label: "Supermarket" },
 };
 
+// Primary-school admission priority is drawn at 1 km straight-line, which is
+// the question a school pin actually raises: is this property inside it?
+const SCHOOL_RADIUS_M = 1000;
+
 const el = (id) => document.getElementById(id);
 const form = el("search-form");
 const input = el("search-input");
@@ -43,6 +47,7 @@ const resultsBox = el("results");
 
 let markerLayer = L.layerGroup().addTo(map);
 let propertyMarker = null;
+let schoolRing = null;     // {circle, key} — one 1 km ring at a time
 let amenityAbort = null;   // cancels stale amenity fetches when a new search starts
 let trendAbort = null;
 let bandsChart = null;     // Chart.js instances — destroyed on each new search
@@ -69,6 +74,7 @@ function resetMap() {
   if (amenityAbort) amenityAbort.abort();
   if (trendAbort) trendAbort.abort();
   markerLayer.clearLayers();
+  clearSchoolRing();
   propertyMarker = null;
   el("legend").hidden = true;
   el("map-loading").hidden = true;
@@ -375,6 +381,61 @@ async function loadTrend(d) {
   });
 }
 
+// ── Camera ───────────────────────────────────────────────────────────────────
+//
+// The camera settles ONCE, on the property. Amenities land seconds later, and
+// re-framing to their bounds at that point is what made the map visibly jump
+// under the user. Instead the property keeps the centre it was given and the
+// view only ever widens — and only when a pin genuinely sits outside it.
+
+function ensureVisible(center, points) {
+  if (!points.length) return;
+  const view = map.getBounds();
+  if (points.every((p) => view.contains(p))) return;   // already framed — don't move
+
+  // Mirror every stray point through the property so the fit stays centred on
+  // it: the pin holds its place and only the zoom changes.
+  const box = L.latLngBounds([center, center]);
+  for (const p of points) {
+    const ll = L.latLng(p);
+    box.extend(ll);
+    box.extend([2 * center.lat - ll.lat, 2 * center.lng - ll.lng]);
+  }
+  map.fitBounds(box, { padding: [40, 40] });
+}
+
+// ── School catchment ring ────────────────────────────────────────────────────
+
+function clearSchoolRing() {
+  if (schoolRing) {
+    map.removeLayer(schoolRing.circle);
+    schoolRing = null;
+  }
+}
+
+// Click a school pin to ring its 1 km radius; click the same pin again to drop
+// it. Only one ring at a time — overlapping rings read as a blur, not a
+// catchment. `interactive: false` keeps the ring from swallowing clicks meant
+// for the pins under it, and drawing it never moves the camera (see above).
+function toggleSchoolRing(school) {
+  const key = `${school.name}|${school.lat}|${school.lng}`;
+  if (schoolRing && schoolRing.key === key) {
+    clearSchoolRing();
+    return;
+  }
+  clearSchoolRing();
+  const circle = L.circle([school.lat, school.lng], {
+    radius: SCHOOL_RADIUS_M,
+    interactive: false,
+    color: AMENITY_STYLES.schools.color,
+    weight: 2,
+    dashArray: "6 5",
+    fillColor: AMENITY_STYLES.schools.color,
+    fillOpacity: 0.07,
+  }).addTo(map);
+  schoolRing = { circle, key };
+}
+
 // ── Map pins ─────────────────────────────────────────────────────────────────
 
 function placePropertyPin(d) {
@@ -412,12 +473,15 @@ async function loadAmenities(d) {
     // the pin to it. An exact pin (URA x/y or a postal address) was already
     // sent to /api/amenities as the origin — leave it where it is.
     if (!d.exact_coords && a.lat != null && a.lng != null) {
-      if (propertyMarker) propertyMarker.setLatLng([a.lat, a.lng]);
-      else placePropertyPin({ ...d, lat: a.lat, lng: a.lng });
+      if (propertyMarker) {
+        propertyMarker.setLatLng([a.lat, a.lng]);
+        map.setView([a.lat, a.lng], map.getZoom());  // follow the corrected pin
+      } else {
+        placePropertyPin({ ...d, lat: a.lat, lng: a.lng });
+      }
     }
 
     const bounds = [];
-    if (propertyMarker) bounds.push(propertyMarker.getLatLng());
 
     for (const [key, style] of Object.entries(AMENITY_STYLES)) {
       for (const item of a[key] || []) {
@@ -426,9 +490,21 @@ async function loadAmenities(d) {
         if (item.distance) lines.push(`<div class="popup-line">🚶 ${esc(item.distance)} · ${esc(item.duration)}</div>`);
         if (item.transit_duration)
           lines.push(`<div class="popup-line">🚌 ${esc(item.transit_duration)} · ${esc(item.transit_distance)}</div>`);
+        // `dist` is the straight-line metres the 1 km priority rule is measured
+        // in — the walking distance above is always longer and can't answer it.
+        if (key === "schools" && item.dist != null) {
+          const m = Math.round(item.dist);
+          const inside = m <= SCHOOL_RADIUS_M;
+          lines.push(
+            `<div class="popup-line">📏 ${m.toLocaleString("en-SG")} m straight-line · ` +
+            `<span class="${inside ? "in-ring" : "out-ring"}">` +
+            `${inside ? "inside" : "outside"} 1 km</span></div>`,
+            `<div class="popup-line"><span class="muted">Click the dot to toggle its 1 km ring</span></div>`
+          );
+        }
         if (item.maps_link)
           lines.push(`<div class="popup-line"><a href="${esc(item.maps_link)}" target="_blank">Directions ↗</a></div>`);
-        L.circleMarker([item.dest_lat, item.dest_lng], {
+        const marker = L.circleMarker([item.dest_lat, item.dest_lng], {
           radius: 7,
           color: "#fff",
           weight: 1.5,
@@ -437,11 +513,19 @@ async function loadAmenities(d) {
         })
           .addTo(markerLayer)
           .bindPopup(lines.join(""));
+        if (key === "schools") {
+          marker.on("click", () =>
+            toggleSchoolRing({ name: item.name, lat: item.dest_lat, lng: item.dest_lng })
+          );
+        }
         bounds.push([item.dest_lat, item.dest_lng]);
       }
     }
 
-    if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
+    // Widen the view only for pins that fell outside it; the property keeps
+    // the centre it was given when the pin dropped, so the map never jumps.
+    if (propertyMarker) ensureVisible(propertyMarker.getLatLng(), bounds);
+    else if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
     el("legend").hidden = false;
   } catch (err) {
     if (err.name === "AbortError") return;
