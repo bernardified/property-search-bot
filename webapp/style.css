@@ -72,6 +72,31 @@ body {
 }
 #search-form button:disabled { background: #9db5e8; cursor: wait; }
 
+#explore-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  background: #fff;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #1e2430;
+}
+#explore-btn:hover { background: #f0f4fb; }
+#explore-btn:disabled { color: #9aa3b2; cursor: wait; }
+
+#attribution {
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px solid #e3e6ea;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: #7a8494;
+}
+#attribution a { color: #7a8494; }
+
 #recent { margin-top: 10px; }
 #recent .chip {
   display: inline-block;

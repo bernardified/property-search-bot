@@ -202,5 +202,65 @@ class TestPostalSearch(unittest.TestCase):
         self.assertNotIn("exact_coords", data)
 
 
+class TestDevelopments(unittest.TestCase):
+
+    def test_svy21_conversion_roundtrips_projection_origin(self):
+        from utils import svy21_to_wgs84
+        lat, lng = svy21_to_wgs84(28001.642, 38744.572)
+        self.assertAlmostEqual(lat, 1.366666, places=5)
+        self.assertAlmostEqual(lng, 103.833333, places=5)
+
+    def _projects(self):
+        return [
+            {"project": "ALPHA", "street": "A ST", "x": "28001.642", "y": "38744.572",
+             "transaction": [
+                 {"propertyType": "Condominium", "district": "20", "contractDate": "0826",
+                  "area": "100", "price": "2000000"},
+                 {"propertyType": "Condominium", "district": "20", "contractDate": "0120",
+                  "area": "100", "price": "1000000"},  # outside the 12-mo window
+             ]},
+            {"project": "BRAVO", "street": "B ST",  # no x/y → fallback coords
+             "transaction": [{"propertyType": "Apartment", "district": "15",
+                              "contractDate": "0826", "area": "50", "price": "1000000"}]},
+            {"project": "LANDED ONLY", "street": "C ST", "x": "30000", "y": "30000",
+             "transaction": [{"propertyType": "Terrace House", "district": "10"}]},
+            {"project": "NO COORDS", "street": "D ST",
+             "transaction": [{"propertyType": "Condominium", "district": "09",
+                              "contractDate": "0826", "area": "80", "price": "1600000"}]},
+        ]
+
+    def test_build_developments(self):
+        from datetime import datetime
+        from api import build_developments
+        devs = build_developments(self._projects(), {"BRAVO": {"lat": 1.30, "lng": 103.90}},
+                                  now=datetime(2026, 9, 1))
+        names = [d["project"] for d in devs]
+        self.assertEqual(names, ["ALPHA", "BRAVO"])  # landed + coordless skipped
+
+        alpha = devs[0]
+        self.assertAlmostEqual(alpha["lat"], 1.366666, places=5)  # URA x/y wins
+        self.assertEqual(alpha["txns_12mo"], 1)  # old txn excluded from the window
+        self.assertEqual(alpha["avg_psf"], 1858)  # 2,000,000 / (100 sqm → sqft)
+        self.assertEqual(alpha["district"], "20")
+
+        bravo = devs[1]
+        self.assertEqual((bravo["lat"], bravo["lng"]), (1.30, 103.90))  # fallback
+
+    def test_developments_endpoint_memoizes_per_cache_object(self):
+        import api
+        projects = self._projects()
+        api._dev_memo["ref"] = None
+        api._dev_memo["payload"] = None
+        with patch("api.get_ura_data", return_value=(projects, [])), \
+             patch("api._load_fallback_coords", return_value={}) as mock_fb:
+            first = client.get("/api/developments").json()
+            second = client.get("/api/developments").json()
+        self.assertEqual(first["count"], 1)  # only ALPHA has usable coords
+        self.assertEqual(first, second)
+        mock_fb.assert_called_once()  # second call served from the memo
+        api._dev_memo["ref"] = None
+        api._dev_memo["payload"] = None
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

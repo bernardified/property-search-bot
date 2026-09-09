@@ -20,7 +20,9 @@ L.tileLayer("https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png", {
   attribution:
     '<img src="https://www.onemap.gov.sg/web-assets/images/logo/om_logo.png" style="height:16px;width:16px;vertical-align:middle;"> ' +
     '<a href="https://www.onemap.gov.sg/" target="_blank">OneMap</a> &copy; contributors &verbar; ' +
-    '<a href="https://www.sla.gov.sg/" target="_blank">Singapore Land Authority</a>',
+    '<a href="https://www.sla.gov.sg/" target="_blank">Singapore Land Authority</a> &verbar; ' +
+    'Property data &copy; <a href="https://www.ura.gov.sg/" target="_blank">URA</a> ' +
+    '(<a href="https://data.gov.sg/open-data-licence" target="_blank">SODL v1.0</a>)',
 }).addTo(map);
 
 const AMENITY_STYLES = {
@@ -120,6 +122,7 @@ form.addEventListener("submit", (e) => {
 
 async function runSearch(q) {
   if (!q) return;
+  if (exploreOn) exitExplore();
   input.value = q;
   searchBtn.disabled = true;
   setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
@@ -443,5 +446,84 @@ async function loadAmenities(d) {
     setStatus("Amenities failed to load: " + err.message, true);
   }
 }
+
+// ── Explore mode: every development, clustered ──────────────────────────────
+
+const exploreBtn = el("explore-btn");
+let exploreLayer = null;  // built once from /api/developments, then reused
+let exploreCount = 0;
+let exploreOn = false;
+
+exploreBtn.addEventListener("click", () => (exploreOn ? exitExplore(true) : enterExplore()));
+
+async function enterExplore() {
+  exploreBtn.disabled = true;
+  setStatus("Loading all developments…");
+  try {
+    if (!exploreLayer) {
+      const r = await fetch("/api/developments");
+      const d = await r.json();
+      const devs = d.developments || [];
+      exploreCount = devs.length;
+      exploreLayer = L.markerClusterGroup({
+        maxClusterRadius: 60,
+        showCoverageOnHover: false,
+        spiderfyOnMaxZoom: true,
+      });
+      for (const dev of devs) {
+        const psfLine = dev.avg_psf
+          ? `12-mo avg: ${fmtMoney(dev.avg_psf)} psf · ${dev.txns_12mo} txns`
+          : "No transactions in the last 12 months";
+        exploreLayer.addLayer(
+          L.circleMarker([dev.lat, dev.lng], {
+            radius: 6,
+            color: "#fff",
+            weight: 1.5,
+            fillColor: BRAND,
+            fillOpacity: 0.9,
+          }).bindPopup(
+            `<div class="popup-name">${esc(dev.project)}</div>` +
+            `<div class="popup-line">${esc(dev.street)} (D${esc(dev.district)})</div>` +
+            `<div class="popup-line">${psfLine}</div>` +
+            `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(dev.project)}">View details →</a></div>`
+          )
+        );
+      }
+    }
+    // Clear any single-property state, then show the explore layer.
+    destroyCharts();
+    resetMap();
+    resultsBox.hidden = true;
+    map.addLayer(exploreLayer);
+    map.setView(SG_CENTER, 12);
+    exploreOn = true;
+    exploreBtn.textContent = "✕ Exit explore";
+    setStatus(`${exploreCount} developments plotted — click a dot (or cluster) for details.`);
+  } catch (err) {
+    setStatus("Explore failed to load: " + err.message, true);
+  } finally {
+    exploreBtn.disabled = false;
+  }
+}
+
+function exitExplore(clearStatus = false) {
+  if (exploreLayer) map.removeLayer(exploreLayer);
+  exploreOn = false;
+  exploreBtn.textContent = "🗺 Explore all developments";
+  if (clearStatus) setStatus("");
+}
+
+// "View details →" inside explore popups (popup DOM is created by Leaflet,
+// so delegate from the document).
+document.addEventListener("click", (e) => {
+  const link = e.target.closest(".popup-view");
+  if (!link) return;
+  e.preventDefault();
+  runSearch(link.dataset.name);
+});
+
+el("access-date").textContent = new Date().toLocaleDateString("en-SG", {
+  day: "numeric", month: "short", year: "numeric",
+});
 
 loadRecent();

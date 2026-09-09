@@ -114,6 +114,88 @@ def sqm_to_sqft(sqm: float) -> float:
     return sqm * 10.7639
 
 
+def svy21_to_wgs84(easting: float, northing: float) -> tuple[float, float]:
+    """Convert SVY21 (Singapore's national plane coordinate system — URA's
+    x/y fields) to WGS84 (lat, lng).
+
+    Inverse Transverse Mercator with the published SVY21 parameters
+    (origin 1°22'N 103°50'E, false E/N 28001.642/38744.572, k=1, WGS84
+    ellipsoid). Series-based, accurate to well under a metre within Singapore.
+    """
+    import math
+
+    a = 6378137.0
+    f = 1 / 298.257223563
+    o_lat, o_lon = 1.366666, 103.833333          # degrees
+    o_n, o_e = 38744.572, 28001.642
+    k = 1.0
+
+    b = a * (1 - f)
+    e2 = 2 * f - f * f
+    e4, e6 = e2 * e2, e2 * e2 * e2
+    a0 = 1 - e2 / 4 - 3 * e4 / 64 - 5 * e6 / 256
+    a2 = (3 / 8) * (e2 + e4 / 4 + 15 * e6 / 128)
+    a4 = (15 / 256) * (e4 + 3 * e6 / 4)
+    a6 = 35 * e6 / 3072
+
+    def merid_arc(lat_deg):
+        lr = math.radians(lat_deg)
+        return a * (a0 * lr - a2 * math.sin(2 * lr) + a4 * math.sin(4 * lr) - a6 * math.sin(6 * lr))
+
+    n_ratio = (a - b) / (a + b)
+    n2, n3, n4 = n_ratio ** 2, n_ratio ** 3, n_ratio ** 4
+    g = a * (1 - n_ratio) * (1 - n2) * (1 + 9 * n2 / 4 + 225 * n4 / 64) * (math.pi / 180)
+
+    m_prime = merid_arc(o_lat) + (northing - o_n) / k
+    sigma = (m_prime * math.pi) / (180.0 * g)
+    lat_prime = (
+        sigma
+        + (3 * n_ratio / 2 - 27 * n3 / 32) * math.sin(2 * sigma)
+        + (21 * n2 / 16 - 55 * n4 / 32) * math.sin(4 * sigma)
+        + (151 * n3 / 96) * math.sin(6 * sigma)
+        + (1097 * n4 / 512) * math.sin(8 * sigma)
+    )
+
+    sin2 = math.sin(lat_prime) ** 2
+    rho = (a * (1 - e2)) / (1 - e2 * sin2) ** 1.5
+    v = a / math.sqrt(1 - e2 * sin2)
+    psi = v / rho
+    psi2, psi3, psi4 = psi ** 2, psi ** 3, psi ** 4
+    t = math.tan(lat_prime)
+    t2, t4, t6 = t ** 2, t ** 4, t ** 6
+
+    e_prime = easting - o_e
+    x = e_prime / (k * v)
+    x2, x3 = x * x, x ** 3
+    x5, x7 = x ** 5, x ** 7
+
+    lat_factor = t / (k * rho)
+    lat = (
+        lat_prime
+        - lat_factor * (e_prime * x) / 2
+        + lat_factor * (e_prime * x3) / 24 * (-4 * psi2 + 9 * psi * (1 - t2) + 12 * t2)
+        - lat_factor * (e_prime * x5) / 720 * (
+            8 * psi4 * (11 - 24 * t2)
+            - 12 * psi3 * (21 - 71 * t2)
+            + 15 * psi2 * (15 - 98 * t2 + 15 * t4)
+            + 180 * psi * (5 * t2 - 3 * t4)
+            + 360 * t4
+        )
+        + lat_factor * (e_prime * x7) / 40320 * (1385 - 3633 * t2 + 4095 * t4 + 1575 * t6)
+    )
+
+    sec = 1.0 / math.cos(lat_prime)
+    lon = (
+        math.radians(o_lon)
+        + sec * x
+        - sec * x3 / 6 * (psi + 2 * t2)
+        + sec * x5 / 120 * (-4 * psi3 * (1 - 6 * t2) + psi2 * (9 - 68 * t2) + 72 * psi * t2 + 24 * t4)
+        - sec * x7 / 5040 * (61 + 662 * t2 + 1320 * t4 + 720 * t6)
+    )
+
+    return math.degrees(lat), math.degrees(lon)
+
+
 def parse_float(value) -> float | None:
     try:
         return float(str(value).replace(",", "").strip())

@@ -23,7 +23,9 @@ domain for a client-facing version.
 
 import re
 import threading
+from datetime import datetime
 
+from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 
@@ -31,8 +33,16 @@ from ura import search_property, price_trend
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from cache.cache_hdb import is_hdb_residential_block
+from cache.cache_ura import get_ura_data
 from storage import get_recent_searches
-from utils import SIZE_BANDS
+from utils import (
+    SIZE_BANDS,
+    get_mongo_db,
+    parse_float,
+    parse_mmyy_date,
+    sqm_to_sqft,
+    svy21_to_wgs84,
+)
 
 _POSTAL_RE = re.compile(r"^\d{6}$")
 
@@ -168,6 +178,94 @@ def api_property(q: str = Query(..., min_length=1)):
         coords = None
 
     return build_property_payload(ura_result, rental_result, coords)
+
+
+def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> list:
+    """One dot per non-landed development for the explore map (pure — tested).
+
+    Coordinates come from URA's own x/y (SVY21 → WGS84) — authoritative and
+    present on ~88% of projects. `fallback_coords` ({NAME: {lat, lng}}, the
+    project_coords collection) covers the rest; a project with neither is
+    skipped. Do NOT prefer the OneMap fallback over x/y: name-geocoding put
+    same-named buildings 20km off (e.g. THE SUMMIT), while x/y matched OneMap
+    to 0m median across 2,376 projects.
+    """
+    now = now or datetime.now()
+    cutoff = now.replace(day=1) - relativedelta(months=12)
+    landed = ("detached", "terrace", "bungalow")
+    out = []
+
+    for pd in project_dicts:
+        name = (pd.get("project") or "").strip()
+        if not name or name.upper() == "LANDED HOUSING DEVELOPMENT":
+            continue
+        txns = pd.get("transaction", [])
+        strata = [t for t in txns
+                  if not any(w in t.get("propertyType", "").lower() for w in landed)]
+        if not strata:
+            continue
+
+        x, y = parse_float(pd.get("x")), parse_float(pd.get("y"))
+        if x and y:
+            lat, lng = svy21_to_wgs84(x, y)
+        else:
+            fb = fallback_coords.get(name.upper())
+            if not fb:
+                continue
+            lat, lng = fb["lat"], fb["lng"]
+
+        psf_list = []
+        for t in strata:
+            dt = parse_mmyy_date(t.get("contractDate", ""))
+            if not dt or dt < cutoff:
+                continue
+            area = parse_float(t.get("area", 0))
+            price = parse_float(t.get("price", 0))
+            if not area or area <= 0 or not price:
+                continue
+            psf_list.append(price / sqm_to_sqft(area))
+
+        out.append({
+            "project": name,
+            "street": pd.get("street", ""),
+            "district": strata[0].get("district", ""),
+            "lat": round(lat, 6),
+            "lng": round(lng, 6),
+            "avg_psf": round(sum(psf_list) / len(psf_list)) if psf_list else None,
+            "txns_12mo": len(psf_list),
+        })
+
+    out.sort(key=lambda d: d["project"])
+    return out
+
+
+def _load_fallback_coords() -> dict:
+    db = get_mongo_db()
+    if db is None:
+        return {}
+    try:
+        return {d["_id"]: d for d in db["project_coords"].find({"lat": {"$ne": None}})}
+    except Exception:
+        return {}
+
+
+# Memo keyed by the identity of the memoized transactions list from cache_ura —
+# rebuilt only when the URA cache actually refreshes (new list object).
+_dev_memo = {"ref": None, "payload": None}
+
+
+@app.get("/api/developments")
+def api_developments():
+    """Every non-landed development with a coordinate — the explore-map layer.
+    ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo}."""
+    with _search_lock:
+        transactions, _pipeline = get_ura_data()
+    if _dev_memo["ref"] is transactions and _dev_memo["payload"] is not None:
+        return _dev_memo["payload"]
+    devs = build_developments(transactions, _load_fallback_coords())
+    payload = {"developments": devs, "count": len(devs)}
+    _dev_memo["ref"], _dev_memo["payload"] = transactions, payload
+    return payload
 
 
 @app.get("/api/trend")
