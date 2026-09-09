@@ -1,11 +1,13 @@
 /* Single-property map view.
  *
- * Flow: /api/property answers fast (URA cache + OneMap pin) → render panel +
+ * Flow: /api/property answers fast (URA cache + pin) → render panel +
  * property marker immediately, then /api/amenities (slow: Google Places /
  * Distance Matrix) fills the amenity pins and /api/trend fills the price-trend
- * chart. Name searches geocode the street server-side (bot convention); a
- * 6-digit postal code resolves to the exact address coordinate, which is also
- * fed to /api/amenities so pin and distances agree.
+ * chart. The pin is exact (`exact_coords`) whenever the server had a real
+ * coordinate — URA's own x/y for the project, or the resolved postal address —
+ * and it is then fed to /api/amenities so pin and distances agree. Only
+ * projects with no x/y fall back to a street geocode, which gets snapped to
+ * the Google origin the distances were measured from.
  */
 
 const SG_CENTER = [1.3521, 103.8198];
@@ -405,9 +407,10 @@ async function loadAmenities(d) {
       return;
     }
 
-    // Name searches: Google's street geocode is the origin the distances were
-    // measured from — snap the quick OneMap pin to it. Postal searches already
-    // pinned the exact coordinate; leave it.
+    // Street-geocode fallback only (a project with no URA x/y): Google's
+    // street geocode is the origin the distances were measured from, so snap
+    // the pin to it. An exact pin (URA x/y or a postal address) was already
+    // sent to /api/amenities as the origin — leave it where it is.
     if (!d.exact_coords && a.lat != null && a.lng != null) {
       if (propertyMarker) propertyMarker.setLatLng([a.lat, a.lng]);
       else placePropertyPin({ ...d, lat: a.lat, lng: a.lng });
