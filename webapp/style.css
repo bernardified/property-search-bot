@@ -270,6 +270,8 @@ body {
   color: #1e2430;
   font-size: 0.82rem;
 }
+#explore-panel select:disabled { background: #f2f3f5; color: #a0a6b0; cursor: not-allowed; }
+#explore-panel label.disabled { color: #a0a6b0; }
 .check { display: flex !important; align-items: center; gap: 6px; cursor: pointer; }
 .check input { margin: 0; }
 
@@ -331,6 +333,7 @@ body {
   padding-top: 8px;
   border-top: 1px solid #e9ecef;
 }
+#filter-count.empty { color: #b4441f; font-weight: 600; }
 #filter-count { color: #5b6472; font-size: 0.74rem; font-variant-numeric: tabular-nums; }
 #reset-filters {
   padding: 4px 10px;

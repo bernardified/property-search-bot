@@ -589,8 +589,14 @@ function applyFilters() {
   const keep = allDots.filter((d) => matches(d.dev, f));
   clusterLayer.clearLayers();
   clusterLayer.addLayers(keep.map((d) => d.marker));   // bulk add: one reflow
-  el("filter-count").textContent =
-    `${keep.length.toLocaleString("en-SG")} of ${allDots.length.toLocaleString("en-SG")} shown`;
+  // A blank map is never left unexplained — without this, over-narrow filters
+  // look identical to a broken layer. The message sits on the filter row
+  // itself, beside the Reset button: the status box is below the fold here.
+  const total = allDots.length.toLocaleString("en-SG");
+  el("filter-count").textContent = keep.length
+    ? `${keep.length.toLocaleString("en-SG")} of ${total} shown`
+    : `No matches — widen filters, or tap`;
+  el("filter-count").classList.toggle("empty", keep.length === 0);
 }
 
 function renderLegend() {
@@ -622,6 +628,20 @@ function setMetric(name) {
   renderLegend();
 }
 
+// mrt_m comes from the cached station coords; if that cache is empty (no Mongo,
+// no OneMap token) every dot has mrt_m = null and each distance option would
+// match nothing — blanking the map. Offer the filter only when it can work.
+function syncMrtAvailability() {
+  const sel = el("f-mrt");
+  const usable = allDots.some((d) => d.dev.mrt_m != null);
+  sel.disabled = !usable;
+  if (!usable) {
+    sel.value = "";
+    sel.title = "Nearest-MRT data is unavailable right now";
+  }
+  el("mrt-label").classList.toggle("disabled", !usable);
+}
+
 function buildDistrictChips() {
   const seen = [...new Set(allDots.map((d) => d.dev.district).filter(Boolean))]
     .sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
@@ -648,6 +668,7 @@ async function enterExplore() {
         return { dev, marker };
       });
       buildDistrictChips();
+      syncMrtAvailability();
       renderLegend();
     }
     if (!clusterLayer) clusterLayer = newClusterLayer();
