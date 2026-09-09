@@ -21,6 +21,27 @@ body {
   border-right: 1px solid #e3e6ea;
 }
 
+#app.drawer-closed #sidebar { display: none; }
+
+#drawer-toggle {
+  position: relative;
+  z-index: 1001;
+  align-self: center;
+  width: 22px;
+  height: 64px;
+  margin-left: -1px;
+  padding: 0;
+  border: 1px solid #e3e6ea;
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: #fff;
+  color: #5b6472;
+  font-size: 0.7rem;
+  cursor: pointer;
+  box-shadow: 2px 0 6px rgba(0,0,0,.06);
+}
+#drawer-toggle:hover { background: #f0f4fb; }
+
 #sidebar h1 {
   font-size: 1.15rem;
   margin: 0 0 12px;
@@ -33,8 +54,9 @@ body {
 
 #search-input {
   flex: 1;
+  min-width: 0;
   padding: 9px 12px;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   border: 1px solid #c9ced6;
   border-radius: 8px;
 }
@@ -91,10 +113,29 @@ body {
   padding-bottom: 4px;
 }
 
+.chart-box { position: relative; width: 100%; }
+.chart-box canvas { max-width: 100%; }
+
+.trend-headline {
+  font-size: 0.85rem;
+  color: #444d5c;
+  margin: 2px 0 6px;
+}
+.trend-headline .delta-up { color: #16a34a; font-weight: 600; }
+.trend-headline .delta-down { color: #dc2626; font-weight: 600; }
+
+#results details { margin-top: 8px; }
+#results summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #2563eb;
+}
+
 #results table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.82rem;
+  margin-top: 6px;
 }
 #results th, #results td {
   text-align: left;
@@ -175,5 +216,15 @@ body {
     border-right: none;
     border-bottom: 1px solid #e3e6ea;
   }
-  #map-wrap { min-height: 55vh; }
+  #drawer-toggle {
+    align-self: stretch;
+    width: 100%;
+    height: 20px;
+    margin: -1px 0 0;
+    border: 1px solid #e3e6ea;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    box-shadow: 0 2px 6px rgba(0,0,0,.06);
+  }
+  #map-wrap { min-height: 0; flex: 1; }
 }

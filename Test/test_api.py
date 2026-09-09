@@ -129,6 +129,14 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         mock_nearby.assert_called_once_with("SIMS AVENUE", lat=None, lng=None)
 
+    @patch("api.price_trend", return_value={"development": "PARC ESTA",
+                                            "periods": [{"label": "2024", "avg_psf": 2000, "count": 30}],
+                                            "pct_change": 12, "span_label": "5 yrs", "total_txns": 90})
+    def test_trend_passthrough(self, mock_trend):
+        data = client.get("/api/trend", params={"q": "PARC ESTA"}).json()
+        self.assertEqual(data["pct_change"], 12)
+        mock_trend.assert_called_once_with("PARC ESTA")
+
     @patch("api.get_recent_searches", return_value=[{"name": "PARC ESTA", "count": 5}])
     def test_list(self, mock_recent):
         data = client.get("/api/list").json()
@@ -139,6 +147,59 @@ class TestEndpoints(unittest.TestCase):
         r = client.get("/")
         self.assertEqual(r.status_code, 200)
         self.assertIn("SG Property Map", r.text)
+
+
+RESOLVED_PRIVATE = {"building": "PARC ESTA", "road": "SIMS AVENUE",
+                    "address": "8 SIMS AVENUE PARC ESTA", "postal": "408563",
+                    "block": "8", "lat": 1.316, "lng": 103.887}
+
+
+class TestPostalSearch(unittest.TestCase):
+    """A bare 6-digit q routes through resolve_postal_code + the authoritative
+    HDB-block check — never through the market-agnostic name search."""
+
+    @patch("api.geocode_building")
+    @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
+    @patch("api.search_property", return_value=URA_RESULT)
+    @patch("api.is_hdb_residential_block", return_value=False)
+    @patch("api.resolve_postal_code", return_value=RESOLVED_PRIVATE)
+    def test_private_postal_uses_exact_coords(self, mock_resolve, _hdb, mock_search, _r, mock_geo):
+        data = client.get("/api/property", params={"q": "408563"}).json()
+        mock_resolve.assert_called_once_with("408563")
+        mock_search.assert_called_once_with("PARC ESTA")  # resolved building name
+        mock_geo.assert_not_called()  # exact postal coordinate, no street geocode
+        self.assertTrue(data["exact_coords"])
+        self.assertEqual(data["postal"], "408563")
+        self.assertEqual(data["lat"], 1.316)
+
+    @patch("api.search_property")
+    @patch("api.is_hdb_residential_block", return_value=True)
+    @patch("api.resolve_postal_code", return_value={**RESOLVED_PRIVATE, "building": "WOODLEIGH GLEN"})
+    def test_hdb_block_is_not_searched_as_private(self, _res, mock_hdb, mock_search):
+        data = client.get("/api/property", params={"q": "361206"}).json()
+        mock_hdb.assert_called_once_with("8", "SIMS AVENUE")
+        mock_search.assert_not_called()  # never fuzzy-matched to a nearby condo
+        self.assertIn("HDB", data["error"])
+
+    @patch("api.resolve_postal_code", return_value=None)
+    def test_unknown_postal(self, _):
+        data = client.get("/api/property", params={"q": "000000"}).json()
+        self.assertIn("Couldn't find", data["error"])
+
+    @patch("api.is_hdb_residential_block", return_value=False)
+    @patch("api.resolve_postal_code", return_value={**RESOLVED_PRIVATE, "building": ""})
+    def test_landed_or_commercial(self, *_):
+        data = client.get("/api/property", params={"q": "308215"}).json()
+        self.assertIn("landed home or commercial", data["error"])
+
+    @patch("api.geocode_building", return_value={"lat": 1.3, "lng": 103.9})
+    @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
+    @patch("api.search_property", return_value=URA_RESULT)
+    @patch("api.resolve_postal_code")
+    def test_name_search_never_hits_postal_path(self, mock_resolve, *_):
+        data = client.get("/api/property", params={"q": "parc esta"}).json()
+        mock_resolve.assert_not_called()
+        self.assertNotIn("exact_coords", data)
 
 
 if __name__ == "__main__":

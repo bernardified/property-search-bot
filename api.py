@@ -21,16 +21,20 @@ this app (StaticFiles below). Revisit if the webapp ever moves to its own
 domain for a client-facing version.
 """
 
+import re
 import threading
 
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 
-from ura import search_property
+from ura import search_property, price_trend
 from rental import get_rental_by_band
-from maps import get_nearby_info, geocode_building
+from maps import get_nearby_info, geocode_building, resolve_postal_code
+from cache.cache_hdb import is_hdb_residential_block
 from storage import get_recent_searches
 from utils import SIZE_BANDS
+
+_POSTAL_RE = re.compile(r"^\d{6}$")
 
 app = FastAPI(title="Property Bot API")
 
@@ -92,10 +96,11 @@ def api_list():
 _search_lock = threading.Lock()
 
 
-@app.get("/api/property")
-def api_property(q: str = Query(..., min_length=1)):
+def _search_with_rental(query: str):
+    """The locked search+rental section shared by name and postal searches.
+    Returns either a passthrough dict (ambiguous/error) or (ura_result, rental)."""
     with _search_lock:
-        ura_result = search_property(q)
+        ura_result = search_property(query)
 
         if ura_result.get("ambiguous"):
             return {"ambiguous": True, "candidates": ura_result["candidates"]}
@@ -111,6 +116,49 @@ def api_property(q: str = Query(..., min_length=1)):
             rental_result = get_rental_by_band(
                 ura_result["development"], sale_prices, ura_result["street"]
             )
+    return ura_result, rental_result
+
+
+def _property_by_postal(postal: str) -> dict:
+    """Postal-code search, mirroring bot.py's route_postal discriminator: the
+    authoritative HDB Property Information dataset decides HDB vs private —
+    NOT the OneMap building name (BTO blocks carry names just like condos)."""
+    resolved = resolve_postal_code(postal)
+    if not resolved:
+        return {"error": f'Couldn\'t find any address for postal code "{postal}".\nPlease double-check the 6-digit code.'}
+
+    block, road = resolved.get("block"), resolved.get("road")
+    if block and road and is_hdb_residential_block(block, road):
+        return {"error": f'{resolved.get("address") or "That address"} is an HDB block — the webapp covers private developments only for now. Use the Telegram bot for HDB searches.'}
+    if not resolved.get("building"):
+        return {"error": f'Postal code {postal} isn\'t a condo/apartment development (likely a landed home or commercial building).'}
+
+    result = _search_with_rental(resolved["building"])
+    if isinstance(result, dict):
+        return result
+    ura_result, rental_result = result
+
+    # The postal coordinate is the exact address — use it for the pin AND tell
+    # the frontend to feed it to /api/amenities so distances are measured from
+    # the real address, not a street geocode (same convention as the bot).
+    payload = build_property_payload(
+        ura_result, rental_result, {"lat": resolved["lat"], "lng": resolved["lng"]}
+    )
+    payload["exact_coords"] = True
+    payload["postal"] = resolved["postal"]
+    return payload
+
+
+@app.get("/api/property")
+def api_property(q: str = Query(..., min_length=1)):
+    q = q.strip()
+    if _POSTAL_RE.match(q):
+        return _property_by_postal(q)
+
+    result = _search_with_rental(q)
+    if isinstance(result, dict):
+        return result
+    ura_result, rental_result = result
 
     # Quick OneMap pin so the map isn't blank while amenities load.
     # Street only — never "project + street" (wrong-coordinate convention).
@@ -120,6 +168,15 @@ def api_property(q: str = Query(..., min_length=1)):
         coords = None
 
     return build_property_payload(ura_result, rental_result, coords)
+
+
+@app.get("/api/trend")
+def api_trend(q: str = Query(..., min_length=1)):
+    """Price trend (avg PSF over time, resale+sub-sale only). Called with the
+    already-resolved development name, same re-query pattern as the bot's trend
+    button. Returns price_trend's dict unchanged (error/ambiguous passthrough)."""
+    with _search_lock:
+        return price_trend(q)
 
 
 @app.get("/api/amenities")
