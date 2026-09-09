@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api import app, build_property_payload, order_by_band, sale_prices_from_bands
+from api import (
+    app,
+    build_property_payload,
+    order_by_band,
+    project_xy_coords,
+    sale_prices_from_bands,
+)
 
 from fastapi.testclient import TestClient
 
@@ -70,8 +76,32 @@ class TestPayloadShaping(unittest.TestCase):
         self.assertIsNone(p["lat"])
         self.assertIsNone(p["lng"])
 
+    def test_project_xy_coords_converts_uras_own_xy(self):
+        projects = [{"project": "Parc Esta", "x": "28001.642", "y": "38744.572"}]
+        # matched case-insensitively; SVY21 → WGS84, same as the explore dots
+        coords = project_xy_coords(projects, "PARC ESTA")
+        self.assertAlmostEqual(coords["lat"], 1.366666, places=5)
+        self.assertAlmostEqual(coords["lng"], 103.833333, places=5)
 
-class TestEndpoints(unittest.TestCase):
+    def test_project_xy_coords_none_without_xy_or_match(self):
+        projects = [{"project": "PARC ESTA"}, {"project": "BRAVO", "x": "", "y": None}]
+        self.assertIsNone(project_xy_coords(projects, "PARC ESTA"))   # no x/y
+        self.assertIsNone(project_xy_coords(projects, "BRAVO"))       # blank x/y
+        self.assertIsNone(project_xy_coords(projects, "NOT A PROJECT"))
+        self.assertIsNone(project_xy_coords([], "PARC ESTA"))
+
+
+class _NoProjectCoords(unittest.TestCase):
+    """URA's project list is the pin's first source; default it to empty so
+    each test drives the street-geocode fallback unless it says otherwise."""
+
+    def setUp(self):
+        p = patch("api.get_ura_data", return_value=([], {}))
+        p.start()
+        self.addCleanup(p.stop)
+
+
+class TestEndpoints(_NoProjectCoords):
 
     @patch("api.geocode_building", return_value={"lat": 1.3, "lng": 103.9})
     @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
@@ -137,6 +167,22 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual(data["pct_change"], 12)
         mock_trend.assert_called_once_with("PARC ESTA")
 
+    @patch("api.geocode_building")
+    @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
+    @patch("api.search_property", return_value=URA_RESULT)
+    def test_pin_prefers_ura_xy_over_street_geocode(self, _s, _r, mock_geo):
+        """A street geocode lands anywhere along the street (YIO CHU KANG ROAD
+        put HUNDRED PALMS RESIDENCES ~5km off, and the amenity response then
+        snapped the pin to a *different* wrong spot). URA's x/y is exact, so
+        it wins and the frontend is told not to snap."""
+        projects = [{"project": "PARC ESTA", "x": "28001.642", "y": "38744.572"}]
+        with patch("api.get_ura_data", return_value=(projects, {})):
+            data = client.get("/api/property", params={"q": "parc esta"}).json()
+        self.assertTrue(data["exact_coords"])
+        self.assertAlmostEqual(data["lat"], 1.366666, places=5)
+        self.assertAlmostEqual(data["lng"], 103.833333, places=5)
+        mock_geo.assert_not_called()
+
     @patch("api.get_recent_searches", return_value=[{"name": "PARC ESTA", "count": 5}])
     def test_list(self, mock_recent):
         data = client.get("/api/list").json()
@@ -154,7 +200,7 @@ RESOLVED_PRIVATE = {"building": "PARC ESTA", "road": "SIMS AVENUE",
                     "block": "8", "lat": 1.316, "lng": 103.887}
 
 
-class TestPostalSearch(unittest.TestCase):
+class TestPostalSearch(_NoProjectCoords):
     """A bare 6-digit q routes through resolve_postal_code + the authoritative
     HDB-block check — never through the market-agnostic name search."""
 

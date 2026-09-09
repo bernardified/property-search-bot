@@ -67,13 +67,36 @@ def order_by_band(mapping: dict) -> dict:
     return ordered
 
 
+def project_xy_coords(project_dicts: list, project_name: str) -> dict | None:
+    """URA's own x/y (SVY21 → WGS84) for one project, or None when it has none.
+
+    This is the authoritative coordinate — the same source the explore map's
+    dots use, validated at 0m median error vs OneMap across 2,376 projects.
+    Geocoding the street name instead lands *somewhere along* the street, which
+    for a long road is nowhere near the development (YIO CHU KANG ROAD put
+    HUNDRED PALMS RESIDENCES ~5km off, and OneMap's and Google's guesses for
+    it differed from each other by 1.4km — the pin visibly jumped when the
+    amenity response snapped it from one to the other).
+    """
+    target = (project_name or "").strip().upper()
+    for pd in project_dicts:
+        if (pd.get("project") or "").strip().upper() != target:
+            continue
+        x, y = parse_float(pd.get("x")), parse_float(pd.get("y"))
+        if not x or not y:
+            return None
+        lat, lng = svy21_to_wgs84(x, y)
+        return {"lat": round(lat, 6), "lng": round(lng, 6)}
+    return None
+
+
 def build_property_payload(ura_result: dict, rental_result: dict, coords: dict | None) -> dict:
     """Combine the three sources into the /api/property response.
 
     ura_result must already be a successful search (no error/ambiguous).
-    coords is geocode_building()'s dict or None — the quick OneMap pin;
-    /api/amenities later returns the Google-geocoded origin the distances
-    are measured from.
+    coords is the map pin: URA's x/y when the project has one (exact — the
+    frontend keeps it and feeds it to /api/amenities), else geocode_building()'s
+    street-level OneMap guess, which /api/amenities later snaps to Google's.
     """
     return {
         "development": ura_result["development"],
@@ -129,6 +152,14 @@ def _search_with_rental(query: str):
     return ura_result, rental_result
 
 
+def _project_dicts() -> list:
+    """The cached URA project list, read under the same lock as the search
+    (get_ura_data() refreshes in-line when stale)."""
+    with _search_lock:
+        transactions, _pipeline = get_ura_data()
+    return transactions
+
+
 def _property_by_postal(postal: str) -> dict:
     """Postal-code search, mirroring bot.py's route_postal discriminator: the
     authoritative HDB Property Information dataset decides HDB vs private —
@@ -170,14 +201,22 @@ def api_property(q: str = Query(..., min_length=1)):
         return result
     ura_result, rental_result = result
 
-    # Quick OneMap pin so the map isn't blank while amenities load.
-    # Street only — never "project + street" (wrong-coordinate convention).
-    try:
-        coords = geocode_building(ura_result["street"])
-    except Exception:
-        coords = None
+    # Pin: URA's own x/y first (authoritative, 95% of searchable projects).
+    # Only a project without one falls back to geocoding the street — street
+    # only, never "project + street" (wrong-coordinate convention) — and that
+    # guess is the one /api/amenities snaps to Google's origin.
+    coords = project_xy_coords(_project_dicts(), ura_result["development"])
+    exact = coords is not None
+    if coords is None:
+        try:
+            coords = geocode_building(ura_result["street"])
+        except Exception:
+            coords = None
 
-    return build_property_payload(ura_result, rental_result, coords)
+    payload = build_property_payload(ura_result, rental_result, coords)
+    if exact:
+        payload["exact_coords"] = True
+    return payload
 
 
 def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> list:
