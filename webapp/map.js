@@ -447,12 +447,210 @@ async function loadAmenities(d) {
   }
 }
 
-// ── Explore mode: every development, clustered ──────────────────────────────
+// ── Explore mode: every development, clustered, coloured + filtered ────────
+//
+// Colour is a SEQUENTIAL encoding: one hue per metric, light→dark, binned into
+// quintiles. Steps are re-stepped off the reference blue/orange ramps for the
+// OneMap tile surface (#eeece6) rather than a near-white chart surface — the
+// lightest reference steps sat under the 2:1 floor against real tiles.
+// Bin edges are computed ONCE from the full dataset, so filtering never
+// repaints the dots that survive.
+
+const EXPLORE_METRICS = {
+  psf: {
+    field: "avg_psf",
+    label: "12-mo avg PSF",
+    ramp: ["#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"],
+    fmt: (v) => "S$" + Math.round(v).toLocaleString("en-SG"),
+    empty: "no transactions in the last 12 months",
+    bins: null,
+  },
+  yield: {
+    field: "yield_pct",
+    label: "Gross yield",
+    ramp: ["#ee7d45", "#e35f26", "#c44e1f", "#a03f14", "#7a2f0c"],
+    fmt: (v) => v.toFixed(2) + "%",
+    empty: "not enough recent leases to compute a yield",
+    bins: null,
+  },
+};
+const NO_DATA = "#b9b7b0";          // dots with no value for the active metric
+const CLUSTER_INK = ["#0b0b0b", "#0b0b0b", "#fff", "#fff", "#fff"];  // >=4.18:1 on every step
 
 const exploreBtn = el("explore-btn");
-let exploreLayer = null;  // built once from /api/developments, then reused
-let exploreCount = 0;
+const panel = el("explore-panel");
+let clusterLayer = null;      // rebuilt on filter change
+let allDots = [];             // {dev, marker} built once from /api/developments
+let metric = EXPLORE_METRICS.psf;
 let exploreOn = false;
+let districtSel = new Set();
+
+const dotValue = (dev) => dev[metric.field];
+
+function computeBins(devs, m) {
+  const vals = devs.map((d) => d[m.field]).filter((v) => v != null).sort((a, b) => a - b);
+  if (!vals.length) return [0, 0, 0, 0];
+  return [0.2, 0.4, 0.6, 0.8].map((q) => vals[Math.floor(vals.length * q)]);
+}
+
+function binOf(v, m) {
+  let i = 0;
+  while (i < m.bins.length && v >= m.bins[i]) i++;
+  return i;
+}
+
+const colorOf = (v, m) => (v == null ? NO_DATA : m.ramp[binOf(v, m)]);
+
+// Dots with no value are structurally different, not just another ramp step:
+// smaller, grey, semi-transparent. 35% of developments have no recent
+// transaction, and colouring them like a real value would invent one.
+function dotStyle(dev) {
+  const v = dotValue(dev);
+  return v == null
+    ? { radius: 4, color: "#fff", weight: 1, fillColor: NO_DATA, fillOpacity: 0.55 }
+    : { radius: 6.5, color: "#fff", weight: 2, fillColor: colorOf(v, metric), fillOpacity: 0.95 };
+}
+
+function popupHtml(dev) {
+  const line = (label, val) => `<div class="popup-line">${label}: ${val}</div>`;
+  const psf = dev.avg_psf
+    ? `${fmtMoney(dev.avg_psf)} psf · ${dev.txns_12mo} txn${dev.txns_12mo === 1 ? "" : "s"}`
+    : "<span class='muted'>none in last 12 mo</span>";
+  const yld = dev.yield_pct ? dev.yield_pct.toFixed(2) + "%" : "<span class='muted'>–</span>";
+  return (
+    `<div class="popup-name">${esc(dev.project)}</div>` +
+    `<div class="popup-line">${esc(dev.street)} (D${esc(dev.district)})</div>` +
+    line("12-mo avg", psf) +
+    line("Gross yield", yld) +
+    line("Tenure", dev.tenure ? esc(dev.tenure) : "–") +
+    line("Nearest MRT", dev.mrt_m != null ? `${dev.mrt_m.toLocaleString("en-SG")} m` : "–") +
+    line("Last transaction", dev.last_txn ? esc(dev.last_txn) : "–") +
+    `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(dev.project)}">View details →</a></div>`
+  );
+}
+
+// Clusters carry the mean of their children — without this the colour encoding
+// is invisible at the default zoom, where almost every dot is inside a cluster.
+function clusterIcon(cluster) {
+  const vals = cluster.getAllChildMarkers()
+    .map((mk) => dotValue(mk.dev)).filter((v) => v != null);
+  const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  const n = cluster.getChildCount();
+  const size = n < 20 ? 32 : n < 100 ? 40 : 48;
+  const ink = mean == null ? "#0b0b0b" : CLUSTER_INK[binOf(mean, metric)];
+  return L.divIcon({
+    className: "cluster-wrap",
+    iconSize: [size, size],
+    html:
+      `<div class="cluster" style="background:${colorOf(mean, metric)};color:${ink};` +
+      `width:${size}px;height:${size}px;line-height:${size}px">${n}</div>`,
+  });
+}
+
+function newClusterLayer() {
+  return L.markerClusterGroup({
+    maxClusterRadius: 60,
+    showCoverageOnHover: false,
+    spiderfyOnMaxZoom: true,
+    iconCreateFunction: clusterIcon,
+  });
+}
+
+// ── Filters (all client-side — the full list is already in the browser) ──────
+
+function readFilters() {
+  const num = (id) => {
+    const v = parseFloat(el(id).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  return {
+    activeOnly: el("f-active").checked,
+    mrt: parseInt(el("f-mrt").value, 10) || null,
+    tenure: el("f-tenure").value,
+    psfMin: num("f-psf-min"),
+    psfMax: num("f-psf-max"),
+    districts: districtSel,
+  };
+}
+
+function matches(dev, f) {
+  if (f.activeOnly && !dev.txns_12mo) return false;
+  if (f.mrt && (dev.mrt_m == null || dev.mrt_m > f.mrt)) return false;
+  if (f.tenure && dev.tenure !== f.tenure) return false;
+  if (f.psfMin != null && (dev.avg_psf == null || dev.avg_psf < f.psfMin)) return false;
+  if (f.psfMax != null && (dev.avg_psf == null || dev.avg_psf > f.psfMax)) return false;
+  if (f.districts.size && !f.districts.has(dev.district)) return false;
+  return true;
+}
+
+function applyFilters() {
+  if (!clusterLayer) return;
+  const f = readFilters();
+  const keep = allDots.filter((d) => matches(d.dev, f));
+  clusterLayer.clearLayers();
+  clusterLayer.addLayers(keep.map((d) => d.marker));   // bulk add: one reflow
+  // A blank map is never left unexplained — without this, over-narrow filters
+  // look identical to a broken layer. The message sits on the filter row
+  // itself, beside the Reset button: the status box is below the fold here.
+  const total = allDots.length.toLocaleString("en-SG");
+  el("filter-count").textContent = keep.length
+    ? `${keep.length.toLocaleString("en-SG")} of ${total} shown`
+    : `No matches — widen filters, or tap`;
+  el("filter-count").classList.toggle("empty", keep.length === 0);
+}
+
+function renderLegend() {
+  const edges = metric.bins;
+  const swatch = (c, text) => `<span class="lg"><i style="background:${c}"></i>${text}</span>`;
+  const cells = metric.ramp.map((c, i) => {
+    const lo = i === 0 ? null : edges[i - 1];
+    const hi = i === metric.ramp.length - 1 ? null : edges[i];
+    const text =
+      lo == null ? `< ${metric.fmt(hi)}`
+      : hi == null ? `${metric.fmt(lo)} +`
+      : `${metric.fmt(lo)}–${metric.fmt(hi)}`;
+    return swatch(c, text);
+  });
+  el("ramp-legend").innerHTML =
+    `<div class="lg-title">${metric.label}</div>` +
+    cells.join("") + swatch(NO_DATA, "no data");
+}
+
+function setMetric(name) {
+  metric = EXPLORE_METRICS[name];
+  for (const b of el("metric-toggle").querySelectorAll("button")) {
+    const on = b.dataset.metric === name;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  }
+  for (const { dev, marker } of allDots) marker.setStyle(dotStyle(dev));
+  if (clusterLayer) clusterLayer.refreshClusters();   // recolour cluster icons
+  renderLegend();
+}
+
+// mrt_m comes from the cached station coords; if that cache is empty (no Mongo,
+// no OneMap token) every dot has mrt_m = null and each distance option would
+// match nothing — blanking the map. Offer the filter only when it can work.
+function syncMrtAvailability() {
+  const sel = el("f-mrt");
+  const usable = allDots.some((d) => d.dev.mrt_m != null);
+  sel.disabled = !usable;
+  if (!usable) {
+    sel.value = "";
+    sel.title = "Nearest-MRT data is unavailable right now";
+  }
+  el("mrt-label").classList.toggle("disabled", !usable);
+}
+
+function buildDistrictChips() {
+  const seen = [...new Set(allDots.map((d) => d.dev.district).filter(Boolean))]
+    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+  el("f-districts").innerHTML = seen
+    .map((d) => `<button type="button" class="chip" data-district="${esc(d)}">D${parseInt(d, 10)}</button>`)
+    .join("");
+}
+
+// ── Enter / exit ────────────────────────────────────────────────────────────
 
 exploreBtn.addEventListener("click", () => (exploreOn ? exitExplore(true) : enterExplore()));
 
@@ -460,45 +658,30 @@ async function enterExplore() {
   exploreBtn.disabled = true;
   setStatus("Loading all developments…");
   try {
-    if (!exploreLayer) {
+    if (!allDots.length) {
       const r = await fetch("/api/developments");
-      const d = await r.json();
-      const devs = d.developments || [];
-      exploreCount = devs.length;
-      exploreLayer = L.markerClusterGroup({
-        maxClusterRadius: 60,
-        showCoverageOnHover: false,
-        spiderfyOnMaxZoom: true,
+      const devs = (await r.json()).developments || [];
+      for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
+      allDots = devs.map((dev) => {
+        const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
+        marker.dev = dev;          // clusters read this to average their children
+        return { dev, marker };
       });
-      for (const dev of devs) {
-        const psfLine = dev.avg_psf
-          ? `12-mo avg: ${fmtMoney(dev.avg_psf)} psf · ${dev.txns_12mo} txns`
-          : "No transactions in the last 12 months";
-        exploreLayer.addLayer(
-          L.circleMarker([dev.lat, dev.lng], {
-            radius: 6,
-            color: "#fff",
-            weight: 1.5,
-            fillColor: BRAND,
-            fillOpacity: 0.9,
-          }).bindPopup(
-            `<div class="popup-name">${esc(dev.project)}</div>` +
-            `<div class="popup-line">${esc(dev.street)} (D${esc(dev.district)})</div>` +
-            `<div class="popup-line">${psfLine}</div>` +
-            `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(dev.project)}">View details →</a></div>`
-          )
-        );
-      }
+      buildDistrictChips();
+      syncMrtAvailability();
+      renderLegend();
     }
-    // Clear any single-property state, then show the explore layer.
+    if (!clusterLayer) clusterLayer = newClusterLayer();
     destroyCharts();
     resetMap();
     resultsBox.hidden = true;
-    map.addLayer(exploreLayer);
+    panel.hidden = false;
+    map.addLayer(clusterLayer);
+    applyFilters();
     map.setView(SG_CENTER, 12);
     exploreOn = true;
     exploreBtn.textContent = "✕ Exit explore";
-    setStatus(`${exploreCount} developments plotted — click a dot (or cluster) for details.`);
+    setStatus("Click a dot (or cluster) for details.");
   } catch (err) {
     setStatus("Explore failed to load: " + err.message, true);
   } finally {
@@ -507,11 +690,43 @@ async function enterExplore() {
 }
 
 function exitExplore(clearStatus = false) {
-  if (exploreLayer) map.removeLayer(exploreLayer);
+  if (clusterLayer) map.removeLayer(clusterLayer);
+  panel.hidden = true;
   exploreOn = false;
   exploreBtn.textContent = "🗺 Explore all developments";
   if (clearStatus) setStatus("");
 }
+
+// ── Control wiring ──────────────────────────────────────────────────────────
+
+el("metric-toggle").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-metric]");
+  if (b) setMetric(b.dataset.metric);
+});
+
+for (const id of ["f-active", "f-mrt", "f-tenure", "f-psf-min", "f-psf-max"]) {
+  el(id).addEventListener("input", applyFilters);
+}
+
+el("f-districts").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  const d = chip.dataset.district;
+  districtSel.has(d) ? districtSel.delete(d) : districtSel.add(d);
+  chip.classList.toggle("on", districtSel.has(d));
+  applyFilters();
+});
+
+el("reset-filters").addEventListener("click", () => {
+  el("f-active").checked = false;
+  el("f-mrt").value = "";
+  el("f-tenure").value = "";
+  el("f-psf-min").value = "";
+  el("f-psf-max").value = "";
+  districtSel = new Set();
+  for (const c of el("f-districts").querySelectorAll(".chip")) c.classList.remove("on");
+  applyFilters();
+});
 
 // "View details →" inside explore popups (popup DOM is created by Leaflet,
 // so delegate from the document).

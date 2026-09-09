@@ -27,6 +27,7 @@ from datetime import datetime
 
 from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ura import search_property, price_trend
@@ -34,10 +35,13 @@ from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from cache.cache_hdb import is_hdb_residential_block
 from cache.cache_ura import get_ura_data
+from cache.cache_rental import get_rental_data
+from cache.onemap_mrt import build_mrt_cache
 from storage import get_recent_searches
 from utils import (
     SIZE_BANDS,
     get_mongo_db,
+    haversine_m,
     parse_float,
     parse_mmyy_date,
     sqm_to_sqft,
@@ -47,6 +51,9 @@ from utils import (
 _POSTAL_RE = re.compile(r"^\d{6}$")
 
 app = FastAPI(title="Property Bot API")
+# /api/developments is ~540KB of JSON — gzip takes it to roughly a quarter of
+# that, and every other response is small enough that the threshold skips it.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # ── Pure payload shaping (no IO — tested in Test/test_api.py) ────────────────
@@ -180,7 +187,79 @@ def api_property(q: str = Query(..., min_length=1)):
     return build_property_payload(ura_result, rental_result, coords)
 
 
-def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> list:
+def sqft_midpoint(area_range: str):
+    """URA rental areas are range strings ("1500-1600") — take the midpoint."""
+    try:
+        lo, hi = str(area_range).split("-")
+        return (float(lo) + float(hi)) / 2
+    except (ValueError, AttributeError):
+        return None
+
+
+def build_rent_index(rental_projects: list, now=None, min_contracts: int = 3) -> dict:
+    """PROJECT (upper) → mean ANNUAL rent psf over the last 12 months.
+
+    Divided by a sale PSF this gives gross yield. Projects with fewer than
+    `min_contracts` recent contracts are omitted rather than shown noisily —
+    a single lease is not a yield.
+    """
+    now = now or datetime.now()
+    cutoff = now.replace(day=1) - relativedelta(months=12)
+    index = {}
+
+    for proj in rental_projects or []:
+        psfs = []
+        for c in proj.get("rental", []):
+            dt = parse_mmyy_date(c.get("leaseDate", ""))
+            if not dt or dt < cutoff:
+                continue
+            sqft = sqft_midpoint(c.get("areaSqft", ""))
+            rent = parse_float(c.get("rent", 0))
+            if sqft and rent:
+                psfs.append(rent * 12 / sqft)
+        if len(psfs) >= min_contracts:
+            index[(proj.get("project") or "").strip().upper()] = sum(psfs) / len(psfs)
+    return index
+
+
+def classify_tenure(txns: list) -> str | None:
+    """'freehold' | 'leasehold' from URA's per-transaction tenure string.
+
+    999- and 9999-year leases are freehold in every way a buyer cares about,
+    so anything >= 900 years buckets as freehold. Projects mix tenures very
+    rarely; the majority across transactions wins.
+    """
+    votes = {"freehold": 0, "leasehold": 0}
+    for t in txns:
+        tenure = (t.get("tenure") or "").strip().lower()
+        if not tenure:
+            continue
+        if tenure.startswith("freehold"):
+            votes["freehold"] += 1
+            continue
+        years = re.match(r"(\d+)", tenure)
+        if years:
+            votes["freehold" if int(years.group(1)) >= 900 else "leasehold"] += 1
+    if not any(votes.values()):
+        return None
+    return "freehold" if votes["freehold"] > votes["leasehold"] else "leasehold"
+
+
+def station_coords(stations: dict) -> list:
+    """MRT cache → [(lat, lng)]. Coords are already cached (123 stations), so
+    distance-to-MRT costs a haversine loop, not an API call."""
+    return [(s["lat"], s["lng"]) for s in (stations or {}).values()
+            if s.get("lat") and s.get("lng")]
+
+
+def nearest_mrt_m(lat: float, lng: float, coords: list):
+    if not coords:
+        return None
+    return round(min(haversine_m(lat, lng, a, b) for a, b in coords))
+
+
+def build_developments(project_dicts: list, fallback_coords: dict, rent_index=None,
+                       mrt_coords=None, now=None) -> list:
     """One dot per non-landed development for the explore map (pure — tested).
 
     Coordinates come from URA's own x/y (SVY21 → WGS84) — authoritative and
@@ -189,10 +268,16 @@ def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> 
     skipped. Do NOT prefer the OneMap fallback over x/y: name-geocoding put
     same-named buildings 20km off (e.g. THE SUMMIT), while x/y matched OneMap
     to 0m median across 2,376 projects.
+
+    Beyond position, each dot carries what the map colours and filters on:
+    avg_psf and yield_pct (the two colour metrics), tenure, mrt_m and
+    last_txn. All of it is derived from data already in memory — the rental
+    index and MRT coords are injected, so this stays pure and does no IO.
     """
     now = now or datetime.now()
     cutoff = now.replace(day=1) - relativedelta(months=12)
     landed = ("detached", "terrace", "bungalow")
+    rent_index = rent_index or {}
     out = []
 
     for pd in project_dicts:
@@ -215,9 +300,14 @@ def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> 
             lat, lng = fb["lat"], fb["lng"]
 
         psf_list = []
+        latest = None
         for t in strata:
             dt = parse_mmyy_date(t.get("contractDate", ""))
-            if not dt or dt < cutoff:
+            if not dt:
+                continue
+            if latest is None or dt > latest:
+                latest = dt
+            if dt < cutoff:
                 continue
             area = parse_float(t.get("area", 0))
             price = parse_float(t.get("price", 0))
@@ -225,14 +315,24 @@ def build_developments(project_dicts: list, fallback_coords: dict, now=None) -> 
                 continue
             psf_list.append(price / sqm_to_sqft(area))
 
+        avg_psf = round(sum(psf_list) / len(psf_list)) if psf_list else None
+        rent_psf = rent_index.get(name.upper())
+        # Gross yield only means something against a real sale PSF; a dot with
+        # no recent transaction gets no yield rather than a stale one.
+        yield_pct = round(rent_psf / avg_psf * 100, 2) if (rent_psf and avg_psf) else None
+
         out.append({
             "project": name,
             "street": pd.get("street", ""),
             "district": strata[0].get("district", ""),
             "lat": round(lat, 6),
             "lng": round(lng, 6),
-            "avg_psf": round(sum(psf_list) / len(psf_list)) if psf_list else None,
+            "avg_psf": avg_psf,
             "txns_12mo": len(psf_list),
+            "yield_pct": yield_pct,
+            "tenure": classify_tenure(strata),
+            "mrt_m": nearest_mrt_m(lat, lng, mrt_coords),
+            "last_txn": latest.strftime("%b %Y") if latest else None,
         })
 
     out.sort(key=lambda d: d["project"])
@@ -249,22 +349,40 @@ def _load_fallback_coords() -> dict:
         return {}
 
 
-# Memo keyed by the identity of the memoized transactions list from cache_ura —
-# rebuilt only when the URA cache actually refreshes (new list object).
-_dev_memo = {"ref": None, "payload": None}
+# Memo keyed by the identity of the memoized transaction + rental lists from
+# the cache modules — rebuilt only when a cache actually refreshes (new list
+# object), which is also when the MRT coords are re-read.
+_dev_memo = {"txns": None, "rentals": None, "payload": None}
+
+
+def _mrt_coords() -> list:
+    """Cached station coords, or [] — a missing MRT cache just drops mrt_m
+    (and its filter) rather than failing the whole explore layer."""
+    try:
+        return station_coords(build_mrt_cache())
+    except Exception:
+        return []
 
 
 @app.get("/api/developments")
 def api_developments():
     """Every non-landed development with a coordinate — the explore-map layer.
-    ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo}."""
+    ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo,
+    yield_pct, tenure, mrt_m, last_txn}: the last four drive the colour
+    metrics and the client-side filters, and cost no extra IO."""
     with _search_lock:
         transactions, _pipeline = get_ura_data()
-    if _dev_memo["ref"] is transactions and _dev_memo["payload"] is not None:
+        rentals = get_rental_data()
+    if (_dev_memo["txns"] is transactions and _dev_memo["rentals"] is rentals
+            and _dev_memo["payload"] is not None):
         return _dev_memo["payload"]
-    devs = build_developments(transactions, _load_fallback_coords())
+    devs = build_developments(
+        transactions, _load_fallback_coords(),
+        rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
+    )
     payload = {"developments": devs, "count": len(devs)}
-    _dev_memo["ref"], _dev_memo["payload"] = transactions, payload
+    _dev_memo["txns"], _dev_memo["rentals"] = transactions, rentals
+    _dev_memo["payload"] = payload
     return payload
 
 
