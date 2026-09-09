@@ -18,6 +18,65 @@
         <button type="submit">Search</button>
       </form>
       <button id="explore-btn" type="button">🗺 Explore all developments</button>
+
+      <!-- Explore controls: colour metric + filters. Shown only in explore
+           mode; every filter runs client-side over the already-loaded list. -->
+      <section id="explore-panel" hidden>
+        <div class="ctl">
+          <span class="ctl-label">Colour dots by</span>
+          <div id="metric-toggle" class="segmented" role="radiogroup" aria-label="Colour metric">
+            <button type="button" role="radio" data-metric="psf" aria-checked="true" class="on">Avg PSF</button>
+            <button type="button" role="radio" data-metric="yield" aria-checked="false">Gross yield</button>
+          </div>
+        </div>
+
+        <div id="ramp-legend"></div>
+
+        <div class="ctl">
+          <label class="check">
+            <input type="checkbox" id="f-active"> Only transacted in last 12 months
+          </label>
+        </div>
+
+        <div class="ctl two-up">
+          <label>Nearest MRT
+            <select id="f-mrt">
+              <option value="">Any distance</option>
+              <option value="400">Within 400 m</option>
+              <option value="800">Within 800 m</option>
+              <option value="1200">Within 1.2 km</option>
+            </select>
+          </label>
+          <label>Tenure
+            <select id="f-tenure">
+              <option value="">Any</option>
+              <option value="freehold">Freehold</option>
+              <option value="leasehold">Leasehold</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="ctl">
+          <span class="ctl-label">Avg PSF range</span>
+          <div class="two-up">
+            <label class="sr-only" for="f-psf-min">Minimum PSF</label>
+            <input type="number" id="f-psf-min" inputmode="numeric" placeholder="Min">
+            <label class="sr-only" for="f-psf-max">Maximum PSF</label>
+            <input type="number" id="f-psf-max" inputmode="numeric" placeholder="Max">
+          </div>
+        </div>
+
+        <div class="ctl">
+          <span class="ctl-label">Districts</span>
+          <div id="f-districts" class="chips"></div>
+        </div>
+
+        <div class="ctl ctl-footer">
+          <span id="filter-count"></span>
+          <button type="button" id="reset-filters">Reset</button>
+        </div>
+      </section>
+
       <div id="recent"></div>
       <div id="status" hidden></div>
       <div id="results" hidden></div>

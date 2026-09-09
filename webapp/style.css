@@ -233,6 +233,139 @@ body {
 .popup-name { font-weight: 600; }
 .popup-line { color: #444d5c; font-size: 0.8rem; }
 
+/* ── Explore panel: colour metric + client-side filters ──────────────────── */
+
+#explore-panel {
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+#explore-panel[hidden] { display: none; }
+
+.ctl { margin-bottom: 10px; }
+.ctl:last-child { margin-bottom: 0; }
+.ctl-label {
+  display: block;
+  margin-bottom: 5px;
+  color: #5b6472;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.ctl label { display: block; color: #5b6472; font-size: 0.75rem; }
+.two-up { display: flex; gap: 8px; }
+.two-up > * { flex: 1; min-width: 0; }
+
+#explore-panel select,
+#explore-panel input[type="number"] {
+  width: 100%;
+  margin-top: 3px;
+  padding: 6px 8px;
+  border: 1px solid #d7dbe0;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e2430;
+  font-size: 0.82rem;
+}
+.check { display: flex !important; align-items: center; gap: 6px; cursor: pointer; }
+.check input { margin: 0; }
+
+.segmented { display: flex; border: 1px solid #d7dbe0; border-radius: 6px; overflow: hidden; }
+.segmented button {
+  flex: 1;
+  padding: 6px 4px;
+  border: none;
+  background: #fff;
+  color: #5b6472;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.segmented button + button { border-left: 1px solid #d7dbe0; }
+.segmented button.on { background: #2563eb; color: #fff; font-weight: 600; }
+
+/* Sequential legend — swatch + range, ink stays text-coloured */
+#ramp-legend { margin-bottom: 10px; }
+.lg-title {
+  margin-bottom: 4px;
+  color: #5b6472;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 8px 3px 0;
+  color: #444d5c;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.lg i {
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgba(11,11,11,.10);
+  border-radius: 3px;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  padding: 3px 7px;
+  border: 1px solid #d7dbe0;
+  border-radius: 999px;
+  background: #fff;
+  color: #5b6472;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.chip.on { border-color: #2563eb; background: #2563eb; color: #fff; }
+
+.ctl-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid #e9ecef;
+}
+#filter-count { color: #5b6472; font-size: 0.74rem; font-variant-numeric: tabular-nums; }
+#reset-filters {
+  padding: 4px 10px;
+  border: 1px solid #d7dbe0;
+  border-radius: 6px;
+  background: #fff;
+  color: #5b6472;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+#reset-filters:hover { background: #f0f4fb; }
+
+/* Cluster bubbles wear the mean of their children (see clusterIcon in map.js),
+   so the colour encoding survives at clustered zoom levels. */
+.cluster-wrap { background: none; border: none; }
+.cluster {
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(255,255,255,.75);
+  text-align: center;
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.popup-line .muted { color: #898781; }
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 @media (max-width: 760px) {
   #app { flex-direction: column; }
   #sidebar {
