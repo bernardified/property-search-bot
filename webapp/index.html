@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SG Property Map</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,9 +17,20 @@
         <input id="search-input" type="text" placeholder="Development name or 6-digit postal code" required>
         <button type="submit">Search</button>
       </form>
+      <button id="explore-btn" type="button">🗺 Explore all developments</button>
       <div id="recent"></div>
       <div id="status" hidden></div>
       <div id="results" hidden></div>
+      <footer id="attribution">
+        Contains information from URA's private residential property
+        transactions, rentals and pipeline datasets, accessed
+        <span id="access-date"></span> from the
+        <a href="https://eservice.ura.gov.sg/maps/api/" target="_blank" rel="noopener">URA Data Service</a>,
+        made available under the
+        <a href="https://data.gov.sg/open-data-licence" target="_blank" rel="noopener">Singapore Open Data Licence v1.0</a>.
+        Data is provided “as is” — verify independently before relying on it.
+        This site is not affiliated with, or endorsed by, URA.
+      </footer>
     </aside>
     <button id="drawer-toggle" type="button" aria-label="Collapse panel" aria-expanded="true">◀</button>
     <main id="map-wrap">
@@ -32,6 +45,7 @@
     </main>
   </div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="map.js"></script>
 </body>
