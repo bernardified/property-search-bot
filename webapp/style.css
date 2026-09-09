@@ -229,6 +229,20 @@ body {
 .dot.school { background: #2563eb; }
 .dot.mall { background: #9333ea; }
 .dot.mart { background: #16a34a; }
+/* Ring swatch mirrors the school-catchment circle drawn on the map. */
+.ring {
+  width: 10px;
+  height: 10px;
+  border: 1.5px dashed #2563eb;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, .07);
+  display: inline-block;
+}
+
+/* Straight-line verdict inside a school popup — the 1 km rule is pass/fail,
+   so the two states read differently rather than sharing one neutral ink. */
+.in-ring { color: #15803d; font-weight: 600; }
+.out-ring { color: #b45309; font-weight: 600; }
 
 .popup-name { font-weight: 600; }
 .popup-line { color: #444d5c; font-size: 0.8rem; }
