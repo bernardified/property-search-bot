@@ -220,6 +220,26 @@ class TestEndpoints(_NoProjectCoords):
         self.assertEqual(r.status_code, 200)
         self.assertIn("SG Property Map", r.text)
 
+    def test_frontend_assets_must_revalidate(self):
+        """Without Cache-Control a browser invents its own freshness lifetime,
+        and a phone then runs a map.js from days ago against a fresh server.
+        no-cache keeps the copy but forces a conditional request."""
+        for path in ("/", "/map.js", "/style.css"):
+            with self.subTest(path=path):
+                r = client.get(path)
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.headers["cache-control"], "no-cache")
+                self.assertIn("etag", r.headers)
+
+    def test_revalidation_returns_304_and_keeps_the_header(self):
+        """The saving only lands if the ETag answers with an empty 304 — and
+        the 304 has to carry Cache-Control, or the next load caches blindly."""
+        first = client.get("/map.js")
+        second = client.get("/map.js", headers={"If-None-Match": first.headers["etag"]})
+        self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.content, b"")
+        self.assertEqual(second.headers["cache-control"], "no-cache")
+
 
 RESOLVED_PRIVATE = {"building": "PARC ESTA", "road": "SIMS AVENUE",
                     "address": "8 SIMS AVENUE PARC ESTA", "postal": "408563",
