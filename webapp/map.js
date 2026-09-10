@@ -52,6 +52,7 @@ let amenityAbort = null;   // cancels stale amenity fetches when a new search st
 let trendAbort = null;
 let bandsChart = null;     // Chart.js instances — destroyed on each new search
 let trendChart = null;
+let amenitiesShown = false;  // did the amenity pins land? (legend state across views)
 
 const fmtMoney = (n) => (n == null ? "–" : "S$" + Math.round(n).toLocaleString("en-SG"));
 const esc = (s) =>
@@ -74,8 +75,11 @@ function resetMap() {
   if (amenityAbort) amenityAbort.abort();
   if (trendAbort) trendAbort.abort();
   markerLayer.clearLayers();
+  if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);  // nearby mode detaches it
+  clearNearbyLayer();
   clearSchoolRing();
   propertyMarker = null;
+  amenitiesShown = false;
   el("legend").hidden = true;
   el("map-loading").hidden = true;
 }
@@ -131,6 +135,9 @@ form.addEventListener("submit", (e) => {
 async function runSearch(q) {
   if (!q) return;
   if (exploreOn) exitExplore();
+  if (nearbyOn) exitNearby(false);   // a new search replaces the view to go back to
+  currentProperty = null;
+  nearbyBtn.hidden = true;
   input.value = q;
   searchBtn.disabled = true;
   setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
@@ -153,6 +160,10 @@ async function runSearch(q) {
     }
 
     setStatus("");
+    currentProperty = data;
+    // No coordinate → no origin to search around; the button appears later if
+    // the amenity response supplies one (street-geocode fallback).
+    nearbyBtn.hidden = data.lat == null;
     renderProperty(data);
     placePropertyPin(data);
     loadAmenities(data);
@@ -475,9 +486,10 @@ async function loadAmenities(d) {
     if (!d.exact_coords && a.lat != null && a.lng != null) {
       if (propertyMarker) {
         propertyMarker.setLatLng([a.lat, a.lng]);
-        map.setView([a.lat, a.lng], map.getZoom());  // follow the corrected pin
+        if (!nearbyOn) map.setView([a.lat, a.lng], map.getZoom());  // follow the corrected pin
       } else {
         placePropertyPin({ ...d, lat: a.lat, lng: a.lng });
+        if (!nearbyOn) nearbyBtn.hidden = false;   // an origin exists after all
       }
     }
 
@@ -524,14 +536,196 @@ async function loadAmenities(d) {
 
     // Widen the view only for pins that fell outside it; the property keeps
     // the centre it was given when the pin dropped, so the map never jumps.
-    if (propertyMarker) ensureVisible(propertyMarker.getLatLng(), bounds);
-    else if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
-    el("legend").hidden = false;
+    amenitiesShown = true;
+    // Amenities can land while the nearby view is up (markerLayer is detached
+    // then): don't move that camera or show this legend — exitNearby restores
+    // both when the user comes back.
+    if (!nearbyOn) {
+      if (propertyMarker) ensureVisible(propertyMarker.getLatLng(), bounds);
+      else if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
+      el("legend").hidden = false;
+    }
   } catch (err) {
     if (err.name === "AbortError") return;
     el("map-loading").hidden = true;
     setStatus("Amenities failed to load: " + err.message, true);
   }
+}
+
+// ── Nearby developments ─────────────────────────────────────────────────────
+//
+// A second view over the SAME dot payload the explore map uses: /api/nearby
+// returns explore rows (avg PSF, yield, tenure, nearest MRT, last txn) plus
+// distance_m, so a neighbour's popup reads exactly like its explore dot and
+// its "View details →" runs the normal search.
+//
+// Entering the view never destroys the property view behind it: the property
+// and amenity pins stay in `markerLayer` (detached from the map, not cleared)
+// and the results panel — charts included — stays in the DOM, just hidden. So
+// the back button is instant and costs no network call.
+
+const NEARBY_RADIUS_M = 1000;
+const NEAR_PIN = "#d97706";          // amber — clear of every amenity hue
+const NEAR_PIN_NODATA = "#b9b7b0";   // same "no value is structural" grey as explore dots
+
+const nearbyBtn = el("nearby-btn");
+const nearbyView = el("nearby-view");
+let nearbyLayer = null;         // origin pin + 1 km ring + neighbour pins
+let nearbyMarkers = new Map();  // PROJECT → marker, so a list row can open its popup
+let nearbyOn = false;
+let currentProperty = null;     // last successful /api/property payload
+let savedCamera = null;         // property-view centre/zoom, restored on back
+
+// Teardrop pins (not dots) so neighbouring *developments* never read as
+// amenities: same silhouette as the property marker, different fill.
+function teardrop(fill) {
+  return L.divIcon({
+    className: "pin-marker",
+    iconSize: [24, 34],
+    iconAnchor: [12, 33],
+    popupAnchor: [0, -30],
+    html:
+      '<svg width="24" height="34" viewBox="0 0 24 34" xmlns="http://www.w3.org/2000/svg">' +
+      `<path d="M12 33S23 19.4 23 12A11 11 0 1 0 1 12c0 7.4 11 21 11 21z" fill="${fill}" ` +
+      'stroke="#fff" stroke-width="2" stroke-linejoin="round"/>' +
+      '<circle cx="12" cy="12" r="4" fill="#fff" fill-opacity=".92"/></svg>',
+  });
+}
+
+function clearNearbyLayer() {
+  if (nearbyLayer) {
+    map.removeLayer(nearbyLayer);
+    nearbyLayer = null;
+  }
+  nearbyMarkers.clear();
+}
+
+nearbyBtn.addEventListener("click", enterNearby);
+el("nearby-back").addEventListener("click", () => exitNearby());
+
+async function enterNearby() {
+  if (!currentProperty) return;
+  const d = currentProperty;
+  // Centre on the pin the user is actually looking at — for the street-geocode
+  // fallback that is the Google-snapped position, not the payload's guess.
+  const p = propertyMarker ? propertyMarker.getLatLng() : L.latLng(d.lat, d.lng);
+  if (p.lat == null) return;
+
+  nearbyBtn.disabled = true;
+  setStatus("Finding developments within 1 km…");
+  try {
+    const r = await fetch(
+      `/api/nearby?q=${encodeURIComponent(d.development)}` +
+      `&lat=${p.lat}&lng=${p.lng}&radius_m=${NEARBY_RADIUS_M}`
+    );
+    const data = await r.json();
+    if (data.error) {
+      setStatus(data.error, true);
+      return;
+    }
+
+    savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
+    clearSchoolRing();
+    map.removeLayer(markerLayer);      // property view kept intact, just detached
+    el("legend").hidden = true;
+
+    nearbyLayer = L.layerGroup().addTo(map);
+    // The ring makes "within 1 km" legible instead of implied, and its bounds
+    // are the right frame for the view.
+    const ring = L.circle(p, {
+      radius: NEARBY_RADIUS_M,
+      interactive: false,
+      color: BRAND,
+      weight: 1.5,
+      dashArray: "6 5",
+      fillColor: BRAND,
+      fillOpacity: 0.05,
+    }).addTo(nearbyLayer);
+
+    L.marker(p, { icon: teardrop(BRAND), zIndexOffset: 1000 })
+      .addTo(nearbyLayer)
+      .bindPopup(
+        `<div class="popup-name">${esc(d.development)}</div>` +
+        `<div class="popup-line">${esc(d.street)}</div>` +
+        `<div class="popup-line"><span class="muted">Centre of the 1 km search</span></div>`
+      );
+
+    for (const dev of data.results) {
+      // No 12-month transaction → no PSF and no yield to show: greyed, the same
+      // way explore treats a dot with no value (never a ramp colour).
+      const marker = L.marker([dev.lat, dev.lng], {
+        icon: teardrop(dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN),
+      })
+        .addTo(nearbyLayer)
+        .bindPopup(popupHtml(dev));
+      nearbyMarkers.set(dev.project, marker);
+    }
+    renderNearbyList(d, data);
+    resultsBox.hidden = true;
+    nearbyView.hidden = false;
+    nearbyBtn.hidden = true;
+    el("nearby-legend").hidden = false;
+    nearbyOn = true;
+    setStatus("");
+    map.invalidateSize();   // the sidebar just changed height (mobile column)
+    map.fitBounds(ring.getBounds(), { padding: [30, 30] });
+  } catch (err) {
+    setStatus("Nearby search failed: " + err.message, true);
+  } finally {
+    nearbyBtn.disabled = false;
+  }
+}
+
+function renderNearbyList(d, data) {
+  const shown = data.results.length;
+  el("nearby-back-name").textContent = d.development;
+  el("nearby-title").textContent = "Within 1 km";
+  el("nearby-sub").textContent = !shown
+    ? "No other developments within 1 km."
+    : shown < data.total
+      ? `${shown} nearest of ${data.total} developments within 1 km`
+      : `${shown} development${shown === 1 ? "" : "s"} within 1 km`;
+
+  el("nearby-list").innerHTML = data.results
+    .map((dev) => {
+      const psf = dev.avg_psf
+        ? `${fmtMoney(dev.avg_psf)} psf`
+        : "<span class='muted'>no recent txn</span>";
+      return (
+        `<button type="button" class="near-row" data-name="${esc(dev.project)}">` +
+        `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
+        `<span class="near-body"><span class="near-name">${esc(dev.project)}</span>` +
+        `<span class="near-meta">D${esc(dev.district)} · ${psf}</span></span></button>`
+      );
+    })
+    .join("");
+}
+
+// A row is a shortcut to its pin, not a new search — the popup it opens is the
+// same one the teardrop carries, "View details →" included.
+el("nearby-list").addEventListener("click", (e) => {
+  const row = e.target.closest(".near-row");
+  if (!row) return;
+  const marker = nearbyMarkers.get(row.dataset.name);
+  if (!marker) return;
+  map.panTo(marker.getLatLng());
+  marker.openPopup();
+});
+
+// `restore` false when another view is taking over (a new search, explore):
+// the property panel and camera are about to be replaced anyway.
+function exitNearby(restore = true) {
+  clearNearbyLayer();
+  nearbyView.hidden = true;
+  el("nearby-legend").hidden = true;
+  nearbyOn = false;
+  if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);
+  if (!restore) return;
+  resultsBox.hidden = false;
+  nearbyBtn.hidden = false;
+  el("legend").hidden = !amenitiesShown;   // amenities may have landed while away
+  map.invalidateSize();
+  if (savedCamera) map.setView(savedCamera.center, savedCamera.zoom);
 }
 
 // ── Explore mode: every development, clustered, coloured + filtered ────────
@@ -607,6 +801,8 @@ function popupHtml(dev) {
   return (
     `<div class="popup-name">${esc(dev.project)}</div>` +
     `<div class="popup-line">${esc(dev.street)} (D${esc(dev.district)})</div>` +
+    (dev.distance_m != null
+      ? line("Distance", `${dev.distance_m.toLocaleString("en-SG")} m away`) : "") +
     line("12-mo avg", psf) +
     line("Gross yield", yld) +
     line("Tenure", dev.tenure ? esc(dev.tenure) : "–") +
@@ -742,6 +938,8 @@ function buildDistrictChips() {
 exploreBtn.addEventListener("click", () => (exploreOn ? exitExplore(true) : enterExplore()));
 
 async function enterExplore() {
+  if (nearbyOn) exitNearby(false);
+  nearbyBtn.hidden = true;
   exploreBtn.disabled = true;
   setStatus("Loading all developments…");
   try {
@@ -762,6 +960,7 @@ async function enterExplore() {
     destroyCharts();
     resetMap();
     resultsBox.hidden = true;
+    currentProperty = null;   // the property view is gone — nothing to go back to
     panel.hidden = false;
     map.addLayer(clusterLayer);
     applyFilters();

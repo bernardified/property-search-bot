@@ -17,7 +17,8 @@
         <input id="search-input" type="text" placeholder="Development name or 6-digit postal code" required>
         <button type="submit">Search</button>
       </form>
-      <button id="explore-btn" type="button">🗺 Explore all developments</button>
+      <button id="nearby-btn" class="side-btn" type="button" hidden>📌 Search nearby (within 1 km)</button>
+      <button id="explore-btn" class="side-btn" type="button">🗺 Explore all developments</button>
 
       <!-- Explore controls: colour metric + filters. Shown only in explore
            mode; every filter runs client-side over the already-loaded list. -->
@@ -77,6 +78,13 @@
         </div>
       </section>
 
+      <section id="nearby-view" hidden>
+        <button id="nearby-back" type="button">←&nbsp;<span id="nearby-back-name">Back</span></button>
+        <h2 id="nearby-title"></h2>
+        <p class="meta" id="nearby-sub"></p>
+        <div id="nearby-list"></div>
+      </section>
+
       <div id="recent"></div>
       <div id="status" hidden></div>
       <div id="results" hidden></div>
@@ -101,6 +109,11 @@
         <span><i class="dot mall"></i>Malls</span>
         <span><i class="dot mart"></i>Supermarkets</span>
         <span><i class="ring"></i>Click a school for its 1 km ring</span>
+      </div>
+      <div id="nearby-legend" hidden>
+        <span><i class="pin origin"></i>This property</span>
+        <span><i class="pin near"></i>Nearby development</span>
+        <span><i class="pin nodata"></i>No transactions in 12 mo</span>
       </div>
     </main>
   </div>

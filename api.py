@@ -425,6 +425,71 @@ def api_developments():
     return payload
 
 
+def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
+                        limit: int = 40, origin: tuple | None = None) -> dict:
+    """Developments within `radius_m` of a project, nearest first (pure).
+
+    Deliberately NOT a wrapper over nearby.nearby_for_project. That module
+    bounds candidates to the origin's own *district* — a tractability measure
+    for the bot's 10-row text list — which on a map reads as a hard
+    straight-line edge of missing dots: SANDY EIGHT (D15) has 171
+    developments within 1 km but only 86 of them share its district, and
+    PARK NATURA (D23) has 33 versus 3. It also returns name/street/distance
+    only, whereas every map popup here needs the full dot payload
+    (`build_developments`) the explore layer already computes and memoizes.
+    So this is a radius filter over that payload — no extra IO, no domain
+    logic of its own.
+
+    `origin` overrides the origin coordinate: the frontend passes the pin it
+    is already showing (URA x/y, or an exact postal coordinate), so the
+    circle is centred on the same point the user sees.
+    """
+    key = (origin_name or "").strip().upper()
+    origin_row = next((d for d in devs if d["project"].strip().upper() == key), None)
+    if origin is None:
+        if origin_row is None:
+            return {"error": f'Could not pinpoint "{origin_name}" on the map.'}
+        origin = (origin_row["lat"], origin_row["lng"])
+    lat, lng = origin
+
+    rows = []
+    for d in devs:
+        if d["project"].strip().upper() == key:
+            continue                                   # exclude the origin itself
+        dist = haversine_m(lat, lng, d["lat"], d["lng"])
+        if dist <= radius_m:
+            rows.append({**d, "distance_m": round(dist)})
+    rows.sort(key=lambda r: r["distance_m"])
+
+    return {
+        "origin": {
+            "project": origin_row["project"] if origin_row else origin_name,
+            "street": origin_row["street"] if origin_row else "",
+            "lat": lat,
+            "lng": lng,
+        },
+        "radius_m": radius_m,
+        "total": len(rows),
+        "results": rows[:limit],
+    }
+
+
+@app.get("/api/nearby")
+def api_nearby(
+    q: str = Query(..., min_length=1),
+    lat: float | None = None,
+    lng: float | None = None,
+    radius_m: int = Query(1000, ge=100, le=5000),
+    limit: int = Query(40, ge=1, le=200),
+):
+    """Neighbouring developments for the map's nearby view. Each row is an
+    explore-map dot (same keys, so the popups render identically) plus
+    `distance_m`; `total` says how many were inside the radius before `limit`."""
+    devs = api_developments()["developments"]
+    origin = (lat, lng) if lat is not None and lng is not None else None
+    return nearby_developments(devs, q, radius_m=radius_m, limit=limit, origin=origin)
+
+
 @app.get("/api/trend")
 def api_trend(q: str = Query(..., min_length=1)):
     """Price trend (avg PSF over time, resale+sub-sale only). Called with the
