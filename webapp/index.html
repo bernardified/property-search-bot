@@ -17,7 +17,10 @@
         <input id="search-input" type="text" placeholder="Development name or 6-digit postal code" required>
         <button type="submit">Search</button>
       </form>
-      <button id="explore-btn" type="button">🗺 Explore all developments</button>
+      <!-- Explore is the landing state, so there is no button to enter it.
+           This returns from a search result, the one place it is reachable
+           from — it stays hidden while explore is already on screen. -->
+      <button id="back-to-explore" type="button" hidden>← All developments</button>
 
       <!-- Explore controls: colour metric + filters. Shown only in explore
            mode; every filter runs client-side over the already-loaded list. -->
