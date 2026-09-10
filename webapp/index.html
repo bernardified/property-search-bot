@@ -42,7 +42,7 @@
           </label>
         </div>
 
-        <div class="ctl two-up">
+        <div class="ctl">
           <label id="mrt-label">Nearest MRT
             <select id="f-mrt">
               <option value="">Any distance</option>
@@ -51,13 +51,16 @@
               <option value="1200">Within 1.2 km</option>
             </select>
           </label>
-          <label>Tenure
-            <select id="f-tenure">
-              <option value="">Any</option>
-              <option value="freehold">Freehold</option>
-              <option value="leasehold">Leasehold</option>
-            </select>
-          </label>
+        </div>
+
+        <div class="ctl">
+          <span class="ctl-label">Lease tenure</span>
+          <div id="f-tenure" class="chips">
+            <button type="button" class="chip" data-tenure="freehold">Freehold</button>
+            <button type="button" class="chip" data-tenure="999">999-year</button>
+            <button type="button" class="chip" data-tenure="99">99-year</button>
+            <button type="button" class="chip" data-tenure="other">Other lease</button>
+          </div>
         </div>
 
         <div class="ctl">
@@ -72,7 +75,7 @@
 
         <div class="ctl">
           <span class="ctl-label">Districts</span>
-          <div id="f-districts" class="chips"></div>
+          <div id="f-districts" class="chips chips-scroll"></div>
         </div>
 
         <div class="ctl ctl-footer">

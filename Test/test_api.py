@@ -353,6 +353,23 @@ class TestDevelopments(unittest.TestCase):
         mock_fb.assert_called_once()  # second call served from the memo
         api._dev_memo.update(txns=None, rentals=None, payload=None)
 
+    def test_developments_payload_carries_district_estate_names(self):
+        """The dots only carry a district number; the frontend labels them off
+        this table, keyed on the same zero-padded code."""
+        import api
+        api._dev_memo.update(txns=None, rentals=None, payload=None)
+        with patch("api.get_ura_data", return_value=(self._projects(), [])), \
+             patch("api.get_rental_data", return_value=[]), \
+             patch("api._mrt_coords", return_value=[]), \
+             patch("api._load_fallback_coords", return_value={}):
+            body = client.get("/api/developments").json()
+        api._dev_memo.update(txns=None, rentals=None, payload=None)
+        self.assertEqual(len(body["districts"]), 28)
+        self.assertEqual(body["districts"]["19"], "Hougang / Serangoon / Punggol")
+        self.assertEqual(body["districts"]["01"], "Raffles Place / Marina / Cecil")
+        for dev in body["developments"]:
+            self.assertIn(dev["district"], body["districts"])
+
 class TestExploreEncoding(unittest.TestCase):
     """The fields the colour ramp and the four filters read."""
 
@@ -379,16 +396,27 @@ class TestExploreEncoding(unittest.TestCase):
         self.assertIsNone(sqft_midpoint("NA"))
         self.assertIsNone(sqft_midpoint(None))
 
-    def test_classify_tenure_buckets_999_year_leases_as_freehold(self):
+    def test_classify_tenure_buckets_every_lease_term(self):
         from api import classify_tenure
         self.assertEqual(classify_tenure([{"tenure": "Freehold"}]), "freehold")
         self.assertEqual(
-            classify_tenure([{"tenure": "99 yrs lease commencing from 2018"}]), "leasehold")
+            classify_tenure([{"tenure": "99 yrs lease commencing from 2018"}]), "99")
+        # >= 900 years is its own bucket, not folded into freehold: 999-year
+        # leases would otherwise be unfindable for anyone filtering for one.
         self.assertEqual(
-            classify_tenure([{"tenure": "999 yrs lease commencing from 1876"}]), "freehold")
+            classify_tenure([{"tenure": "999 yrs lease commencing from 1876"}]), "999")
         self.assertEqual(
-            classify_tenure([{"tenure": "9999 yrs lease commencing from 1876"}]), "freehold")
+            classify_tenure([{"tenure": "9999 yrs lease commencing from 1876"}]), "999")
+        self.assertEqual(
+            classify_tenure([{"tenure": "946 yrs lease commencing from 1929"}]), "999")
+        # Everything else in the data (60/70/85/93 and 100-115 yrs) shares one
+        # bucket — nine developments between them.
+        self.assertEqual(
+            classify_tenure([{"tenure": "60 yrs lease commencing from 2011"}]), "other")
+        self.assertEqual(
+            classify_tenure([{"tenure": "103 yrs lease commencing from 2000"}]), "other")
         self.assertIsNone(classify_tenure([{"tenure": ""}]))
+        self.assertIsNone(classify_tenure([{"tenure": "NA"}]))
 
     def test_classify_tenure_majority_wins(self):
         from api import classify_tenure
@@ -396,7 +424,7 @@ class TestExploreEncoding(unittest.TestCase):
             {"tenure": "99 yrs lease commencing from 2018"},
             {"tenure": "99 yrs lease commencing from 2018"},
             {"tenure": "Freehold"},
-        ]), "leasehold")
+        ]), "99")
 
     def test_nearest_mrt_uses_cached_station_coords(self):
         from api import station_coords, nearest_mrt_m
@@ -464,7 +492,7 @@ class TestNearby(unittest.TestCase):
          "tenure": "freehold", "mrt_m": 300, "last_txn": "Jul 2026"},
         {"project": "CLOSE", "street": "C ST", "district": "19", "lat": 1.3609,
          "lng": 103.8700, "avg_psf": 1600, "txns_12mo": 2, "yield_pct": None,
-         "tenure": "leasehold", "mrt_m": 700, "last_txn": "Jun 2026"},
+         "tenure": "99", "mrt_m": 700, "last_txn": "Jun 2026"},
         # ~1.3 km north — a different district too, which must NOT be what
         # decides inclusion (see nearby_developments' docstring).
         {"project": "FAR", "street": "F ST", "district": "20", "lat": 1.3720,
