@@ -75,6 +75,36 @@ body {
 }
 #search-form button:disabled { background: #9db5e8; cursor: wait; }
 
+/* Type-ahead suggestions. Overlays whatever sits under the search bar
+   (nearby button, explore panel), so it needs its own ground and stacking. */
+#search-box { position: relative; }
+
+#suggest {
+  position: absolute;
+  z-index: 1002;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: min(360px, 46vh);   /* 8 rows fit at 45px; short screens scroll instead */
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(16, 24, 40, 0.12);
+}
+
+#suggest .sug {
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border-bottom: 1px solid #eef0f4;
+}
+#suggest .sug:last-child { border-bottom: none; }
+#suggest .sug:hover,
+#suggest .sug.active { background: #f0f4fb; }
+#suggest .sug b { font-weight: 700; }
+#suggest .sug-street { color: #5b6472; font-size: 0.75rem; }
+
 /* The two buttons under the search bar, both shown only inside a search
    result: nearby developments, and the way back to the dot map. */
 .side-btn {
@@ -552,6 +582,12 @@ body {
     /* Clears the iOS home indicator so the last row isn't sitting under it. */
     padding-bottom: calc(16px + env(safe-area-inset-bottom));
   }
+
+  /* The sheet is only 45vh tall and the search bar sits ~110px into it, so a
+     desktop-height dropdown runs off its bottom edge — the last rows would be
+     reachable only by scrolling the sheet itself. Five rows fit inside it. */
+  #suggest { max-height: 225px; }
+
   #drawer-toggle {
     align-self: stretch;
     width: 100%;
