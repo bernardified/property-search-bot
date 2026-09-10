@@ -290,7 +290,8 @@ class TestPostalSearch(_NoProjectCoords):
         self.assertEqual(data["postal"], "408563")
         self.assertEqual(data["lat"], 1.316)
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.block_detail", return_value=dict(HDB_BLOCK))
     @patch("api.hdb.resolve_query", return_value={"kind": "block", "block": "8", "street": "SIMS AVENUE"})
     @patch("api.search_property")
@@ -309,7 +310,8 @@ class TestPostalSearch(_NoProjectCoords):
         self.assertTrue(data["exact_coords"])
         self.assertEqual(data["lat"], 1.316)
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.resolve_query", return_value={"error": "no such block"})
     @patch("api.is_hdb_residential_block", return_value=True)
     @patch("api.resolve_postal_code", return_value={**RESOLVED_PRIVATE, "building": "WOODLEIGH GLEN"})
@@ -664,29 +666,32 @@ class TestHDBPayloads(unittest.TestCase):
 
 class TestHDBEndpoints(unittest.TestCase):
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api._geocode_hdb_block", return_value={"lat": 1.36, "lng": 103.84})
     @patch("api.hdb.block_detail", return_value=dict(HDB_BLOCK))
     @patch("api.hdb.resolve_query", return_value={"kind": "block", "block": "257", "street": "BISHAN ST 22"})
-    def test_block_query(self, _rq, _bd, mock_geo, _recs):
+    def test_block_query(self, _rq, _bd, mock_geo, _idx, _st):
         data = client.get("/api/hdb", params={"q": "257 bishan st 22"}).json()
         self.assertEqual(data["kind"], "block")
         self.assertEqual(data["block"], "257")
         mock_geo.assert_called_once()
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.street_summary", return_value=dict(HDB_STREET))
     @patch("api.hdb.resolve_query", return_value={"kind": "street", "street": "BISHAN ST 22"})
-    def test_street_query_is_never_geocoded(self, _rq, _ss, _recs):
+    def test_street_query_is_never_geocoded(self, _rq, _ss, _idx, _st):
         with patch("api._geocode_hdb_block") as mock_geo:
             data = client.get("/api/hdb", params={"q": "bishan st 22"}).json()
         self.assertEqual(data["kind"], "street")
         mock_geo.assert_not_called()
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.resolve_query",
            return_value={"ambiguous": True, "block": "257", "candidates": ["BISHAN ST 22", "BISHAN ST 23"]})
-    def test_ambiguous_carries_the_block_through(self, _rq, _recs):
+    def test_ambiguous_carries_the_block_through(self, _rq, _idx, _st):
         """Picking a street must re-ask for the same block, not drop the user
         at street level."""
         data = client.get("/api/hdb", params={"q": "257 bishan st"}).json()
@@ -694,29 +699,33 @@ class TestHDBEndpoints(unittest.TestCase):
         self.assertEqual(data["block"], "257")
         self.assertEqual(data["market"], "hdb")
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.resolve_query", return_value={"error": "No HDB blocks found."})
-    def test_error_is_passed_through_and_labelled(self, _rq, _recs):
+    def test_error_is_passed_through_and_labelled(self, _rq, _idx, _st):
         data = client.get("/api/hdb", params={"q": "zzz"}).json()
         self.assertEqual(data["market"], "hdb")
         self.assertIn("No HDB blocks", data["error"])
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.price_trend", return_value={"development": "Block 257 Bishan St 22"})
-    def test_trend_takes_block_and_street(self, mock_trend, _recs):
+    def test_trend_takes_block_and_street(self, mock_trend, _idx, _st):
         client.get("/api/hdb/trend", params={"street": "BISHAN ST 22", "block": "257"})
         self.assertEqual(mock_trend.call_args.args[:2], ("257", "BISHAN ST 22"))
 
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.price_trend", return_value={"development": "Bishan St 22"})
-    def test_trend_without_a_block_is_street_level(self, mock_trend, _recs):
+    def test_trend_without_a_block_is_street_level(self, mock_trend, _idx, _st):
         """hdb.price_trend takes block=None to aggregate a whole street, so a
         blank block must arrive as None rather than an empty string."""
         client.get("/api/hdb/trend", params={"street": "BISHAN ST 22", "block": ""})
         self.assertIsNone(mock_trend.call_args.args[0])
 
     @patch("api._hdb_meta_ts", return_value=1.0)
-    @patch("api._hdb_records", return_value=[])
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb._normalise_all", return_value=[{"street": "ANG MO KIO AVE 6"},
                                                    {"street": "BISHAN ST 22"},
                                                    {"street": "ANG MO KIO AVE 6"}])
@@ -730,14 +739,57 @@ class TestHDBEndpoints(unittest.TestCase):
         self.assertEqual(amk["c"], "ANG MO KIO AVENUE 6")
 
     @patch("api._hdb_meta_ts", return_value=7.0)
-    @patch("api._hdb_records", return_value=[])
-    def test_street_list_is_memoized_per_cache_refresh(self, mock_recs, _ts):
+    @patch("api._hdb_street_records", return_value=[])
+    @patch("api._hdb_index_records", return_value=[])
+    def test_street_list_is_memoized_per_cache_refresh(self, mock_st, mock_idx, _ts):
         """Deriving the list costs a full cache load; the list itself is tiny.
         Warm calls must not touch the records at all."""
         api_mod = sys.modules["api"]
         api_mod._hdb_streets_memo.update(ts=7.0, payload={"streets": [], "count": 0})
         client.get("/api/hdb/streets")
-        mock_recs.assert_not_called()
+        mock_idx.assert_not_called()
+
+
+class TestHDBStorageLayout(unittest.TestCase):
+    """The cache is keyed by street so a request reads what it needs.
+
+    A chunk cannot be queried into: answering "block 257 Bishan St 22" from
+    chunks meant pulling 39MB and 130k rows to use about a hundred. These are
+    the two pure regroupings that make the targeted reads possible.
+    """
+
+    RAW = [
+        {"block": "257", "street_name": "BISHAN ST 22", "resale_price": "840000"},
+        {"block": "257", "street_name": "BISHAN ST 22", "resale_price": "820000"},
+        {"block": "236", "street_name": "BISHAN ST 22", "resale_price": "800000"},
+        {"block": "101", "street_name": "YISHUN RING RD", "resale_price": "500000"},
+        {"block": "", "street_name": "", "resale_price": "1"},          # unusable
+    ]
+
+    def test_group_by_street(self):
+        from cache.cache_hdb import group_by_street
+        g = group_by_street(self.RAW)
+        self.assertEqual(sorted(g), ["BISHAN ST 22", "YISHUN RING RD"])
+        self.assertEqual(len(g["BISHAN ST 22"]), 3)
+        self.assertNotIn("", g)          # a row with no street belongs nowhere
+
+    def test_index_records_is_one_row_per_block_street(self):
+        """resolve_query only reads street names and block membership, so this
+        preserves its answers exactly while cutting ~130k rows to ~9.6k."""
+        from cache.cache_hdb import index_records
+        idx = index_records(self.RAW)
+        self.assertEqual([(r["block"], r["street_name"]) for r in idx],
+                         [("257", "BISHAN ST 22"), ("236", "BISHAN ST 22"),
+                          ("101", "YISHUN RING RD")])
+        # They stay genuine raw records — hdb.resolve_query takes them unchanged.
+        self.assertIn("resale_price", idx[0])
+
+    def test_grouping_round_trips_the_whole_window(self):
+        """_load_cache concatenates the street documents, so callers that do
+        want everything (the bot) must still see every row."""
+        from cache.cache_hdb import group_by_street
+        rebuilt = [r for rows in group_by_street(self.RAW).values() for r in rows]
+        self.assertEqual(len(rebuilt), len(self.RAW) - 1)   # minus the unusable row
 
 
 if __name__ == "__main__":

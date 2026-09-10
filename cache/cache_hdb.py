@@ -182,33 +182,116 @@ def _load_cache() -> list:
     if db is None:
         return []
     try:
-        docs = sorted(
+        records = [r for d in db['hdb_cache'].find({"_id": {"$regex": "^street:"}})
+                   for r in d.get("records", [])]
+        if records:
+            return records
+        # Pre-restructure cache: still readable, so a deploy doesn't blank the
+        # window and force a multi-minute refresh before anything works. The
+        # next refresh writes the street documents and these go away.
+        legacy = sorted(
             db['hdb_cache'].find({"_id": {"$regex": "^data_chunk_"}}),
             key=lambda d: _chunk_index(d["_id"]),
         )
-        return [r for d in docs for r in d.get("records", [])]
+        if legacy:
+            logger.info("[HDB Cache] Reading legacy chunk format")
+        return [r for d in legacy for r in d.get("records", [])]
     except Exception as e:
         logger.error(f"[HDB Cache] Load failed: {e}")
         return []
 
 
-def _save_cache(records: list, resource_id: str, months: list[str]):
+def _street_doc_id(street: str) -> str:
+    return f"street:{str(street).strip().upper()}"
+
+
+def group_by_street(records: list) -> dict:
+    """Raw records grouped by street name (pure — tested).
+
+    The unit every read actually wants. A street holds ~225 rows on average
+    and the busiest a few thousand, so each document stays far below the 16MB
+    BSON limit.
+    """
+    out: dict = {}
+    for r in records:
+        street = str(r.get("street_name", "")).strip().upper()
+        if street:
+            out.setdefault(street, []).append(r)
+    return out
+
+
+def index_records(records: list) -> list:
+    """One projected row per (block, street) — the set a query resolver needs.
+
+    hdb.resolve_query only ever reads street names and asks whether a block
+    exists on a street, so one row per pair preserves its answers exactly while
+    cutting ~130k rows to ~9.6k. Each row is then projected to four fields:
+    the two it reads, plus the price and area that hdb._norm requires of a row
+    before it will keep it at all. Real values, carried from the representative
+    record — but a PROJECTION, not a transaction. Nothing may read a price or
+    an area off these; the street documents hold the real rows.
+
+    Keeping all eleven fields made this ~3MB, which a request should not move
+    just to work out which street was meant. Four fields make it ~600KB.
+    """
+    seen, out = set(), []
+    for r in records:
+        key = (str(r.get("block", "")).strip().upper(),
+               str(r.get("street_name", "")).strip().upper())
+        if key in seen or not key[1]:
+            continue
+        seen.add(key)
+        out.append({
+            "block": r.get("block"),
+            "street_name": r.get("street_name"),
+            "resale_price": r.get("resale_price"),
+            "floor_area_sqm": r.get("floor_area_sqm"),
+        })
+    return out
+
+
+def _save_cache(records: list, resource_id: str, months: list[str], partial: bool = False):
+    """Write the window grouped by street, plus the resolver's index set.
+
+    Stored per street rather than as an opaque chunk sequence because a chunk
+    cannot be queried into: answering "block 257 Bishan St 22" from chunks
+    means pulling all 39MB and 130k rows to use about a hundred of them. Keyed
+    by street, the same question is one _id lookup of roughly a megabyte.
+
+    The full window is still reconstructable (_load_cache concatenates the
+    street documents), so callers that genuinely want everything — the bot's
+    flows — are unaffected.
+    """
     db = get_mongo_db()
     if db is None:
         return
     try:
         current_time = time.time()
-        # Wipe old chunks before inserting to prevent orphaned data.
-        db['hdb_cache'].delete_many({"_id": {"$regex": "^data_chunk_"}})
+        by_street = group_by_street(records)
 
-        chunks = [records[i:i + CHUNK_SIZE] for i in range(0, len(records), CHUNK_SIZE)]
-        for i, chunk in enumerate(chunks):
+        for street, rows in by_street.items():
             db['hdb_cache'].replace_one(
-                {"_id": f"data_chunk_{i}"},
-                {"_id": f"data_chunk_{i}", "records": chunk, "updated_at": current_time},
+                {"_id": _street_doc_id(street)},
+                {"_id": _street_doc_id(street), "street": street,
+                 "records": rows, "updated_at": current_time},
                 upsert=True,
             )
-        logger.info(f"[HDB Cache] Saved {len(records)} resale txns in {len(chunks)} chunks")
+        # Streets that vanished from the window (and the pre-restructure chunk
+        # format) would otherwise linger and be concatenated back in.
+        db['hdb_cache'].delete_many({
+            "_id": {"$regex": "^street:"},
+            "updated_at": {"$lt": current_time},
+        })
+        db['hdb_cache'].delete_many({"_id": {"$regex": "^data_chunk_"}})
+
+        idx = index_records(records)
+        db['hdb_cache'].replace_one(
+            {"_id": "index_rows"},
+            {"_id": "index_rows", "records": idx, "updated_at": current_time},
+            upsert=True,
+        )
+        logger.info(f"[HDB Cache] Saved {len(records)} resale txns across "
+                    f"{len(by_street)} streets ({len(idx)} block/street pairs)")
 
         db['hdb_cache'].replace_one(
             {"_id": "meta"},
@@ -216,16 +299,56 @@ def _save_cache(records: list, resource_id: str, months: list[str]):
                 "_id": "meta",
                 "timestamp": current_time,
                 "record_count": len(records),
-                "chunk_count": len(chunks),
+                "street_count": len(by_street),
+                "index_count": len(idx),
                 "resource_id": resource_id,
                 "window_months": len(months),
                 "latest_month": months[0] if months else None,
+                "partial": partial,
             },
             upsert=True,
         )
         logger.info("[HDB Cache] Metadata saved — cache complete")
     except Exception as e:
         logger.error(f"[HDB Cache] Save failed: {e}")
+
+
+def get_street_records(street: str) -> list:
+    """Every raw record for one street — one indexed _id lookup.
+
+    The point of the whole street-keyed layout: ~1MB and a few hundred rows
+    instead of 39MB and 130k. Returns [] when the street is absent, which the
+    caller reads as "not in this window".
+    """
+    db = get_mongo_db()
+    if db is None:
+        return []
+    try:
+        doc = db['hdb_cache'].find_one({"_id": _street_doc_id(street)})
+        return doc.get("records", []) if doc else []
+    except Exception as e:
+        logger.error(f"[HDB Cache] Street load failed for {street}: {e}")
+        return []
+
+
+def get_index_records() -> list:
+    """The one-row-per-(block, street) set for query resolution.
+
+    Falls back to the full window when the document is missing, which is what
+    a cache written before the restructure looks like — correctness first, and
+    the next refresh writes the document.
+    """
+    db = get_mongo_db()
+    if db is None:
+        return []
+    try:
+        doc = db['hdb_cache'].find_one({"_id": "index_rows"})
+        if doc:
+            return doc.get("records", [])
+    except Exception as e:
+        logger.error(f"[HDB Cache] Index load failed: {e}")
+    logger.info("[HDB Cache] No index document — deriving from the full window")
+    return index_records(get_hdb_resale_data())
 
 
 # ── Public interface ────────────────────────────────────────────────────────

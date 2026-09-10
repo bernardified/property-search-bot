@@ -35,7 +35,12 @@ from ura import search_property, price_trend, band_transactions
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from district_search import DISTRICT_NAMES
-from cache.cache_hdb import get_hdb_resale_data, is_hdb_residential_block
+from cache.cache_hdb import (
+    get_hdb_resale_data,
+    get_index_records,
+    get_street_records,
+    is_hdb_residential_block,
+)
 from cache.cache_ura import get_ura_data
 from cache.cache_rental import get_rental_data
 from cache.onemap_mrt import build_mrt_cache
@@ -276,17 +281,50 @@ def _project_dicts() -> list:
 _hdb_lock = threading.Lock()
 
 
-def _hdb_records() -> list:
-    """The cached HDB resale window, read once per request under the lock.
+# Reads are scoped to what the question needs, which is why the cache is
+# stored keyed by street. hdb.py's entry points all take `records` and filter
+# it themselves, so a pre-filtered subset gives byte-identical answers — none
+# of them had to change for this.
+#
+#   resolve a query   -> the (block, street) index set   ~9.6k rows,  ~3MB
+#   a block or street -> that street's rows              ~few hundred, ~1MB
+#   the full window   -> only the bot wants it            130k rows,  39MB
+#
+# The lock is HDB's own, not _search_lock: get_hdb_resale_data() refreshes
+# in-line when stale exactly as the URA cache does, and that refresh is a
+# 60-month fetch measured in minutes. Sharing one lock would park every
+# private search behind it; they touch different caches and share no state.
 
-    Every hdb.py entry point loads and normalises the whole window when it is
-    not handed `records`, and the cache is ~130k rows stored as chunked arrays
-    — there is no way to query into it, so one lookup pulls the lot. Callers
-    therefore fetch once here and inject it into every hdb call they make,
-    turning a two- or three-load request into one.
-    """
+def _hdb_records() -> list:
+    """The whole window. Only for callers that genuinely need every row."""
     with _hdb_lock:
         return get_hdb_resale_data()
+
+
+# The index set is the one thing every HDB request needs, so it is held rather
+# than re-fetched: ~9.6k rows is ~17MB of Python against the window's 229MB,
+# and it is keyed on the cache's meta timestamp so a refresh replaces it.
+# Steady state, that leaves a request paying for one street read alone.
+_hdb_index_memo: dict = {"ts": None, "records": None}
+
+
+def _hdb_index_records() -> list:
+    """One row per (block, street) — enough for hdb.resolve_query, and a
+    fraction of the window."""
+    ts = _hdb_meta_ts()
+    if _hdb_index_memo["records"] is not None and _hdb_index_memo["ts"] == ts:
+        return _hdb_index_memo["records"]
+    with _hdb_lock:
+        records = get_index_records()
+    if records:
+        _hdb_index_memo.update(ts=ts, records=records)
+    return records
+
+
+def _hdb_street_records(street: str) -> list:
+    """Just this street's rows — one indexed lookup."""
+    with _hdb_lock:
+        return get_street_records(street)
 
 
 def _geocode_hdb_block(block: str, street: str) -> dict | None:
@@ -336,11 +374,11 @@ def _hdb_by_postal(postal: str, resolved: dict) -> dict:
     if not block or not road:
         return {"error": f"Postal code {postal} doesn't map to an HDB block."}
 
-    records = _hdb_records()
-    resolution = hdb.resolve_query(f"{block} {road}", records)
+    resolution = hdb.resolve_query(f"{block} {road}", _hdb_index_records())
     if resolution.get("kind") == "block":
         payload = _hdb_block_response(
-            resolution["block"], resolution["street"], records,
+            resolution["block"], resolution["street"],
+            _hdb_street_records(resolution["street"]),
             coords={"lat": resolved["lat"], "lng": resolved["lng"]},
         )
         payload["postal"] = resolved.get("postal")
@@ -763,7 +801,9 @@ def api_hdb_streets():
     if _hdb_streets_memo["payload"] is not None and _hdb_streets_memo["ts"] == ts:
         return _hdb_streets_memo["payload"]
 
-    streets = sorted({r["street"] for r in hdb._normalise_all(_hdb_records())})
+    # Derived from the index set, not the window: it already holds every
+    # distinct street, at a fraction of the rows.
+    streets = sorted({r["street"] for r in hdb._normalise_all(_hdb_index_records())})
     payload = {
         "streets": [{"s": s, "c": hdb.expand_street(s)} for s in streets],
         "count": len(streets),
@@ -787,8 +827,7 @@ def api_hdb(q: str = Query(..., min_length=1)):
     block on whichever street the user picks.
     """
     q = q.strip()
-    records = _hdb_records()
-    resolution = hdb.resolve_query(q, records)
+    resolution = hdb.resolve_query(q, _hdb_index_records())
 
     if resolution.get("ambiguous"):
         return {
@@ -800,6 +839,8 @@ def api_hdb(q: str = Query(..., min_length=1)):
     if "error" in resolution:
         return {"market": "hdb", "error": resolution["error"]}
 
+    # Resolution named a street, so from here only that street's rows matter.
+    records = _hdb_street_records(resolution["street"])
     if resolution["kind"] == "block":
         return _hdb_block_response(resolution["block"], resolution["street"], records)
 
@@ -824,7 +865,8 @@ def api_hdb_trend(
     chart. Re-queried at call time, the same pattern as /api/trend.
     """
     block = (block or "").strip() or None
-    return hdb.price_trend(block, street.strip(), _hdb_records())
+    street = street.strip()
+    return hdb.price_trend(block, street, _hdb_street_records(street))
 
 
 @app.get("/api/transactions")
