@@ -38,6 +38,18 @@ HDB_ROLLING_MONTHS = 60   # rolling window cached (5 years ≈ 125k rows) — wi
 PAGE_SIZE = 10000         # data.gov.sg honours large page sizes; ~2.5k rows/month
 CHUNK_SIZE = 500          # Mongo doc chunking, well under the 16MB BSON limit
 
+# Every month inside the rolling window has resale transactions (the dataset
+# runs from Jan 2017 and even a quiet month clears well over a thousand sales),
+# so a month that comes back empty means the fetch failed — not that nothing
+# sold. Without a bar to clear, one bad run silently replaced a full 60-month
+# cache with the two months that happened to survive it and then stamped that
+# fresh for a month, leaving the per-block 5-year price trend drawing on five
+# weeks of data. Keeping yesterday's complete window beats taking a truncated
+# one.
+MIN_MONTH_COVERAGE = 0.9
+FETCH_ATTEMPTS = 3        # per month, before it counts as failed
+RETRY_BACKOFF_S = 2
+
 # "HDB Property Information" — the authoritative list of every HDB block (blk_no
 # + street + residential flag), including newer BTOs that have not yet reached
 # MOP and so carry no resale transactions. Used to tell an HDB address apart
@@ -100,44 +112,79 @@ def _recent_months(n: int, now: datetime | None = None) -> list[str]:
     return months
 
 
-def _fetch_month(resource_id: str, month: str) -> list:
-    """Fetch all resale records for a single 'YYYY-MM', paginating if needed."""
-    records, offset = [], 0
-    while True:
-        try:
-            r = requests.get(
-                DATASTORE_SEARCH_URL,
-                params={
-                    "resource_id": resource_id,
-                    "filters": json.dumps({"month": month}),
-                    "limit": PAGE_SIZE,
-                    "offset": offset,
-                },
-                timeout=30,
-            )
-            result = r.json().get("result")
-        except Exception as e:
-            logger.error(f"[HDB Cache] Fetch {month} offset {offset} failed: {e}")
-            break
-        if not result:
-            break
-        recs = result.get("records", [])
-        records.extend(recs)
-        if len(recs) < PAGE_SIZE:
-            break
-        offset += PAGE_SIZE
-    return records
+def _fetch_page(resource_id: str, month: str, offset: int) -> tuple[list, bool]:
+    """One page of one month. Returns (records, ok) — `ok` is False only when
+    the request itself failed, which is what separates a broken fetch from a
+    page that is simply exhausted."""
+    try:
+        r = requests.get(
+            DATASTORE_SEARCH_URL,
+            params={
+                "resource_id": resource_id,
+                "filters": json.dumps({"month": month}),
+                "limit": PAGE_SIZE,
+                "offset": offset,
+            },
+            timeout=30,
+        )
+        result = r.json().get("result")
+    except Exception as e:
+        logger.error(f"[HDB Cache] Fetch {month} offset {offset} failed: {e}")
+        return [], False
+    if not result:
+        return [], False
+    return result.get("records", []), True
 
 
-def _fetch_resale(resource_id: str, months: list[str]) -> list:
-    """Fetch the full rolling window across the given months."""
-    all_records = []
+def _fetch_month(resource_id: str, month: str) -> tuple[list, bool]:
+    """Fetch all resale records for a single 'YYYY-MM', paginating if needed.
+
+    Returns (records, ok). A month is retried before it counts as failed: this
+    is 60 sequential paginated requests, and one transient error used to be
+    enough to truncate the whole window.
+    """
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        records, offset, ok = [], 0, True
+        while True:
+            recs, page_ok = _fetch_page(resource_id, month, offset)
+            if not page_ok:
+                ok = False
+                break
+            records.extend(recs)
+            if len(recs) < PAGE_SIZE:
+                break
+            offset += PAGE_SIZE
+        if ok:
+            return records, True
+        if attempt < FETCH_ATTEMPTS:
+            time.sleep(RETRY_BACKOFF_S * attempt)
+    logger.error(f"[HDB Cache] {month}: giving up after {FETCH_ATTEMPTS} attempts")
+    return [], False
+
+
+def _fetch_resale(resource_id: str, months: list[str]) -> tuple[list, bool]:
+    """Fetch the full rolling window across the given months.
+
+    Returns (records, complete). `complete` says whether enough of the window
+    came back to be worth writing over what is already cached — see
+    MIN_MONTH_COVERAGE.
+    """
+    all_records, good = [], 0
     for month in months:
-        recs = _fetch_month(resource_id, month)
+        recs, ok = _fetch_month(resource_id, month)
         all_records.extend(recs)
-        if recs:
+        if ok and recs:
+            good += 1
             logger.info(f"[HDB Cache] {month}: {len(recs)} resale txns")
-    return all_records
+        else:
+            logger.warning(f"[HDB Cache] {month}: no data ({'error' if not ok else 'empty'})")
+
+    complete = bool(months) and good / len(months) >= MIN_MONTH_COVERAGE
+    if not complete:
+        logger.error(
+            f"[HDB Cache] Incomplete fetch — only {good}/{len(months)} months returned data"
+        )
+    return all_records, complete
 
 
 # ── Cache read/write ────────────────────────────────────────────────────────
@@ -149,6 +196,10 @@ def _is_cache_fresh() -> bool:
     try:
         doc = db['hdb_cache'].find_one({"_id": "meta"})
         if not doc:
+            return False
+        # A partial window is only ever written to a cold cache, as something
+        # rather than nothing. It must not then be trusted for a month.
+        if doc.get("partial"):
             return False
         return not is_hdb_resale_stale(doc.get("timestamp", 0))
     except Exception as e:
@@ -174,7 +225,7 @@ def _load_cache() -> list:
         return []
 
 
-def _save_cache(records: list, resource_id: str, months: list[str]):
+def _save_cache(records: list, resource_id: str, months: list[str], partial: bool = False):
     db = get_mongo_db()
     if db is None:
         return
@@ -202,6 +253,7 @@ def _save_cache(records: list, resource_id: str, months: list[str]):
                 "resource_id": resource_id,
                 "window_months": len(months),
                 "latest_month": months[0] if months else None,
+                "partial": partial,
             },
             upsert=True,
         )
@@ -269,13 +321,22 @@ def get_hdb_resale_data() -> list:
     logger.info("[HDB Cache] Cache stale or missing — refreshing from data.gov.sg...")
     resource_id = _resolve_resource_id()
     months = _recent_months(HDB_ROLLING_MONTHS)
-    records = _fetch_resale(resource_id, months)
+    records, complete = _fetch_resale(resource_id, months)
+    existing = _load_cache()
 
-    if records:
-        _save_cache(records, resource_id, months)
+    if records and (complete or not existing):
+        # On a cold cache a partial window still beats no data, but it is
+        # flagged so the next call retries rather than settling for it.
+        _save_cache(records, resource_id, months, partial=not complete)
         return records
-    logger.warning("[HDB Cache] Fetch empty — falling back to stale cache")
-    return _load_cache()
+    if existing:
+        logger.warning(
+            "[HDB Cache] Incomplete fetch — keeping the existing cache rather than "
+            f"replacing {len(existing)} records with {len(records)}"
+        )
+        return existing
+    logger.warning("[HDB Cache] Fetch empty and no cached data available")
+    return []
 
 
 def force_refresh_hdb() -> bool:
@@ -283,11 +344,16 @@ def force_refresh_hdb() -> bool:
     logger.info("[HDB Cache] Force refreshing...")
     resource_id = _resolve_resource_id()
     months = _recent_months(HDB_ROLLING_MONTHS)
-    records = _fetch_resale(resource_id, months)
-    if records:
-        _save_cache(records, resource_id, months)
-        return True
-    return False
+    records, complete = _fetch_resale(resource_id, months)
+    if not records:
+        return False
+    # Same gate as the lazy path: a truncated window never overwrites a good
+    # one, however the refresh was triggered.
+    if not complete and _load_cache():
+        logger.warning("[HDB Cache] Force refresh incomplete — existing cache kept")
+        return False
+    _save_cache(records, resource_id, months, partial=not complete)
+    return complete
 
 
 def hdb_cache_status() -> dict:
@@ -303,9 +369,10 @@ def hdb_cache_status() -> dict:
         age_hours = (time.time() - last_refresh_ts) / 3600
         stale = is_hdb_resale_stale(last_refresh_ts)
         return {
-            "status": "stale" if stale else "fresh",
+            "status": "partial" if doc.get("partial") else ("stale" if stale else "fresh"),
             "age_hours": round(age_hours, 1),
             "records": doc.get("record_count", "?"),
+            "window_months": doc.get("window_months", "?"),
             "latest_month": doc.get("latest_month", "?"),
             "resource_id": doc.get("resource_id", "?"),
         }
