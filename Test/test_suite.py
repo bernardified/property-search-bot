@@ -828,6 +828,53 @@ class TestPriceTrend(unittest.TestCase):
         self.assertNotIn("S$", caption)                               # no per-period bar rows
         self.assertNotIn("─────", caption)                            # no divider
 
+    def test_headline_is_the_fitted_rate_not_first_vs_last(self):
+        """The reason the fit exists: a thin endpoint period must not set the
+        headline. Here 2022 has ONE sale at a freak 3,000 psf and every other
+        year sits flat at 2,000 — first-vs-last reads as a crash, the fit does
+        not."""
+        from ura import price_trend
+        txns = [self._txn(3_000_000, "0322")]                        # 1 txn, way above
+        for mmyy in ("0323", "0623", "0324", "0624", "0325", "0625", "0326"):
+            txns += [self._txn(2_000_000, mmyy) for _ in range(6)]   # flat, 42 txns
+        with self._patch(txns):
+            r = price_trend("TEST PROJECT")
+        self.assertLess(r["pct_change"], -30)             # what the old headline said
+        self.assertLess(abs(r["fit"]["annual_pct"]), 3)   # what the data actually did
+
+    def test_fit_is_suppressed_when_prices_are_scattered(self):
+        """No measurable trend is a real answer — the renderers must say that
+        rather than quote a rate the slope can't support."""
+        from ura import price_trend, format_price_trend
+        prices = [1_400_000, 2_600_000, 1_500_000, 2_500_000, 1_600_000, 2_400_000,
+                  1_450_000, 2_550_000]
+        months = ["0322", "0922", "0323", "0923", "0324", "0924", "0325", "0925"]
+        with self._patch([self._txn(p, m) for p, m in zip(prices, months)]):
+            r = price_trend("TEST PROJECT")
+        self.assertFalse(r["fit"]["significant"])
+        text = format_price_trend(r)
+        self.assertIn("No clear trend", text)
+        self.assertNotIn("%/yr", text)
+
+    def test_too_few_sales_gets_no_fit_at_all(self):
+        from ura import price_trend, format_price_trend
+        txns = [self._txn(1_800_000, "0322"), self._txn(2_000_000, "0324")]
+        with self._patch(txns):
+            r = price_trend("TEST PROJECT")
+        self.assertIsNone(r["fit"])
+        self.assertIn("too few sales", format_price_trend(r))
+
+    def test_fit_values_align_with_the_plotted_periods(self):
+        """The overlay is drawn against a categorical axis that drops empty
+        periods, so one fitted value per plotted period, in order."""
+        from ura import price_trend
+        txns = [self._txn(1_800_000, "0322") for _ in range(3)]
+        txns += [self._txn(2_200_000, "0326") for _ in range(3)]     # 2023-25 absent
+        with self._patch(txns):
+            r = price_trend("TEST PROJECT")
+        self.assertEqual(len(r["fit"]["values"]), len(r["periods"]))
+        self.assertLess(r["fit"]["values"][0], r["fit"]["values"][-1])
+
     def test_png_renders_bytes_for_multi_period(self):
         """render_price_trend_png returns PNG bytes for a 2+ period series, None otherwise."""
         from ura import price_trend, render_price_trend_png
@@ -1932,6 +1979,30 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(street["total_txns"], 6)
         # Unknown block/street → error contract.
         self.assertIn("error", hdb.price_trend("999", "NOWHERE RD", self._trend_recs(), now=self.NOW))
+
+    def test_price_trend_carries_a_fit_like_private(self):
+        """HDB returns ura.price_trend's shape, fit included, so the shared
+        renderers draw the same trendline for both markets.
+
+        Its own fixture: the shared one is 5 sales, which is below the fit's
+        minimum on purpose — one sale a year is not a measurable trend.
+        """
+        import hdb
+        recs = [{"month": m, "town": "BISHAN", "flat_type": "4 ROOM", "block": "300",
+                 "street_name": "BISHAN ST 22", "storey_range": "04 TO 06",
+                 "floor_area_sqm": "90", "flat_model": "Improved",
+                 "lease_commence_date": "1990", "remaining_lease": "63 years",
+                 "resale_price": str(p)}
+                for m, p in (("2022-03", 600000), ("2022-09", 615000), ("2023-05", 645000),
+                             ("2023-11", 665000), ("2024-06", 700000), ("2024-12", 720000),
+                             ("2025-07", 760000), ("2026-02", 800000))]
+        res = hdb.price_trend("300", "BISHAN ST 22", recs, now=self.NOW)
+        fit = res["fit"]
+        self.assertTrue(fit["significant"])
+        self.assertGreater(fit["annual_pct"], 0)                 # 600k → 800k
+        self.assertEqual(len(fit["values"]), len(res["periods"]))
+        self.assertIsNone(hdb.price_trend("200", "BISHAN ST 22",
+                                          self._trend_recs(), now=self.NOW)["fit"])
 
     def test_price_trend_renders_with_shared_renderers(self):
         import hdb, ura

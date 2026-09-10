@@ -146,6 +146,10 @@ body {
 }
 .trend-headline .delta-up { color: #16a34a; font-weight: 600; }
 .trend-headline .delta-down { color: #dc2626; font-weight: 600; }
+/* No measurable trend is a real answer, not an error — neutral ink, not red. */
+.trend-headline .delta-flat { color: #5b6472; font-weight: 600; }
+/* The interval the rate is quoted with: present, but never louder than it. */
+.trend-headline .ci { color: #7a8494; font-variant-numeric: tabular-nums; }
 
 #results details { margin-top: 8px; }
 #results summary {
