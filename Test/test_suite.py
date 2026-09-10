@@ -326,6 +326,109 @@ class TestURADataParsing(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════
+# 3b. BAND DRILL-DOWN (every transaction in one size band)
+# ══════════════════════════════════════════════════════
+
+class TestBandTransactions(unittest.TestCase):
+    """
+    search_property keeps only the latest sale per band; band_transactions is
+    the full list behind a band tap in the webapp. Both parse a record through
+    _txn_entry, so the two views can never disagree about what a transaction is.
+    """
+
+    @staticmethod
+    def _txn(price, date, area="88.26", **over):
+        base = {
+            "area": area, "price": str(price), "contractDate": date,
+            "typeOfSale": "3", "propertyType": "Condominium",
+            "floorRange": "01-05", "noOfUnits": "1", "tenure": "99 yrs",
+        }
+        base.update(over)
+        return base
+
+    def _data(self, txns):
+        return ([{"project": "TEST PROJECT", "street": "TEST ST",
+                  "transaction": txns}], [])
+
+    def test_returns_every_txn_in_band_newest_first(self):
+        from ura import band_transactions
+        # 88.26 sqm ≈ 950 sqft → "901 – 1000 sqft".
+        data = self._data([
+            self._txn(2_000_000, "0122"),
+            self._txn(2_400_000, "0624"),
+            self._txn(2_200_000, "0323"),
+        ])
+        with patch("ura.get_ura_data", return_value=data):
+            result = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+        self.assertEqual(result["count"], 3)
+        self.assertEqual([t["price"] for t in result["transactions"]],
+                         [2_400_000, 2_200_000, 2_000_000])
+
+    def test_other_bands_excluded(self):
+        from ura import band_transactions
+        data = self._data([
+            self._txn(2_000_000, "0122"),                    # ≈950 sqft
+            self._txn(1_100_000, "0223", area="46.45"),      # ≈500 sqft
+        ])
+        with patch("ura.get_ura_data", return_value=data):
+            result = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["transactions"][0]["price"], 2_000_000)
+
+    def test_landed_excluded(self):
+        from ura import band_transactions
+        data = self._data([
+            self._txn(2_000_000, "0122"),
+            self._txn(9_000_000, "0322", propertyType="Detached House"),
+        ])
+        with patch("ura.get_ura_data", return_value=data):
+            result = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+        self.assertEqual(result["count"], 1)
+
+    def test_unparseable_date_sorts_last_without_raising(self):
+        """URA occasionally ships a malformed contractDate — those records must
+        sort to the end rather than blow up the None-to-None comparison."""
+        from ura import band_transactions
+        data = self._data([
+            self._txn(2_000_000, ""),
+            self._txn(2_400_000, "0624"),
+            self._txn(2_100_000, "bad"),
+        ])
+        with patch("ura.get_ura_data", return_value=data):
+            result = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(result["transactions"][0]["price"], 2_400_000)
+
+    def test_unknown_band_returns_empty(self):
+        from ura import band_transactions
+        with patch("ura.get_ura_data", return_value=self._data([self._txn(2_000_000, "0122")])):
+            result = band_transactions("TEST PROJECT", "not a band")
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["transactions"], [])
+
+    def test_error_passthrough(self):
+        from ura import band_transactions
+        with patch("ura.get_ura_data", return_value=([], [])):
+            result = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+        self.assertIn("error", result)
+
+    def test_agrees_with_search_property_latest(self):
+        """The band's newest drill-down row is the same sale search_property
+        surfaces as that band's latest — the whole point of sharing _txn_entry."""
+        from ura import band_transactions, search_property
+        data = self._data([
+            self._txn(2_000_000, "0122"),
+            self._txn(2_400_000, "0624"),
+        ])
+        with patch("ura.get_ura_data", return_value=data):
+            drill = band_transactions("TEST PROJECT", "901 – 1000 sqft")
+            summary = search_property("TEST PROJECT")
+        latest = summary["bands"]["901 – 1000 sqft"]
+        self.assertEqual(drill["transactions"][0]["price"], latest["price"])
+        self.assertEqual(drill["transactions"][0]["psf"], latest["psf"])
+
+
+# ══════════════════════════════════════════════════════
 # 4. RENTAL LOGIC
 # ══════════════════════════════════════════════════════
 

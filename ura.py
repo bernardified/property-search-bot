@@ -215,6 +215,80 @@ def _collect_matched_transactions(development_name: str) -> dict:
     }
 
 
+def _txn_entry(item: dict) -> tuple[str, dict] | None:
+    """Parse one matched transaction into its (size band, display entry).
+
+    Returns None for records the band views can't use — landed/non-strata
+    stock, or a missing area, band or price. Shared by search_property() and
+    band_transactions() so the latest-per-band summary and the full drill-down
+    can never disagree about what a transaction is.
+    """
+    txn = item["txn"]
+
+    # Skip landed / non-strata (no floor range for strata, but area should be reasonable)
+    property_type = txn.get("propertyType", "")
+    if any(t in property_type.lower() for t in ["detached", "terrace", "bungalow"]):
+        return None
+
+    area_sqm = parse_float(txn.get("area", 0))
+    if area_sqm is None or area_sqm <= 0:
+        return None
+
+    area_sqft = sqm_to_sqft(area_sqm)
+    band = get_band(area_sqft)
+    if not band:
+        return None
+
+    price = parse_float(txn.get("price", 0))
+    if not price:
+        return None
+
+    contract_date_raw = txn.get("contractDate", "")
+    return band, {
+        "project": item["project"],
+        "street": item["street"],
+        "contract_date_raw": contract_date_raw,
+        "contract_date_parsed": parse_mmyy_date(contract_date_raw),
+        "contract_date_display": format_mmyy_date(contract_date_raw),
+        "price": price,
+        "psf": round(price / area_sqft) if area_sqft > 0 else None,
+        "area_sqft": round(area_sqft),
+        "floor_range": txn.get("floorRange", "-"),
+        "type_of_sale": _sale_type_label(txn.get("typeOfSale", "")),
+        "property_type": property_type,
+        "tenure": txn.get("tenure", ""),
+    }
+
+
+def band_transactions(development_name: str, band_label: str) -> dict:
+    """Every transaction in one size band, newest first.
+
+    search_property() keeps only the latest sale per band — enough for the
+    summary chart, but it can't answer "what else traded in this band?".
+    This is that list, fetched on demand so the property payload stays small.
+    """
+    matched = _collect_matched_transactions(development_name)
+    if "error" in matched or "ambiguous" in matched:
+        return matched
+
+    txns = []
+    for item in matched["matched_transactions"]:
+        parsed = _txn_entry(item)
+        if parsed and parsed[0] == band_label:
+            txns.append(parsed[1])
+
+    # Newest first. URA occasionally ships an unparseable contractDate; those
+    # sort last rather than raising on a None-to-None comparison.
+    txns.sort(key=lambda t: t["contract_date_parsed"] or datetime.min, reverse=True)
+
+    return {
+        "development": matched["matched_project_name"],
+        "band": band_label,
+        "transactions": txns,
+        "count": len(txns),
+    }
+
+
 def search_property(development_name: str) -> dict:
     """
     Search for the latest transaction per size band for a given development.
@@ -235,44 +309,13 @@ def search_property(development_name: str) -> dict:
     band_price_list = {}  # band -> list of prices in last 12 months (for avg price)
 
     for item in matched_transactions:
-        txn = item["txn"]
-
-        # Skip landed / non-strata (no floor range for strata, but area should be reasonable)
-        property_type = txn.get("propertyType", "")
-        if any(t in property_type.lower() for t in ["detached", "terrace", "bungalow"]):
+        parsed = _txn_entry(item)
+        if not parsed:
             continue
-
-        area_sqm = parse_float(txn.get("area", 0))
-        if area_sqm is None or area_sqm <= 0:
-            continue
-
-        area_sqft = sqm_to_sqft(area_sqm)
-        band = get_band(area_sqft)
-        if not band:
-            continue
-
-        price = parse_float(txn.get("price", 0))
-        if not price:
-            continue
-
-        psf = round(price / area_sqft) if area_sqft > 0 else None
-        contract_date_raw = txn.get("contractDate", "")
-        contract_date_parsed = parse_mmyy_date(contract_date_raw)
-
-        entry = {
-            "project": item["project"],
-            "street": item["street"],
-            "contract_date_raw": contract_date_raw,
-            "contract_date_parsed": contract_date_parsed,
-            "contract_date_display": format_mmyy_date(contract_date_raw),
-            "price": price,
-            "psf": psf,
-            "area_sqft": round(area_sqft),
-            "floor_range": txn.get("floorRange", "-"),
-            "type_of_sale": _sale_type_label(txn.get("typeOfSale", "")),
-            "property_type": property_type,
-            "tenure": txn.get("tenure", ""),
-        }
+        band, entry = parsed
+        price = entry["price"]
+        psf = entry["psf"]
+        contract_date_parsed = entry["contract_date_parsed"]
 
         if band not in band_latest:
             band_latest[band] = entry

@@ -30,7 +30,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from ura import search_property, price_trend
+from ura import search_property, price_trend, band_transactions
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from cache.cache_hdb import is_hdb_residential_block
@@ -432,6 +432,21 @@ def api_trend(q: str = Query(..., min_length=1)):
     button. Returns price_trend's dict unchanged (error/ambiguous passthrough)."""
     with _search_lock:
         return price_trend(q)
+
+
+@app.get("/api/transactions")
+def api_transactions(
+    q: str = Query(..., min_length=1),
+    band: str = Query(..., min_length=1),
+):
+    """Every transaction in one size band, newest first.
+
+    /api/property carries only the latest sale per band — the drill-down list
+    is fetched on demand when the user taps a band, so the first payload (the
+    one a phone waits on) stays small. Called with the already-resolved
+    development name, same re-query pattern as /api/trend."""
+    with _search_lock:
+        return band_transactions(q, band)
 
 
 @app.get("/api/amenities")
