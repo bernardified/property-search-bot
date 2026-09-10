@@ -116,6 +116,8 @@ form.addEventListener("submit", (e) => {
 
 async function runSearch(q) {
   if (!q) return;
+  searchActive = true;
+  backBtn.hidden = false;
   if (exploreOn) exitExplore();
   input.value = q;
   searchBtn.disabled = true;
@@ -669,13 +671,16 @@ const EXPLORE_METRICS = {
 const NO_DATA = "#b9b7b0";          // dots with no value for the active metric
 const CLUSTER_INK = ["#0b0b0b", "#0b0b0b", "#fff", "#fff", "#fff"];  // >=4.18:1 on every step
 
-const exploreBtn = el("explore-btn");
+const backBtn = el("back-to-explore");
 const panel = el("explore-panel");
 let clusterLayer = null;      // rebuilt on filter change
 let allDots = [];             // {dev, marker} built once from /api/developments
 let metric = EXPLORE_METRICS.psf;
 let exploreOn = false;
 let districtSel = new Set();
+// The dot list loads unprompted at boot and the search box is live throughout,
+// so a search can land mid-flight. This says who owns the screen when it does.
+let searchActive = false;
 
 const dotValue = (dev) => dev[metric.field];
 
@@ -844,24 +849,38 @@ function buildDistrictChips() {
 
 // ── Enter / exit ────────────────────────────────────────────────────────────
 
-exploreBtn.addEventListener("click", () => (exploreOn ? exitExplore(true) : enterExplore()));
+backBtn.addEventListener("click", () => enterExplore());
+
+// Build the dot layer once. Split out from enterExplore so the boot load and a
+// later return from a search share it — the second one has nothing to fetch.
+async function loadDevelopments() {
+  if (allDots.length) return;
+  const r = await fetch("/api/developments");
+  const devs = (await r.json()).developments || [];
+  for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
+  allDots = devs.map((dev) => {
+    const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
+    marker.dev = dev;          // clusters read this to average their children
+    return { dev, marker };
+  });
+  buildDistrictChips();
+  syncMrtAvailability();
+  renderLegend();
+}
 
 async function enterExplore() {
-  exploreBtn.disabled = true;
+  searchActive = false;
+  backBtn.hidden = true;
   setStatus("Loading all developments…");
   try {
-    if (!allDots.length) {
-      const r = await fetch("/api/developments");
-      const devs = (await r.json()).developments || [];
-      for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
-      allDots = devs.map((dev) => {
-        const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
-        marker.dev = dev;          // clusters read this to average their children
-        return { dev, marker };
-      });
-      buildDistrictChips();
-      syncMrtAvailability();
-      renderLegend();
+    await loadDevelopments();
+    // ~2.4k developments take a moment and the search box works the whole
+    // time, so a result can already be on screen by now. It wins: the dots
+    // are built and waiting, but showing them here would wipe the panel and
+    // yank the camera back to the middle of Singapore under the user.
+    if (searchActive) {
+      setStatus("");
+      return;
     }
     if (!clusterLayer) clusterLayer = newClusterLayer();
     closeBandDetail();
@@ -873,12 +892,12 @@ async function enterExplore() {
     applyFilters();
     map.setView(SG_CENTER, 12);
     exploreOn = true;
-    exploreBtn.textContent = "✕ Exit explore";
     setStatus("Click a dot (or cluster) for details.");
   } catch (err) {
-    setStatus("Explore failed to load: " + err.message, true);
-  } finally {
-    exploreBtn.disabled = false;
+    // Search still works without the dot layer, so say what broke and stop
+    // short of implying the whole app is down.
+    setStatus("The development map failed to load: " + err.message +
+              "\nSearch by name or postal code still works.", true);
   }
 }
 
@@ -886,7 +905,6 @@ function exitExplore(clearStatus = false) {
   if (clusterLayer) map.removeLayer(clusterLayer);
   panel.hidden = true;
   exploreOn = false;
-  exploreBtn.textContent = "🗺 Explore all developments";
   if (clearStatus) setStatus("");
 }
 
@@ -933,4 +951,8 @@ document.addEventListener("click", (e) => {
 el("access-date").textContent = new Date().toLocaleDateString("en-SG", {
   day: "numeric", month: "short", year: "numeric",
 });
+
+// Explore is the landing state — the map opens full of developments rather
+// than empty behind a button.
+enterExplore();
 

@@ -75,7 +75,8 @@ body {
 }
 #search-form button:disabled { background: #9db5e8; cursor: wait; }
 
-#explore-btn {
+/* Shown only inside a search result — the single way back to the dot map. */
+#back-to-explore {
   display: block;
   width: 100%;
   margin-top: 8px;
@@ -87,8 +88,8 @@ body {
   cursor: pointer;
   color: #1e2430;
 }
-#explore-btn:hover { background: #f0f4fb; }
-#explore-btn:disabled { color: #9aa3b2; cursor: wait; }
+#back-to-explore:hover { background: #f0f4fb; }
+#back-to-explore[hidden] { display: none; }
 
 #attribution {
   margin-top: 18px;
