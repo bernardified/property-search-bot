@@ -30,7 +30,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from ura import search_property, price_trend
+from ura import search_property, price_trend, band_transactions
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from cache.cache_hdb import is_hdb_residential_block
@@ -499,6 +499,21 @@ def api_trend(q: str = Query(..., min_length=1)):
         return price_trend(q)
 
 
+@app.get("/api/transactions")
+def api_transactions(
+    q: str = Query(..., min_length=1),
+    band: str = Query(..., min_length=1),
+):
+    """Every transaction in one size band, newest first.
+
+    /api/property carries only the latest sale per band — the drill-down list
+    is fetched on demand when the user taps a band, so the first payload (the
+    one a phone waits on) stays small. Called with the already-resolved
+    development name, same re-query pattern as /api/trend."""
+    with _search_lock:
+        return band_transactions(q, band)
+
+
 @app.get("/api/amenities")
 def api_amenities(
     street: str = Query(..., min_length=1),
@@ -511,5 +526,28 @@ def api_amenities(
     return get_nearby_info(street, lat=lat, lng=lng)
 
 
+class RevalidatingStaticFiles(StaticFiles):
+    """Serve the frontend with revalidation instead of heuristic caching.
+
+    StaticFiles sends ETag and Last-Modified but no Cache-Control, which leaves
+    a browser free to invent its own freshness lifetime — and mobile Safari
+    invents a generous one. A deploy then lands on the server while the phone
+    keeps running the map.js it cached days ago, with no way for the user to
+    tell that is what happened.
+
+    `no-cache` does not mean "don't cache": the copy is kept, but it must be
+    revalidated before use. The ETag already being sent answers that with a
+    304 and an empty body whenever nothing changed, so the cost is one small
+    conditional request per asset — cheap next to serving a stale app. Starlette
+    carries Cache-Control through onto the 304, so the header survives the
+    revalidation it triggers.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
 # Mounted last so /api/* wins; html=True serves index.html at /.
-app.mount("/", StaticFiles(directory="webapp", html=True), name="webapp")
+app.mount("/", RevalidatingStaticFiles(directory="webapp", html=True), name="webapp")

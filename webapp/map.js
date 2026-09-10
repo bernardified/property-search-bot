@@ -53,6 +53,9 @@ let trendAbort = null;
 let bandsChart = null;     // Chart.js instances — destroyed on each new search
 let trendChart = null;
 let amenitiesShown = false;  // did the amenity pins land? (legend state across views)
+let currentDev = null;     // resolved project name — the band drill-down re-queries by it
+let openBand = null;       // size band whose full transaction list is showing
+let bandAbort = null;      // cancels a stale drill-down fetch
 
 const fmtMoney = (n) => (n == null ? "–" : "S$" + Math.round(n).toLocaleString("en-SG"));
 const esc = (s) =>
@@ -92,7 +95,10 @@ const isMobile = () => window.matchMedia("(max-width: 760px)").matches;
 
 function setDrawerGlyph() {
   const closed = appBox.classList.contains("drawer-closed");
-  drawerBtn.textContent = isMobile() ? (closed ? "▼" : "▲") : (closed ? "▶" : "◀");
+  // On mobile the panel is a bottom sheet: open collapses it downwards, so
+  // the arrow points the way the panel is about to move — the opposite of the
+  // desktop rail, which slides sideways.
+  drawerBtn.textContent = isMobile() ? (closed ? "▲" : "▼") : (closed ? "▶" : "◀");
   drawerBtn.setAttribute("aria-expanded", String(!closed));
   drawerBtn.setAttribute("aria-label", closed ? "Open panel" : "Collapse panel");
 }
@@ -105,26 +111,6 @@ drawerBtn.addEventListener("click", () => {
 window.addEventListener("resize", setDrawerGlyph);
 setDrawerGlyph();
 
-// ── Recent searches ──────────────────────────────────────────────────────────
-
-async function loadRecent() {
-  try {
-    const r = await fetch("/api/list");
-    const data = await r.json();
-    const box = el("recent");
-    box.innerHTML = "";
-    (data.searches || []).forEach((s) => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      chip.textContent = s.name;
-      chip.onclick = () => runSearch(s.name);
-      box.appendChild(chip);
-    });
-  } catch {
-    /* recent list is decorative — ignore failures */
-  }
-}
-
 // ── Search ───────────────────────────────────────────────────────────────────
 
 form.addEventListener("submit", (e) => {
@@ -134,6 +120,8 @@ form.addEventListener("submit", (e) => {
 
 async function runSearch(q) {
   if (!q) return;
+  searchActive = true;
+  backBtn.hidden = false;
   if (exploreOn) exitExplore();
   if (nearbyOn) exitNearby(false);   // a new search replaces the view to go back to
   currentProperty = null;
@@ -142,6 +130,7 @@ async function runSearch(q) {
   searchBtn.disabled = true;
   setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
   resultsBox.hidden = true;
+  closeBandDetail();
   destroyCharts();
   resetMap();
 
@@ -209,11 +198,16 @@ function renderProperty(d) {
   // PSF by size band — chart first, full transaction table behind a toggle
   html += "<h3>PSF by size band</h3>";
   html += `<div class="chart-box"><canvas id="bands-chart" height="${40 + Object.keys(d.bands || {}).length * 34}"></canvas></div>`;
-  html += "<details><summary>All transaction details</summary>";
+  html += `<p class="hint">Tap a band for every transaction in it.</p>`;
+  html += `<div id="band-detail" hidden></div>`;
+  // The table below is the LATEST sale per band, not the full history — that
+  // lives behind a band tap, so the summary label has to say which it is.
+  html += "<details><summary>Latest sale in each band</summary>";
   html += "<table><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
   for (const [band, txn] of Object.entries(d.bands || {})) {
     html +=
-      `<tr><td>${esc(band)}<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft · ${esc(txn.type_of_sale)}</span></td>` +
+      `<tr><td><button type="button" class="band-cell" data-band="${esc(band)}">${esc(band)}</button>` +
+      `<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft · ${esc(txn.type_of_sale)}</span></td>` +
       `<td class="num">${fmtMoney(txn.price)}</td>` +
       `<td class="num">${txn.psf ? fmtMoney(txn.psf) : "–"}</td>` +
       `<td>${esc(txn.contract_date_display)}</td></tr>`;
@@ -250,6 +244,8 @@ function renderProperty(d) {
 
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;
+  currentDev = d.development;
+  closeBandDetail();  // the #band-detail slot above is a fresh, empty element
   renderBandsChart(d);
 }
 
@@ -320,7 +316,118 @@ function renderBandsChart(d) {
       },
     },
   });
+
+  // Whole-row hit area for the band drill-down. A 16px bar is a poor tap
+  // target on a phone and the band name beside it is the obvious one, but
+  // Chart.js fires onClick/onHover only inside the PLOT area — the axis
+  // gutter the labels live in is filtered out before a handler sees it. So
+  // listen on the canvas itself and map the y offset back through the
+  // category scale, which makes bar, label and the space between them equal.
+  const canvas = el("bands-chart");
+  const bandAt = (offsetY) => {
+    const y = bandsChart && bandsChart.scales.y;
+    if (!y || offsetY < y.top || offsetY > y.bottom) return null;
+    return rows[Math.round(y.getValueForPixel(offsetY))] || null;
+  };
+  canvas.addEventListener("click", (e) => {
+    const row = bandAt(e.offsetY);
+    if (row) toggleBandDetail(row.band);
+  });
+  canvas.addEventListener("mousemove", (e) => {
+    canvas.style.cursor = bandAt(e.offsetY) ? "pointer" : "default";
+  });
 }
+
+// ── Band drill-down: every transaction in one size band ─────────────────────
+//
+// The property payload carries only the latest sale per band, so the full list
+// is fetched on demand. One band open at a time — same toggle convention as the
+// school ring, and stacked tables in a phone-sized drawer read as a wall.
+
+function closeBandDetail() {
+  if (bandAbort) { bandAbort.abort(); bandAbort = null; }
+  openBand = null;
+  const box = el("band-detail");
+  if (box) { box.hidden = true; box.innerHTML = ""; }
+  syncBandSelection();
+}
+
+// Keep the table's band buttons showing which one is open.
+function syncBandSelection() {
+  for (const b of resultsBox.querySelectorAll(".band-cell")) {
+    b.classList.toggle("on", b.dataset.band === openBand);
+  }
+}
+
+async function toggleBandDetail(band) {
+  if (openBand === band) { closeBandDetail(); return; }  // tap again to close
+  const box = el("band-detail");
+  if (!box || !currentDev) return;
+
+  if (bandAbort) bandAbort.abort();
+  bandAbort = new AbortController();
+  const { signal } = bandAbort;
+
+  openBand = band;
+  syncBandSelection();
+  box.hidden = false;
+  box.innerHTML = `<p class="note">Loading ${esc(band)} transactions…</p>`;
+  box.scrollIntoView({ block: "start" });
+
+  let t;
+  try {
+    const r = await fetch(
+      `/api/transactions?q=${encodeURIComponent(currentDev)}&band=${encodeURIComponent(band)}`,
+      { signal }
+    );
+    t = await r.json();
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    t = { error: "Transactions failed to load: " + err.message };
+  }
+  if (signal.aborted || openBand !== band) return;  // a newer tap won
+
+  renderBandDetail(box, band, t);
+}
+
+function renderBandDetail(box, band, t) {
+  const head =
+    `<div class="band-head"><span class="band-title">${esc(band)}</span>` +
+    `<button type="button" id="band-close" aria-label="Close">✕</button></div>`;
+
+  const txns = t.transactions || [];
+  if (t.error || t.ambiguous || !txns.length) {
+    box.innerHTML =
+      head +
+      `<p class="note">${esc(t.error || "No transactions recorded in this band.")}</p>`;
+  } else {
+    // Date / price / PSF are what the eye scans down; size, floor and sale type
+    // ride along as a sub-line rather than as columns, which six of would clip
+    // at phone width. Same shape as the latest-sale table above.
+    let html =
+      head +
+      `<p class="band-count">${txns.length} transaction${txns.length === 1 ? "" : "s"} on record, newest first</p>` +
+      `<div class="band-scroll"><table>` +
+      "<tr><th>Date</th><th class='num'>Price</th><th class='num'>PSF</th></tr>";
+    for (const x of txns) {
+      html +=
+        `<tr><td>${esc(x.contract_date_display)}` +
+        `<br><span class="popup-line">${x.area_sqft.toLocaleString("en-SG")} sqft · ` +
+        `${esc(x.floor_range)} flr · ${esc(x.type_of_sale)}</span></td>` +
+        `<td class="num">${fmtMoney(x.price)}</td>` +
+        `<td class="num">${x.psf ? fmtMoney(x.psf) : "–"}</td></tr>`;
+    }
+    box.innerHTML = html + "</table></div>";
+  }
+  el("band-close").onclick = closeBandDetail;
+  box.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+// Band buttons live in HTML rebuilt on every search, so delegate from the panel.
+resultsBox.addEventListener("click", (e) => {
+  const b = e.target.closest(".band-cell");
+  if (b) toggleBandDetail(b.dataset.band);
+});
 
 async function loadTrend(d) {
   trendAbort = new AbortController();
@@ -758,13 +865,16 @@ const EXPLORE_METRICS = {
 const NO_DATA = "#b9b7b0";          // dots with no value for the active metric
 const CLUSTER_INK = ["#0b0b0b", "#0b0b0b", "#fff", "#fff", "#fff"];  // >=4.18:1 on every step
 
-const exploreBtn = el("explore-btn");
+const backBtn = el("back-to-explore");
 const panel = el("explore-panel");
 let clusterLayer = null;      // rebuilt on filter change
 let allDots = [];             // {dev, marker} built once from /api/developments
 let metric = EXPLORE_METRICS.psf;
 let exploreOn = false;
 let districtSel = new Set();
+// The dot list loads unprompted at boot and the search box is live throughout,
+// so a search can land mid-flight. This says who owns the screen when it does.
+let searchActive = false;
 
 const dotValue = (dev) => dev[metric.field];
 
@@ -935,43 +1045,60 @@ function buildDistrictChips() {
 
 // ── Enter / exit ────────────────────────────────────────────────────────────
 
-exploreBtn.addEventListener("click", () => (exploreOn ? exitExplore(true) : enterExplore()));
+backBtn.addEventListener("click", () => enterExplore());
+
+// Build the dot layer once. Split out from enterExplore so the boot load and a
+// later return from a search share it — the second one has nothing to fetch.
+async function loadDevelopments() {
+  if (allDots.length) return;
+  const r = await fetch("/api/developments");
+  const devs = (await r.json()).developments || [];
+  for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
+  allDots = devs.map((dev) => {
+    const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
+    marker.dev = dev;          // clusters read this to average their children
+    return { dev, marker };
+  });
+  buildDistrictChips();
+  syncMrtAvailability();
+  renderLegend();
+}
 
 async function enterExplore() {
-  if (nearbyOn) exitNearby(false);
-  nearbyBtn.hidden = true;
-  exploreBtn.disabled = true;
+  searchActive = false;
+  backBtn.hidden = true;
   setStatus("Loading all developments…");
   try {
-    if (!allDots.length) {
-      const r = await fetch("/api/developments");
-      const devs = (await r.json()).developments || [];
-      for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
-      allDots = devs.map((dev) => {
-        const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
-        marker.dev = dev;          // clusters read this to average their children
-        return { dev, marker };
-      });
-      buildDistrictChips();
-      syncMrtAvailability();
-      renderLegend();
+    await loadDevelopments();
+    // ~2.4k developments take a moment and the search box works the whole
+    // time, so a result can already be on screen by now. It wins: the dots
+    // are built and waiting, but showing them here would wipe the panel and
+    // yank the camera back to the middle of Singapore under the user.
+    if (searchActive) {
+      setStatus("");
+      return;
     }
     if (!clusterLayer) clusterLayer = newClusterLayer();
+    if (nearbyOn) exitNearby(false);
+    closeBandDetail();
     destroyCharts();
     resetMap();
     resultsBox.hidden = true;
-    currentProperty = null;   // the property view is gone — nothing to go back to
+    // The property view is gone (resetMap + destroyCharts), so there is
+    // nothing for the nearby button to search around or go back to.
+    currentProperty = null;
+    nearbyBtn.hidden = true;
     panel.hidden = false;
     map.addLayer(clusterLayer);
     applyFilters();
     map.setView(SG_CENTER, 12);
     exploreOn = true;
-    exploreBtn.textContent = "✕ Exit explore";
     setStatus("Click a dot (or cluster) for details.");
   } catch (err) {
-    setStatus("Explore failed to load: " + err.message, true);
-  } finally {
-    exploreBtn.disabled = false;
+    // Search still works without the dot layer, so say what broke and stop
+    // short of implying the whole app is down.
+    setStatus("The development map failed to load: " + err.message +
+              "\nSearch by name or postal code still works.", true);
   }
 }
 
@@ -979,7 +1106,6 @@ function exitExplore(clearStatus = false) {
   if (clusterLayer) map.removeLayer(clusterLayer);
   panel.hidden = true;
   exploreOn = false;
-  exploreBtn.textContent = "🗺 Explore all developments";
   if (clearStatus) setStatus("");
 }
 
@@ -1027,4 +1153,7 @@ el("access-date").textContent = new Date().toLocaleDateString("en-SG", {
   day: "numeric", month: "short", year: "numeric",
 });
 
-loadRecent();
+// Explore is the landing state — the map opens full of developments rather
+// than empty behind a button.
+enterExplore();
+

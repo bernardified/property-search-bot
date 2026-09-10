@@ -190,10 +190,55 @@ class TestEndpoints(_NoProjectCoords):
         self.assertEqual(data["searches"][0]["name"], "PARC ESTA")
         mock_recent.assert_called_once_with(limit=10)
 
+    @patch("api.band_transactions", return_value={
+        "development": "PARC ESTA", "band": "<= 600 sqft", "count": 2,
+        "transactions": [
+            {"price": 1000000, "psf": 1900, "area_sqft": 520,
+             "floor_range": "06-10", "type_of_sale": "Resale",
+             "contract_date_display": "Jun 2024"},
+            {"price": 900000, "psf": 1800, "area_sqft": 500,
+             "floor_range": "01-05", "type_of_sale": "Resale",
+             "contract_date_display": "Jan 2022"},
+        ],
+    })
+    def test_transactions_endpoint(self, mock_band):
+        """The band drill-down passes the resolved name and band straight
+        through, same re-query pattern as /api/trend."""
+        data = client.get("/api/transactions",
+                          params={"q": "PARC ESTA", "band": "<= 600 sqft"}).json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["transactions"][0]["price"], 1000000)
+        mock_band.assert_called_once_with("PARC ESTA", "<= 600 sqft")
+
+    def test_transactions_requires_band(self):
+        """Without a band there is nothing to drill into — reject, don't guess."""
+        r = client.get("/api/transactions", params={"q": "PARC ESTA"})
+        self.assertEqual(r.status_code, 422)
+
     def test_static_frontend_served_at_root(self):
         r = client.get("/")
         self.assertEqual(r.status_code, 200)
         self.assertIn("SG Property Map", r.text)
+
+    def test_frontend_assets_must_revalidate(self):
+        """Without Cache-Control a browser invents its own freshness lifetime,
+        and a phone then runs a map.js from days ago against a fresh server.
+        no-cache keeps the copy but forces a conditional request."""
+        for path in ("/", "/map.js", "/style.css"):
+            with self.subTest(path=path):
+                r = client.get(path)
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.headers["cache-control"], "no-cache")
+                self.assertIn("etag", r.headers)
+
+    def test_revalidation_returns_304_and_keeps_the_header(self):
+        """The saving only lands if the ETag answers with an empty 304 — and
+        the 304 has to carry Cache-Control, or the next load caches blindly."""
+        first = client.get("/map.js")
+        second = client.get("/map.js", headers={"If-None-Match": first.headers["etag"]})
+        self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.content, b"")
+        self.assertEqual(second.headers["cache-control"], "no-cache")
 
 
 RESOLVED_PRIVATE = {"building": "PARC ESTA", "road": "SIMS AVENUE",
