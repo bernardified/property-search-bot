@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from ura import search_property, price_trend, band_transactions
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
+from district_search import DISTRICT_NAMES
 from cache.cache_hdb import is_hdb_residential_block
 from cache.cache_ura import get_ura_data
 from cache.cache_rental import get_rental_data
@@ -261,27 +262,54 @@ def build_rent_index(rental_projects: list, now=None, min_contracts: int = 3) ->
     return index
 
 
-def classify_tenure(txns: list) -> str | None:
-    """'freehold' | 'leasehold' from URA's per-transaction tenure string.
+# Broad lease-tenure buckets for the explore filter. Keys are what the dot
+# payload carries and what the frontend filters on; every non-empty URA tenure
+# string lands in exactly one of them, so nothing is unreachable.
+#   freehold  70% of developments   999  6%   99  24%   other  0.4%
+# 999-/9999-year leases used to bucket as freehold (they are, in every way a
+# buyer cares about) but that made 140 developments invisible to anyone
+# looking for one, so they are their own category and the filter is
+# multi-select — "freehold or 999" is still one gesture.
+TENURE_FREEHOLD = "freehold"
+TENURE_999 = "999"
+TENURE_99 = "99"
+TENURE_OTHER = "other"          # 60/70/85/93 and 100/101/102/103/110/115 yrs
 
-    999- and 9999-year leases are freehold in every way a buyer cares about,
-    so anything >= 900 years buckets as freehold. Projects mix tenures very
-    rarely; the majority across transactions wins.
-    """
-    votes = {"freehold": 0, "leasehold": 0}
-    for t in txns:
-        tenure = (t.get("tenure") or "").strip().lower()
-        if not tenure:
-            continue
-        if tenure.startswith("freehold"):
-            votes["freehold"] += 1
-            continue
-        years = re.match(r"(\d+)", tenure)
-        if years:
-            votes["freehold" if int(years.group(1)) >= 900 else "leasehold"] += 1
-    if not any(votes.values()):
+
+def tenure_bucket(tenure: str) -> str | None:
+    """One URA tenure string -> bucket key, or None when it is blank/unparseable."""
+    tenure = (tenure or "").strip().lower()
+    if not tenure:
         return None
-    return "freehold" if votes["freehold"] > votes["leasehold"] else "leasehold"
+    if tenure.startswith("freehold"):
+        return TENURE_FREEHOLD
+    years = re.match(r"(\d+)", tenure)
+    if not years:
+        return None
+    years = int(years.group(1))
+    if years >= 900:
+        return TENURE_999
+    if years == 99:
+        return TENURE_99
+    return TENURE_OTHER
+
+
+def classify_tenure(txns: list) -> str | None:
+    """A development's lease tenure -> bucket key ('freehold' | '999' | '99' |
+    'other'), or None when no transaction carries a tenure.
+
+    Projects mix tenures very rarely; the majority across transactions wins.
+    """
+    votes: dict[str, int] = {}
+    for t in txns:
+        bucket = tenure_bucket(t.get("tenure"))
+        if bucket:
+            votes[bucket] = votes.get(bucket, 0) + 1
+    if not votes:
+        return None
+    # max() over (count, key) keeps ties deterministic rather than
+    # insertion-ordered — a project split 1:1 must not flip between refreshes.
+    return max(sorted(votes), key=lambda k: votes[k])
 
 
 def station_coords(stations: dict) -> list:
@@ -408,7 +436,8 @@ def api_developments():
     """Every non-landed development with a coordinate — the explore-map layer.
     ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo,
     yield_pct, tenure, mrt_m, last_txn}: the last four drive the colour
-    metrics and the client-side filters, and cost no extra IO."""
+    metrics and the client-side filters, and cost no extra IO. Plus
+    `districts`, the district -> estate-name table the dots label against."""
     with _search_lock:
         transactions, _pipeline = get_ura_data()
         rentals = get_rental_data()
@@ -419,7 +448,11 @@ def api_developments():
         transactions, _load_fallback_coords(),
         rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
     )
-    payload = {"developments": devs, "count": len(devs)}
+    # District estate names ride along with the dots (28 short strings, and
+    # the payload is already gzipped) rather than costing the frontend a
+    # second request for a static table.
+    payload = {"developments": devs, "count": len(devs),
+               "districts": {f"{d:02d}": name for d, name in DISTRICT_NAMES.items()}}
     _dev_memo["txns"], _dev_memo["rentals"] = transactions, rentals
     _dev_memo["payload"] = payload
     return payload

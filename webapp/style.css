@@ -491,6 +491,21 @@ body {
   cursor: pointer;
 }
 .chip.on { border-color: #2563eb; background: #2563eb; color: #fff; }
+/* District chips read "D19 · Hougang / Serangoon / Punggol". The hierarchy is
+   weight, not opacity — dimming the estate names to .75 dropped them to
+   3.4:1 on white, and they are 0.72rem text. */
+.chip-code { font-weight: 600; color: #2b3440; }
+.chip.on .chip-code { color: #fff; }
+
+/* District chips carry their estate names, so each is a full row and 28 of
+   them would bury the PSF inputs and the Reset button below. Cap and scroll
+   the cloud instead — same treatment as .band-scroll. */
+.chips-scroll {
+  max-height: 34vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
 
 .ctl-footer {
   display: flex;

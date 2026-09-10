@@ -843,7 +843,8 @@ function renderNearbyList(d, data) {
         `<button type="button" class="near-row" data-name="${esc(dev.project)}">` +
         `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
         `<span class="near-body"><span class="near-name">${esc(dev.project)}</span>` +
-        `<span class="near-meta">D${esc(dev.district)} · ${psf}</span></span></button>`
+        `<span class="near-meta" title="${esc(districtLabel(dev.district))}">` +
+        `D${parseInt(dev.district, 10)} · ${psf}</span></span></button>`
       );
     })
     .join("");
@@ -913,11 +914,31 @@ let allDots = [];             // {dev, marker} built once from /api/developments
 let metric = EXPLORE_METRICS.psf;
 let exploreOn = false;
 let districtSel = new Set();
+let tenureSel = new Set();
+// District -> estate names, from /api/developments (district_search.py is the
+// single source of truth; the dots only ever carry the number).
+let districtNames = {};
 // The dot list loads unprompted at boot and the search box is live throughout,
 // so a search can land mid-flight. This says who owns the screen when it does.
 let searchActive = false;
 
 const dotValue = (dev) => dev[metric.field];
+
+// A district number tells a local nothing on its own, so every place one is
+// shown gets its estate names: "D19 · Hougang / Serangoon / Punggol".
+const districtLabel = (code) => {
+  const n = parseInt(code, 10);
+  if (!n) return "";
+  const towns = districtNames[code] || districtNames[String(n).padStart(2, "0")];
+  return towns ? `D${n} · ${towns}` : `D${n}`;
+};
+
+const TENURE_LABELS = {
+  freehold: "Freehold",
+  999: "999-year lease",
+  99: "99-year lease",
+  other: "Other lease term",
+};
 
 function computeBins(devs, m) {
   const vals = devs.map((d) => d[m.field]).filter((v) => v != null).sort((a, b) => a - b);
@@ -951,12 +972,13 @@ function popupHtml(dev) {
   const yld = dev.yield_pct ? dev.yield_pct.toFixed(2) + "%" : "<span class='muted'>–</span>";
   return (
     `<div class="popup-name">${esc(dev.project)}</div>` +
-    `<div class="popup-line">${esc(dev.street)} (D${esc(dev.district)})</div>` +
+    `<div class="popup-line">${esc(dev.street)}</div>` +
+    `<div class="popup-line">${esc(districtLabel(dev.district))}</div>` +
     (dev.distance_m != null
       ? line("Distance", `${dev.distance_m.toLocaleString("en-SG")} m away`) : "") +
     line("12-mo avg", psf) +
     line("Gross yield", yld) +
-    line("Tenure", dev.tenure ? esc(dev.tenure) : "–") +
+    line("Tenure", TENURE_LABELS[dev.tenure] || "–") +
     line("Nearest MRT", dev.mrt_m != null ? `${dev.mrt_m.toLocaleString("en-SG")} m` : "–") +
     line("Last transaction", dev.last_txn ? esc(dev.last_txn) : "–") +
     `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(dev.project)}">View details →</a></div>`
@@ -1000,7 +1022,7 @@ function readFilters() {
   return {
     activeOnly: el("f-active").checked,
     mrt: parseInt(el("f-mrt").value, 10) || null,
-    tenure: el("f-tenure").value,
+    tenure: tenureSel,
     psfMin: num("f-psf-min"),
     psfMax: num("f-psf-max"),
     districts: districtSel,
@@ -1010,7 +1032,7 @@ function readFilters() {
 function matches(dev, f) {
   if (f.activeOnly && !dev.txns_12mo) return false;
   if (f.mrt && (dev.mrt_m == null || dev.mrt_m > f.mrt)) return false;
-  if (f.tenure && dev.tenure !== f.tenure) return false;
+  if (f.tenure.size && !f.tenure.has(dev.tenure)) return false;
   if (f.psfMin != null && (dev.avg_psf == null || dev.avg_psf < f.psfMin)) return false;
   if (f.psfMax != null && (dev.avg_psf == null || dev.avg_psf > f.psfMax)) return false;
   if (f.districts.size && !f.districts.has(dev.district)) return false;
@@ -1080,7 +1102,13 @@ function buildDistrictChips() {
   const seen = [...new Set(allDots.map((d) => d.dev.district).filter(Boolean))]
     .sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
   el("f-districts").innerHTML = seen
-    .map((d) => `<button type="button" class="chip" data-district="${esc(d)}">D${parseInt(d, 10)}</button>`)
+    .map((d) => {
+      const towns = districtNames[d] || "";
+      return `<button type="button" class="chip" data-district="${esc(d)}">` +
+        `<span class="chip-code">D${parseInt(d, 10)}</span>` +
+        (towns ? ` · ${esc(towns)}` : "") +
+        `</button>`;
+    })
     .join("");
 }
 
@@ -1093,7 +1121,9 @@ backBtn.addEventListener("click", () => enterExplore());
 async function loadDevelopments() {
   if (allDots.length) return;
   const r = await fetch("/api/developments");
-  const devs = (await r.json()).developments || [];
+  const payload = await r.json();
+  const devs = payload.developments || [];
+  districtNames = payload.districts || {};
   for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
   allDots = devs.map((dev) => {
     const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
@@ -1157,9 +1187,20 @@ el("metric-toggle").addEventListener("click", (e) => {
   if (b) setMetric(b.dataset.metric);
 });
 
-for (const id of ["f-active", "f-mrt", "f-tenure", "f-psf-min", "f-psf-max"]) {
+for (const id of ["f-active", "f-mrt", "f-psf-min", "f-psf-max"]) {
   el(id).addEventListener("input", applyFilters);
 }
+
+// Tenure is multi-select for the same reason the buckets are split at all:
+// freehold and 999-year are separate categories, and wanting both is normal.
+el("f-tenure").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  const t = chip.dataset.tenure;
+  tenureSel.has(t) ? tenureSel.delete(t) : tenureSel.add(t);
+  chip.classList.toggle("on", tenureSel.has(t));
+  applyFilters();
+});
 
 el("f-districts").addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
@@ -1173,11 +1214,11 @@ el("f-districts").addEventListener("click", (e) => {
 el("reset-filters").addEventListener("click", () => {
   el("f-active").checked = false;
   el("f-mrt").value = "";
-  el("f-tenure").value = "";
   el("f-psf-min").value = "";
   el("f-psf-max").value = "";
   districtSel = new Set();
-  for (const c of el("f-districts").querySelectorAll(".chip")) c.classList.remove("on");
+  tenureSel = new Set();
+  for (const c of panel.querySelectorAll(".chip")) c.classList.remove("on");
   applyFilters();
 });
 
