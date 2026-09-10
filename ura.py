@@ -5,7 +5,8 @@ import requests
 from dotenv import load_dotenv
 from datetime import datetime
 from cache.cache_ura import get_ura_data
-from utils import SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date, format_mmyy_date
+from utils import (SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date,
+                   format_mmyy_date, fit_price_trend)
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +434,13 @@ def price_trend(development_name: str) -> dict:
       {"error": str} / {"ambiguous": ...}  — mirrors search_property's contract
       {"development", "street", "fuzzy_match",
        "periods": [{"label", "avg_psf", "count"}, ...],   # ascending in time
-       "pct_change": int|None, "span_label": str, "total_txns": int}
+       "pct_change": int|None, "span_label": str, "total_txns": int,
+       "fit": dict|None}                                  # utils.fit_price_trend
+
+    `fit` is the growth rate the renderers quote and draw. `pct_change` is
+    still the plain first-vs-last comparison, kept for callers that want it —
+    it is NOT the headline any more, because those two endpoint means are the
+    thinnest numbers on the chart.
     """
     matched = _collect_matched_transactions(development_name)
     if "error" in matched or "ambiguous" in matched:
@@ -441,6 +448,7 @@ def price_trend(development_name: str) -> dict:
 
     # (year, half) -> list of PSF values.  half is 1 (Jan–Jun) or 2 (Jul–Dec).
     psf_by_period: dict[tuple[int, int], list[int]] = {}
+    fit_points: list[tuple[float, int]] = []
     total = 0
 
     for item in matched["matched_transactions"]:
@@ -469,6 +477,9 @@ def price_trend(development_name: str) -> dict:
         psf = round(price / area_sqft)
         half = 1 if dt.month <= 6 else 2
         psf_by_period.setdefault((dt.year, half), []).append(psf)
+        # The fit runs over individual transactions, not the period means, so
+        # a thin period cannot outweigh a busy one (see utils.fit_price_trend).
+        fit_points.append((dt.year + (dt.month - 0.5) / 12, psf))
         total += 1
 
     if total == 0:
@@ -489,6 +500,7 @@ def price_trend(development_name: str) -> dict:
     cur_half = 1 if now.month <= 6 else 2
 
     periods = []
+    period_times = []
     for (year, half) in sorted(buckets):
         psfs = buckets[(year, half)]
         label = f"{year} H{half}" if half_yearly else str(year)
@@ -499,7 +511,11 @@ def price_trend(development_name: str) -> dict:
             "count": len(psfs),
             "partial": partial,
         })
+        period_times.append(year + (0.5 if not half_yearly else (0.25 if half == 1 else 0.75)))
 
+    # Kept for callers that want the plain first-vs-last comparison, but it is
+    # NOT the headline any more: it rests on two of the thinnest numbers on the
+    # chart. `fit` is the trend (utils.fit_price_trend).
     # Headline % change: first vs last populated period.
     if len(periods) >= 2:
         first, last = periods[0]["avg_psf"], periods[-1]["avg_psf"]
@@ -510,6 +526,7 @@ def price_trend(development_name: str) -> dict:
     span_label = _trend_span_label(periods)
 
     return {
+        "fit": fit_price_trend(fit_points, period_times),
         "development": matched["matched_project_name"],
         "street": matched["street"],
         "fuzzy_match": matched["fuzzy_match"],
@@ -572,6 +589,33 @@ def _scaled_bar(value: float, lo: float, hi: float, width: int = 8) -> str:
     return bar + "░" * (width - full - (1 if rem else 0))
 
 
+def _trend_stat(result: dict, arrows=("↑", "↓", "→"), ci: bool = False) -> str:
+    """The one-line stat beside a trend chart.
+
+    The number is the FITTED annual rate, not first-period-vs-last: those two
+    endpoint means are the thinnest points on the chart (see
+    utils.fit_price_trend). When the fit can't clear its own error bars the
+    honest answer is that there is no measurable trend — say that instead of
+    quoting a rate the data doesn't support.
+    """
+    fit = result.get("fit")
+    span = result.get("span_label", "")
+    total = result.get("total_txns", 0)
+    up, down, flat = arrows
+
+    if fit and fit["significant"]:
+        pct = fit["annual_pct"]
+        arrow = up if pct > 0 else (down if pct < 0 else flat)
+        sign = "+" if pct > 0 else ""
+        rate = f"{arrow} {sign}{pct}%/yr"
+        if ci:
+            rate += f" ({fit['annual_low']:g}–{fit['annual_high']:g}%)"
+        return f"{rate} over {span} · {total} txns"
+    if fit:
+        return f"{flat} No clear trend over {span} · {total} txns — prices too scattered"
+    return f"{total} txns · too few sales to measure a trend"
+
+
 def format_price_trend(result: dict, include_bars: bool = True,
                        footnote: str = "resale + sub-sale only") -> str:
     """
@@ -592,9 +636,6 @@ def format_price_trend(result: dict, include_bars: bool = True,
 
     development = result.get("development", "Unknown")
     periods = result.get("periods", [])
-    pct = result.get("pct_change")
-    span = result.get("span_label", "")
-    total = result.get("total_txns", 0)
     fuzzy = result.get("fuzzy_match")
     has_partial = any(p.get("partial") for p in periods)
 
@@ -605,12 +646,7 @@ def format_price_trend(result: dict, include_bars: bool = True,
     psf_values = [p["avg_psf"] for p in periods]
     spark = _spark(psf_values)
 
-    if pct is not None and span:
-        arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "→")
-        sign = "+" if pct > 0 else ""
-        stat = f"{arrow} {sign}{pct}% over {span} · {total} txns"
-    else:
-        stat = f"{total} txns · _not enough history for a trend_"
+    stat = _trend_stat(result)
     lines.append(f"`{spark}`  {stat}" if spark else stat)
 
     lines.append(f"_{footnote}_")
@@ -662,19 +698,24 @@ def render_price_trend_png(result: dict, footnote: str = "resale + sub-sale only
 
     try:
         development = result.get("development", "Unknown")
-        pct = result.get("pct_change")
-        span = result.get("span_label", "")
-        total = result.get("total_txns", 0)
+        fit = result.get("fit")
 
         labels = [p["label"] for p in periods]
         psf = [p["avg_psf"] for p in periods]
         x = list(range(len(periods)))
 
         line_color = "#1f77b4"
-        up = pct is not None and pct > 0
 
         fig, ax = plt.subplots(figsize=(8, 4.2), dpi=140)
-        ax.plot(x, psf, color=line_color, linewidth=2, zorder=2)
+        ax.plot(x, psf, color=line_color, linewidth=2, zorder=2, label="Avg PSF")
+
+        # The fitted trend rides UNDER the period line, dashed and muted: it is
+        # the summary, not the data. Drawn only when the slope clears its own
+        # error bars — see utils.fit_price_trend.
+        drew_fit = fit and fit["significant"] and len(fit["values"]) == len(x)
+        if drew_fit:
+            ax.plot(x, fit["values"], color="#8a94a6", linewidth=1.6, linestyle="--",
+                    zorder=1, label=f"Trend {fit['annual_pct']:+g}%/yr")
 
         # Solid markers for completed periods; a hollow marker for an in-progress one.
         for xi, p in zip(x, periods):
@@ -685,7 +726,8 @@ def render_price_trend_png(result: dict, footnote: str = "resale + sub-sale only
                 ax.plot(xi, p["avg_psf"], marker="o", markersize=7, color=line_color, zorder=3)
 
         # Annotate each point with its PSF value.
-        span_psf = (max(psf) - min(psf)) or 1
+        drawn = psf + (fit["values"] if drew_fit else [])
+        span_psf = (max(drawn) - min(drawn)) or 1
         for xi, p in zip(x, periods):
             note = f"{p['avg_psf']:,}" + (" *" if p.get("partial") else "")
             ax.annotate(note, (xi, p["avg_psf"]), textcoords="offset points",
@@ -694,24 +736,22 @@ def render_price_trend_png(result: dict, footnote: str = "resale + sub-sale only
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45 if len(labels) > 6 else 0, ha="right" if len(labels) > 6 else "center")
         ax.set_ylabel("Avg PSF (S$)", fontsize=10)
-        ax.set_ylim(min(psf) - span_psf * 0.18, max(psf) + span_psf * 0.22)
+        ax.set_ylim(min(drawn) - span_psf * 0.18, max(drawn) + span_psf * 0.22)
         ax.margins(x=0.06)
         ax.grid(axis="y", linestyle=":", alpha=0.5)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
 
-        if pct is not None and span:
-            arrow = "▲" if up else ("▼" if pct < 0 else "►")
-            sign = "+" if pct > 0 else ""
-            subtitle = f"{arrow} {sign}{pct}% over {span}  ·  {total} txns  ·  {footnote}"
-        else:
-            subtitle = f"{total} txns  ·  {footnote}"
+        subtitle = f"{_trend_stat(result, arrows=('▲', '▼', '►'), ci=True)}  ·  {footnote}"
+        subtitle = subtitle.replace(" · ", "  ·  ")
         has_partial = any(p.get("partial") for p in periods)
         if has_partial:
             subtitle += "   (* current period still in progress)"
 
         ax.set_title(f"{development} — PSF trend", fontsize=13, fontweight="bold", loc="left", pad=22)
         ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color="#666", va="bottom")
+        if drew_fit:
+            ax.legend(loc="best", fontsize=8, frameon=False)
 
         buf = io.BytesIO()
         fig.savefig(buf, format="png", bbox_inches="tight")

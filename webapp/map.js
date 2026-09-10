@@ -449,39 +449,80 @@ async function loadTrend(d) {
     return;
   }
 
-  let headline = `Avg resale PSF, ${esc(t.span_label || "over time")} · ${t.total_txns} txns`;
-  if (t.pct_change != null) {
-    const cls = t.pct_change >= 0 ? "delta-up" : "delta-down";
-    const arrow = t.pct_change >= 0 ? "▲" : "▼";
-    headline = `<span class="${cls}">${arrow} ${t.pct_change > 0 ? "+" : ""}${t.pct_change}%</span> ${headline}`;
+  // The rate quoted here is the FITTED one, not first-period-vs-last: those
+  // two endpoint means are the thinnest points on the chart, and across the
+  // cache they disagree with a fit by a median 3.4pp — on the sign of growth
+  // 5% of the time. When the fit can't clear its own error bars, say so
+  // instead of printing a number the data doesn't support.
+  const fit = t.fit;
+  const tail = `avg resale PSF, ${esc(t.span_label || "over time")} · ${t.total_txns} txns`;
+  let headline;
+  if (fit && fit.significant) {
+    const up = fit.annual_pct >= 0;
+    headline =
+      `<span class="${up ? "delta-up" : "delta-down"}">${up ? "▲" : "▼"} ` +
+      `${fit.annual_pct > 0 ? "+" : ""}${fit.annual_pct}%/yr</span> ` +
+      `<span class="ci">(${fit.annual_low}–${fit.annual_high}%)</span> · ${tail}`;
+  } else if (fit) {
+    headline = `<span class="delta-flat">No clear trend</span> — prices too scattered · ${tail}`;
+  } else {
+    headline = `${tail} — too few sales to measure a trend`;
   }
+
+  const showFit = Boolean(fit && fit.significant && fit.values.length === periods.length);
   area.innerHTML =
     `<p class="trend-headline">${headline}</p>` +
-    `<div class="chart-box"><canvas id="trend-chart" height="180"></canvas></div>`;
+    `<div class="chart-box"><canvas id="trend-chart" height="${showFit ? 200 : 180}"></canvas></div>`;
 
   trendChart = new Chart(el("trend-chart"), {
     type: "line",
     data: {
       labels: periods.map((p) => p.label),
-      datasets: [{
-        data: periods.map((p) => p.avg_psf),
-        borderColor: BRAND,
-        backgroundColor: BRAND,
-        borderWidth: 2,
-        pointRadius: 3,
-        pointHoverRadius: 6,
-        tension: 0.15,
-      }],
+      datasets: [
+        {
+          label: "Avg PSF",
+          data: periods.map((p) => p.avg_psf),
+          borderColor: BRAND,
+          backgroundColor: BRAND,
+          borderWidth: 2,
+          pointRadius: 3,
+          pointHoverRadius: 6,
+          tension: 0.15,
+        },
+        // Dashed and muted: the fit is the summary, the period line is the
+        // data. It is also the only thing that stays straight when the market
+        // turns — which is exactly why it never replaces the line.
+        ...(showFit ? [{
+          label: `Trend ${fit.annual_pct > 0 ? "+" : ""}${fit.annual_pct}%/yr`,
+          data: fit.values,
+          borderColor: INK_MUTED,
+          backgroundColor: INK_MUTED,
+          borderWidth: 1.5,
+          borderDash: [6, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          tension: 0,
+        }] : []),
+      ],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false }, // crosshair-style hover
       plugins: {
-        legend: { display: false },
+        // Two series now, so the dashed line has to be named. One series
+        // still means no legend — the section title says what it is.
+        legend: showFit
+          ? {
+              display: true,
+              position: "bottom",
+              labels: { boxWidth: 18, boxHeight: 2, color: INK_MUTED, font: { size: 11 } },
+            }
+          : { display: false },
         tooltip: {
           callbacks: {
             label: (ctx) => {
+              if (ctx.datasetIndex === 1) return `Fitted trend: ${fmtMoney(ctx.parsed.y)} psf`;
               const p = periods[ctx.dataIndex];
               return `${fmtMoney(p.avg_psf)} psf · ${p.count} txns`;
             },

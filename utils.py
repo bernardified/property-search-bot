@@ -8,7 +8,7 @@ import re
 import time
 import logging
 from datetime import datetime, date, timedelta
-from math import radians, degrees, sin, cos, tan, sqrt, atan2, pi
+from math import radians, degrees, sin, cos, tan, sqrt, atan2, pi, log, exp
 from zoneinfo import ZoneInfo
 
 SGT = ZoneInfo("Asia/Singapore")
@@ -154,6 +154,109 @@ def format_mmyy_date(date_str: str) -> str:
     """Convert MMYY to human-readable e.g. '0921' -> 'Sep 2021'"""
     dt = parse_mmyy_date(date_str)
     return dt.strftime("%b %Y") if dt else date_str
+
+
+# ── Price-trend fit ───────────────────────────────────────────────────────────
+#
+# The period line a trend chart draws is the data; the growth *rate* quoted
+# beside it should not be first-period-vs-last. Those two endpoint buckets hold
+# a median of 3 and 4 transactions across the URA cache, and in 57% of projects
+# one of them holds two or fewer — so a single high-floor sale can set a
+# development's headline. Measured against a fit over the same span, that
+# headline is off by a median 3.4pp (p90 11pp, max 48pp) and disagrees on the
+# *sign* of growth for 5% of projects.
+#
+# So the rate comes from an ordinary least-squares fit instead:
+#
+#   * over individual transactions, not the period means — a 1-sale year must
+#     not weigh as much as a 40-sale one;
+#   * on log PSF, because growth compounds. A straight line through PSF asserts
+#     constant dollars per year; the slope of a log fit is a constant % per
+#     year, which is what "price growth" means (and what a CAGR is);
+#   * quoted only when the slope clears its own standard error (two-sided 95%),
+#     because a third of developments have no measurable trend at all. Drawing a
+#     confident line through those is precision that isn't in the data.
+#
+# Across the cache this calls a trend for ~47% of developments at a median
+# 5.2%/yr, against 5.4%/yr for the market as a whole over the same window —
+# scattered (23%) and too-thin (29%) developments get a plain-language note
+# instead of a number.
+
+MIN_FIT_TXNS = 6          # below this the fit is arithmetic, not evidence
+MIN_FIT_SPAN_YEARS = 1.5  # a slope needs a baseline to be a slope
+
+# Two-sided 95% critical values by degrees of freedom. Small samples need a
+# taller bar than 1.96 and this is the whole point at n=6, so the table is
+# worth its four lines.
+_T95 = ((4, 2.78), (6, 2.45), (8, 2.31), (10, 2.23), (15, 2.13),
+        (20, 2.09), (30, 2.04), (60, 2.00))
+
+
+def _t_critical(df: int) -> float:
+    for cap, t in _T95:
+        if df <= cap:
+            return t
+    return 1.96
+
+
+def fit_price_trend(points: list, period_times: list) -> dict | None:
+    """Least-squares growth rate through individual transactions.
+
+    `points` is [(t_years, psf), ...] — one entry per transaction, t in decimal
+    years. `period_times` is the nominal midpoint of each plotted period, in the
+    same units, so the fitted curve can be drawn against a categorical axis that
+    has dropped its empty periods.
+
+    Returns None when there is too little to fit at all, else:
+      {"annual_pct", "annual_low", "annual_high",   # compound %/yr, 95% CI
+       "total_pct",                                 # fitted change across the span
+       "r2", "n", "span_years", "significant",
+       "values": [fitted psf at each period_time]}
+
+    `significant` False means the data is too scattered to call a direction —
+    callers should say so rather than draw the line anyway.
+    """
+    usable = [(t, psf) for t, psf in points if psf and psf > 0 and t is not None]
+    n = len(usable)
+    if n < MIN_FIT_TXNS:
+        return None
+    span = max(t for t, _ in usable) - min(t for t, _ in usable)
+    if span < MIN_FIT_SPAN_YEARS:
+        return None
+
+    xs = [t for t, _ in usable]
+    ys = [log(psf) for _, psf in usable]
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    intercept = my - slope * mx
+
+    ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    ss_tot = sum((y - my) ** 2 for y in ys)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # Standard error of the slope, and the interval it implies on the rate.
+    # ss_res == 0 is a perfectly collinear sample (only the synthetic ones):
+    # treat it as certain rather than dividing by zero.
+    se = sqrt(ss_res / (n - 2) / sxx) if n > 2 and ss_res > 0 else 0.0
+    margin = _t_critical(n - 2) * se
+    significant = se == 0 or abs(slope) > margin
+
+    rate = lambda b: (exp(b) - 1) * 100
+    return {
+        "annual_pct": round(rate(slope), 1),
+        "annual_low": round(rate(slope - margin), 1),
+        "annual_high": round(rate(slope + margin), 1),
+        "total_pct": round((exp(slope * span) - 1) * 100),
+        "r2": round(r2, 2),
+        "n": n,
+        "span_years": round(span, 1),
+        "significant": significant,
+        "values": [round(exp(intercept + slope * t)) for t in period_times],
+    }
 
 
 # ── Geospatial ────────────────────────────────────────────────────────────────

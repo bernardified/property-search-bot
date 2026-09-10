@@ -28,7 +28,8 @@ from statistics import median
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from cache.cache_hdb import get_hdb_resale_data
-from utils import FLAT_TYPES, STREET_ABBREV, sqm_to_sqft, parse_float, parse_remaining_lease
+from utils import (FLAT_TYPES, STREET_ABBREV, sqm_to_sqft, parse_float,
+                   parse_remaining_lease, fit_price_trend)
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
       {"error": str}
       {"development", "periods": [{"label", "avg_psf", "count", "partial"}, ...],
        "pct_change": int|None, "span_label": str, "total_txns": int,
-       "fuzzy_match": None}
+       "fit": dict|None, "fuzzy_match": None}
     """
     b = block.strip().upper() if block else None
     s = street.strip().upper()
@@ -336,6 +337,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
 
     # (year, half) -> list of PSF values. half is 1 (Jan–Jun) or 2 (Jul–Dec).
     psf_by_period: dict[tuple[int, int], list[int]] = {}
+    fit_points: list[tuple[float, int]] = []
     total = 0
     for r in rows:
         if not r["month_dt"] or not r["psf"]:
@@ -343,6 +345,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
         dt = r["month_dt"]
         half = 1 if dt.month <= 6 else 2
         psf_by_period.setdefault((dt.year, half), []).append(r["psf"])
+        fit_points.append((dt.year + (dt.month - 0.5) / 12, r["psf"]))
         total += 1
 
     if total == 0:
@@ -360,6 +363,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
     cur_half = 1 if now.month <= 6 else 2
 
     periods = []
+    period_times = []
     for (year, half) in sorted(buckets):
         psfs = buckets[(year, half)]
         label = f"{year} H{half}" if half_yearly else str(year)
@@ -370,6 +374,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
             "count": len(psfs),
             "partial": partial,
         })
+        period_times.append(year + (0.5 if not half_yearly else (0.25 if half == 1 else 0.75)))
 
     if len(periods) >= 2:
         first, last = periods[0]["avg_psf"], periods[-1]["avg_psf"]
@@ -378,6 +383,7 @@ def price_trend(block: str | None, street: str, records: list | None = None,
         pct_change = None
 
     return {
+        "fit": fit_price_trend(fit_points, period_times),
         "development": target,
         "street": s,
         "fuzzy_match": None,
