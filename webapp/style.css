@@ -75,8 +75,9 @@ body {
 }
 #search-form button:disabled { background: #9db5e8; cursor: wait; }
 
-/* Shown only inside a search result — the single way back to the dot map. */
-#back-to-explore {
+/* The two buttons under the search bar, both shown only inside a search
+   result: nearby developments, and the way back to the dot map. */
+.side-btn {
   display: block;
   width: 100%;
   margin-top: 8px;
@@ -87,9 +88,15 @@ body {
   border-radius: 8px;
   cursor: pointer;
   color: #1e2430;
+  text-align: center;
 }
-#back-to-explore:hover { background: #f0f4fb; }
-#back-to-explore[hidden] { display: none; }
+.side-btn:hover { background: #f0f4fb; }
+.side-btn:disabled { color: #9aa3b2; cursor: wait; }
+/* display:block above would otherwise beat the UA rule for [hidden] */
+.side-btn[hidden] { display: none; }
+
+#nearby-btn { border-color: #e2b877; background: #fffaf1; }
+#nearby-btn:hover { background: #fdf2df; }
 
 #attribution {
   margin-top: 18px;
@@ -269,7 +276,8 @@ body {
   box-shadow: 0 2px 8px rgba(0,0,0,.12);
 }
 
-#legend {
+#legend,
+#nearby-legend {
   position: absolute;
   bottom: 20px;
   left: 12px;
@@ -283,8 +291,8 @@ body {
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,.12);
 }
-#legend[hidden] { display: none; }
-#legend span { display: flex; align-items: center; gap: 4px; }
+#legend[hidden], #nearby-legend[hidden] { display: none; }
+#legend span, #nearby-legend span { display: flex; align-items: center; gap: 4px; }
 .dot {
   width: 10px;
   height: 10px;
@@ -305,6 +313,23 @@ body {
   display: inline-block;
 }
 
+/* Teardrop swatches mirroring the nearby pins — a rounded square rotated onto
+   its point, so the legend reads as pins rather than amenity dots. */
+.pin {
+  width: 11px;
+  height: 11px;
+  display: inline-block;
+  border: 1.5px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 0 0 1px rgba(11,11,11,.12);
+}
+.pin.origin { background: #2563eb; }
+.pin.near { background: #d97706; }
+.pin.nodata { background: #b9b7b0; }
+/* Leaflet divIcon wrapper — the SVG carries the whole pin. */
+.pin-marker { background: none; border: none; }
+
 /* Straight-line verdict inside a school popup — the 1 km rule is pass/fail,
    so the two states read differently rather than sharing one neutral ink. */
 .in-ring { color: #15803d; font-weight: 600; }
@@ -312,6 +337,63 @@ body {
 
 .popup-name { font-weight: 600; }
 .popup-line { color: #444d5c; font-size: 0.8rem; }
+
+/* ── Nearby view: back button + the neighbour list ───────────────────────── */
+
+#nearby-view { margin-top: 14px; }
+#nearby-view[hidden] { display: none; }
+
+#nearby-back {
+  padding: 5px 10px;
+  border: 1px solid #c9ced6;
+  border-radius: 8px;
+  background: #fff;
+  color: #2563eb;
+  font-size: 0.8rem;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#nearby-back:hover { background: #f0f4fb; }
+
+#nearby-view h2 { font-size: 1.05rem; margin: 10px 0 2px; }
+#nearby-view .meta { color: #5b6472; font-size: 0.82rem; margin: 0 0 8px; }
+
+.near-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  margin-top: 5px;
+  padding: 7px 10px;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.near-row:hover { background: #f0f4fb; border-color: #c9ced6; }
+.near-dist {
+  flex-shrink: 0;
+  width: 52px;
+  color: #b4600c;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.near-body { min-width: 0; }
+.near-name {
+  display: block;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.near-meta { display: block; color: #5b6472; font-size: 0.75rem; }
+.near-meta .muted { color: #898781; }
 
 /* ── Explore panel: colour metric + client-side filters ──────────────────── */
 
@@ -480,7 +562,8 @@ body {
   /* The sheet would otherwise sit on top of the map legend. Narrow screens
      squeeze the last item into a four-line stack, so let the row wrap onto a
      second line instead of compressing one entry. */
-  #legend {
+  #legend,
+  #nearby-legend {
     bottom: 12px;
     right: 12px;
     flex-wrap: wrap;

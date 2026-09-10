@@ -455,5 +455,82 @@ class TestExploreEncoding(unittest.TestCase):
         self.assertIsNone(devs[0]["mrt_m"])
 
 
+class TestNearby(unittest.TestCase):
+    """The map's nearby view: a radius filter over the explore-dot payload."""
+
+    DEVS = [
+        {"project": "ORIGIN", "street": "O ST", "district": "19", "lat": 1.3600,
+         "lng": 103.8700, "avg_psf": 1500, "txns_12mo": 4, "yield_pct": 3.4,
+         "tenure": "freehold", "mrt_m": 300, "last_txn": "Jul 2026"},
+        {"project": "CLOSE", "street": "C ST", "district": "19", "lat": 1.3609,
+         "lng": 103.8700, "avg_psf": 1600, "txns_12mo": 2, "yield_pct": None,
+         "tenure": "leasehold", "mrt_m": 700, "last_txn": "Jun 2026"},
+        # ~1.3 km north — a different district too, which must NOT be what
+        # decides inclusion (see nearby_developments' docstring).
+        {"project": "FAR", "street": "F ST", "district": "20", "lat": 1.3720,
+         "lng": 103.8700, "avg_psf": None, "txns_12mo": 0, "yield_pct": None,
+         "tenure": None, "mrt_m": None, "last_txn": None},
+        {"project": "MID", "street": "M ST", "district": "20", "lat": 1.3645,
+         "lng": 103.8700, "avg_psf": 1400, "txns_12mo": 1, "yield_pct": 4.0,
+         "tenure": "freehold", "mrt_m": 900, "last_txn": "Mar 2026"},
+    ]
+
+    def test_radius_filter_is_nearest_first_and_excludes_the_origin(self):
+        from api import nearby_developments
+        out = nearby_developments(self.DEVS, "origin", radius_m=1000)
+        names = [r["project"] for r in out["results"]]
+        self.assertEqual(names, ["CLOSE", "MID"])       # FAR is beyond 1 km
+        self.assertEqual(out["total"], 2)
+        self.assertEqual(out["origin"]["project"], "ORIGIN")
+        self.assertLess(out["results"][0]["distance_m"], out["results"][1]["distance_m"])
+
+    def test_results_keep_the_full_dot_payload(self):
+        """The popups are the explore popups — every field they read survives."""
+        from api import nearby_developments
+        row = nearby_developments(self.DEVS, "ORIGIN")["results"][0]
+        for key in ("street", "district", "avg_psf", "txns_12mo", "yield_pct",
+                    "tenure", "mrt_m", "last_txn", "lat", "lng"):
+            self.assertIn(key, row)
+        self.assertEqual(row["distance_m"], 100)
+
+    def test_district_does_not_bound_the_radius(self):
+        """nearby.nearby_for_project bounds candidates to the origin's own
+        district; on a map that reads as a straight-line edge of missing dots
+        (SANDY EIGHT: 171 developments within 1 km, only 86 in its district)."""
+        from api import nearby_developments
+        names = [r["project"] for r in nearby_developments(self.DEVS, "ORIGIN")["results"]]
+        self.assertIn("MID", names)   # D20 neighbour of a D19 origin
+
+    def test_limit_caps_results_but_not_the_total(self):
+        from api import nearby_developments
+        out = nearby_developments(self.DEVS, "ORIGIN", limit=1)
+        self.assertEqual(len(out["results"]), 1)
+        self.assertEqual(out["total"], 2)
+
+    def test_explicit_origin_coordinate_wins(self):
+        """The frontend passes the pin it is showing (URA x/y, or an exact
+        postal coordinate) so the ring is centred on what the user sees."""
+        from api import nearby_developments
+        out = nearby_developments(self.DEVS, "NOT IN THE LIST",
+                                  origin=(1.3600, 103.8700))
+        self.assertEqual(out["origin"]["project"], "NOT IN THE LIST")
+        # Exclusion is by name, so a dot at that exact spot under another name
+        # is a genuine neighbour, not the origin repeated.
+        self.assertEqual([r["project"] for r in out["results"]],
+                         ["ORIGIN", "CLOSE", "MID"])
+
+    def test_unknown_origin_without_coords_errors(self):
+        from api import nearby_developments
+        self.assertIn("error", nearby_developments(self.DEVS, "NOWHERE"))
+
+    def test_nearby_endpoint(self):
+        import api
+        api._dev_memo.update(txns=None, rentals=None, payload=None)
+        with patch("api.api_developments", return_value={"developments": self.DEVS}):
+            data = client.get("/api/nearby", params={"q": "ORIGIN", "radius_m": 1000}).json()
+        self.assertEqual([r["project"] for r in data["results"]], ["CLOSE", "MID"])
+        self.assertEqual(data["radius_m"], 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
