@@ -2065,6 +2065,143 @@ class TestHDB(unittest.TestCase):
             self.assertFalse(any(bad in c for c in cbs), f"{bad} leaked into HDB keyboard")
 
 
+# ══════════════════════════════════════════════════════
+# HDB CACHE COMPLETENESS (a partial fetch must not win)
+# ══════════════════════════════════════════════════════
+
+class TestHDBCacheCompleteness(unittest.TestCase):
+    """The refresh asks for 60 months. A run that comes back with a handful of
+    them is a failed fetch, not a small market — it must never replace a good
+    cache, because everything downstream (the per-block 5-year price trend
+    above all) silently degrades to whatever survived."""
+
+    def setUp(self):
+        # Retries are real sleeps; tests don't wait them out.
+        self.sleep = patch("cache.cache_hdb.time.sleep").start()
+        self.addCleanup(patch.stopall)
+
+    @staticmethod
+    def _rows(month, n=3):
+        return [{"month": month, "resale_price": "500000"} for _ in range(n)]
+
+    # ── fetch layer ────────────────────────────────────────────────────────
+
+    def test_full_window_is_complete(self):
+        from cache import cache_hdb
+        months = [f"2026-{m:02d}" for m in range(1, 11)]
+        with patch.object(cache_hdb, "_fetch_month",
+                          side_effect=lambda rid, m: (self._rows(m), True)):
+            records, complete = cache_hdb._fetch_resale("rid", months)
+        self.assertTrue(complete)
+        self.assertEqual(len(records), 30)
+
+    def test_mostly_empty_window_is_incomplete(self):
+        """The regression: 2 of 60 months came back and were saved as the cache."""
+        from cache import cache_hdb
+        months = [f"m{i}" for i in range(60)]
+        got = {"m0", "m1"}
+        with patch.object(cache_hdb, "_fetch_month",
+                          side_effect=lambda rid, m: (self._rows(m), True) if m in got else ([], False)):
+            records, complete = cache_hdb._fetch_resale("rid", months)
+        self.assertFalse(complete)
+        self.assertEqual(len(records), 6)
+
+    def test_one_missing_month_still_counts_as_complete(self):
+        """The gate is a bar, not perfection — a single gap must not block a
+        refresh for a month."""
+        from cache import cache_hdb
+        months = [f"m{i}" for i in range(60)]
+        with patch.object(cache_hdb, "_fetch_month",
+                          side_effect=lambda rid, m: ([], False) if m == "m7" else (self._rows(m), True)):
+            _, complete = cache_hdb._fetch_resale("rid", months)
+        self.assertTrue(complete)
+
+    def test_month_is_retried_before_it_counts_as_failed(self):
+        from cache import cache_hdb
+        calls = []
+
+        def flaky(rid, month, offset):
+            calls.append(month)
+            return ([], False) if len(calls) == 1 else ([{"month": month}], True)
+
+        with patch.object(cache_hdb, "_fetch_page", side_effect=flaky):
+            records, ok = cache_hdb._fetch_month("rid", "2026-08")
+        self.assertTrue(ok)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(calls), 2)          # failed once, retried, succeeded
+
+    def test_month_gives_up_after_the_attempt_limit(self):
+        from cache import cache_hdb
+        with patch.object(cache_hdb, "_fetch_page", return_value=([], False)) as page:
+            records, ok = cache_hdb._fetch_month("rid", "2026-08")
+        self.assertFalse(ok)
+        self.assertEqual(records, [])
+        self.assertEqual(page.call_count, cache_hdb.FETCH_ATTEMPTS)
+
+    # ── the gate ───────────────────────────────────────────────────────────
+
+    def test_incomplete_fetch_keeps_the_existing_cache(self):
+        from cache import cache_hdb
+        existing = [{"month": "2021-01"}] * 100
+        with patch.object(cache_hdb, "_is_cache_fresh", return_value=False), \
+             patch.object(cache_hdb, "_resolve_resource_id", return_value="rid"), \
+             patch.object(cache_hdb, "_fetch_resale", return_value=([{"month": "2026-09"}], False)), \
+             patch.object(cache_hdb, "_load_cache", return_value=existing), \
+             patch.object(cache_hdb, "_save_cache") as save:
+            out = cache_hdb.get_hdb_resale_data()
+        save.assert_not_called()
+        self.assertEqual(len(out), 100)
+
+    def test_incomplete_fetch_is_saved_only_when_there_is_nothing_to_lose(self):
+        from cache import cache_hdb
+        rows = [{"month": "2026-09"}]
+        with patch.object(cache_hdb, "_is_cache_fresh", return_value=False), \
+             patch.object(cache_hdb, "_resolve_resource_id", return_value="rid"), \
+             patch.object(cache_hdb, "_fetch_resale", return_value=(rows, False)), \
+             patch.object(cache_hdb, "_load_cache", return_value=[]), \
+             patch.object(cache_hdb, "_save_cache") as save:
+            out = cache_hdb.get_hdb_resale_data()
+        self.assertEqual(out, rows)
+        self.assertTrue(save.call_args.kwargs["partial"])   # flagged, so it retries
+
+    def test_complete_fetch_replaces_the_cache(self):
+        from cache import cache_hdb
+        rows = [{"month": "2026-09"}] * 5
+        with patch.object(cache_hdb, "_is_cache_fresh", return_value=False), \
+             patch.object(cache_hdb, "_resolve_resource_id", return_value="rid"), \
+             patch.object(cache_hdb, "_fetch_resale", return_value=(rows, True)), \
+             patch.object(cache_hdb, "_load_cache", return_value=[{"old": 1}]), \
+             patch.object(cache_hdb, "_save_cache") as save:
+            out = cache_hdb.get_hdb_resale_data()
+        self.assertEqual(out, rows)
+        self.assertFalse(save.call_args.kwargs["partial"])
+
+    def test_force_refresh_will_not_overwrite_with_a_partial_window(self):
+        from cache import cache_hdb
+        with patch.object(cache_hdb, "_resolve_resource_id", return_value="rid"), \
+             patch.object(cache_hdb, "_fetch_resale", return_value=([{"m": 1}], False)), \
+             patch.object(cache_hdb, "_load_cache", return_value=[{"old": 1}]), \
+             patch.object(cache_hdb, "_save_cache") as save:
+            self.assertFalse(cache_hdb.force_refresh_hdb())
+        save.assert_not_called()
+
+    def test_partial_cache_is_never_fresh(self):
+        """Without this the partial window written to a cold cache would be
+        trusted for a whole month instead of retried on the next call."""
+        from cache import cache_hdb
+        db = MagicMock()
+        db.__getitem__.return_value.find_one.return_value = {
+            "timestamp": time.time(), "partial": True,
+        }
+        with patch.object(cache_hdb, "get_mongo_db", return_value=db):
+            self.assertFalse(cache_hdb._is_cache_fresh())
+        db.__getitem__.return_value.find_one.return_value = {
+            "timestamp": time.time(), "partial": False,
+        }
+        with patch.object(cache_hdb, "get_mongo_db", return_value=db):
+            self.assertTrue(cache_hdb._is_cache_fresh())
+
+
 def run_tests():
     section("Property Bot Test Suite")
     print(f"Python {sys.version.split()[0]} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -2096,6 +2233,7 @@ def run_tests():
         TestNearbySearch,
         TestUnitCountsHarvest,
         TestHDB,
+        TestHDBCacheCompleteness,
     ]
 
     for cls in test_classes:
