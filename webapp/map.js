@@ -127,6 +127,7 @@ async function runSearch(q) {
   currentProperty = null;
   nearbyBtn.hidden = true;
   input.value = q;
+  hideSuggest();          // a picked suggestion never leaves its list open behind the result
   searchBtn.disabled = true;
   setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
   resultsBox.hidden = true;
@@ -180,6 +181,114 @@ function renderCandidates(candidates) {
     b.onclick = () => runSearch(b.dataset.name);
   });
 }
+
+// ── Type-ahead suggestions ───────────────────────────────────────────────────
+//
+// Purely client-side: /api/developments has already put every dot's project +
+// street in `allDots` (explore is the landing state), so matching is a scan
+// over ~2.4k short strings — no endpoint, no request, no debounce. It follows
+// that suggestions cover exactly the *mappable* developments: a project URA
+// can search but has no coordinate never got a dot, so it never appears here.
+// Typing its name in full still works, and the server's fuzzy "Did you mean"
+// still catches typos on submit — the dropdown is a shortcut, not the search.
+
+const suggestBox = el("suggest");
+const SUGGEST_MAX = 8;
+const SUGGEST_MIN_CHARS = 2;
+
+let suggestions = [];    // the devs currently listed
+let suggestIndex = -1;   // keyboard highlight; -1 = none, Enter submits the raw text
+
+// Name matches rank above street matches, and prefix above mid-word, so
+// "the s" leads with THE SAIL rather than a street three screens down.
+function matchDevelopments(q) {
+  const needle = q.trim().toUpperCase();
+  if (needle.length < SUGGEST_MIN_CHARS) return [];
+  const starts = [], contains = [], streets = [];
+  for (const { dev } of allDots) {
+    const i = dev.project.toUpperCase().indexOf(needle);
+    if (i === 0) starts.push(dev);
+    else if (i > 0) contains.push(dev);
+    else if (String(dev.street || "").toUpperCase().includes(needle)) streets.push(dev);
+    if (starts.length >= SUGGEST_MAX) break;   // nothing later can outrank a full page of prefixes
+  }
+  return starts.concat(contains, streets).slice(0, SUGGEST_MAX);
+}
+
+function highlight(text, needle) {
+  const s = String(text ?? "");
+  const i = s.toUpperCase().indexOf(needle);
+  if (i < 0) return esc(s);
+  return esc(s.slice(0, i)) + "<b>" + esc(s.slice(i, i + needle.length)) + "</b>" +
+         esc(s.slice(i + needle.length));
+}
+
+function hideSuggest() {
+  suggestions = [];
+  suggestIndex = -1;
+  suggestBox.hidden = true;
+  suggestBox.innerHTML = "";
+  input.setAttribute("aria-expanded", "false");
+  input.removeAttribute("aria-activedescendant");
+}
+
+function renderSuggest(q) {
+  const needle = q.trim().toUpperCase();
+  suggestBox.innerHTML = suggestions
+    .map((d, i) =>
+      `<div class="sug" role="option" id="sug-${i}" aria-selected="false" data-i="${i}">` +
+      `<div>${highlight(d.project, needle)}</div>` +
+      `<div class="sug-street">${highlight(d.street, needle)}</div></div>`
+    )
+    .join("");
+  suggestBox.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+}
+
+function moveSuggest(delta) {
+  if (!suggestions.length) return;
+  suggestIndex = (suggestIndex + delta + suggestions.length) % suggestions.length;
+  suggestBox.querySelectorAll(".sug").forEach((row, i) => {
+    const on = i === suggestIndex;
+    row.classList.toggle("active", on);
+    row.setAttribute("aria-selected", String(on));
+    if (on) row.scrollIntoView({ block: "nearest" });
+  });
+  input.setAttribute("aria-activedescendant", "sug-" + suggestIndex);
+}
+
+input.addEventListener("input", () => {
+  const q = input.value.trim();
+  // A run of bare digits is a postal code being typed — there is nothing in
+  // the dot list to suggest for it, and "12" would match half the streets.
+  if (/^\d+$/.test(q)) return hideSuggest();
+  suggestions = matchDevelopments(q);   // empty while the dot list is still loading
+  suggestIndex = -1;
+  if (!suggestions.length) return hideSuggest();
+  renderSuggest(q);
+});
+
+input.addEventListener("keydown", (e) => {
+  if (suggestBox.hidden) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); moveSuggest(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); moveSuggest(-1); }
+  else if (e.key === "Escape") { hideSuggest(); }
+  else if (e.key === "Enter" && suggestIndex >= 0) {
+    e.preventDefault();                 // the form would otherwise submit the raw text
+    runSearch(suggestions[suggestIndex].project);
+  }
+});
+
+// mousedown, not click: the input's blur would tear the list down before a
+// click could land on it.
+suggestBox.addEventListener("mousedown", (e) => {
+  const row = e.target.closest(".sug");
+  if (!row) return;
+  e.preventDefault();
+  runSearch(suggestions[Number(row.dataset.i)].project);
+});
+
+input.addEventListener("blur", () => hideSuggest());
 
 // ── Results panel ────────────────────────────────────────────────────────────
 

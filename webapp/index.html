@@ -13,10 +13,18 @@
   <div id="app">
     <aside id="sidebar">
       <h1>🏙️ SG Property Map</h1>
-      <form id="search-form" autocomplete="off">
-        <input id="search-input" type="text" placeholder="Development name or 6-digit postal code" required>
-        <button type="submit">Search</button>
-      </form>
+      <!-- The suggestion list is a sibling of the form, not a child: the form
+           is a flex row, and the dropdown has to span its full width. -->
+      <div id="search-box">
+        <form id="search-form" autocomplete="off">
+          <input id="search-input" type="text" required
+                 placeholder="Development name or 6-digit postal code"
+                 role="combobox" aria-expanded="false" aria-controls="suggest"
+                 aria-autocomplete="list">
+          <button type="submit">Search</button>
+        </form>
+        <div id="suggest" role="listbox" aria-label="Matching developments" hidden></div>
+      </div>
       <button id="nearby-btn" class="side-btn" type="button" hidden>📌 Search nearby (within 1 km)</button>
       <!-- Explore is the landing state, so there is no button to enter it.
            This returns from a search result, the one place it is reachable
