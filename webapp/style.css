@@ -263,6 +263,29 @@ body {
 .candidates button:hover { background: #f0f4fb; }
 .candidates .cand-street { color: #5b6472; font-size: 0.75rem; }
 
+/* One search box serves both markets, so a result has to say which one it is
+   — a private development and an HDB block otherwise look alike at a glance. */
+.market-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #7c4a03;
+  background: #fdf1dc;
+  border-radius: 999px;
+  vertical-align: 1px;
+}
+
+/* Blocks on a street: a wide grid, since these are short labels and a street
+   can carry twenty of them. */
+.candidates:has(.hdb-block) {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(122px, 1fr));
+  gap: 6px;
+}
+.candidates .hdb-block { margin-top: 0; }
+
 #map-wrap { flex: 1; position: relative; }
 #map { position: absolute; inset: 0; }
 

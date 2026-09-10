@@ -30,16 +30,18 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
+import hdb
 from ura import search_property, price_trend, band_transactions
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from district_search import DISTRICT_NAMES
-from cache.cache_hdb import is_hdb_residential_block
+from cache.cache_hdb import get_hdb_resale_data, is_hdb_residential_block
 from cache.cache_ura import get_ura_data
 from cache.cache_rental import get_rental_data
 from cache.onemap_mrt import build_mrt_cache
 from storage import get_recent_searches
 from utils import (
+    FLAT_TYPES,
     SIZE_BANDS,
     get_mongo_db,
     haversine_m,
@@ -123,6 +125,105 @@ def build_property_payload(ura_result: dict, rental_result: dict, coords: dict |
     }
 
 
+# ── HDB payload shaping (the FLAT_TYPES parallel to the bands above) ─────────
+#
+# hdb.py is the single source of truth and its return shapes are passed through
+# unchanged, exactly as ura.py's are — these helpers only put them in JSON's
+# terms. HDB is grouped by flat type where private is grouped by size band, so
+# order_by_flat_type is order_by_band's counterpart and for the same reason:
+# JSON object order is what the frontend renders.
+
+def order_by_flat_type(mapping: dict) -> dict:
+    """Re-key a flat-type dict into FLAT_TYPES order (hdb builds them in
+    encounter order). Anything unrecognised still gets through, at the end."""
+    ordered = {ft: mapping[ft] for ft in FLAT_TYPES if ft in mapping}
+    ordered.update({k: v for k, v in mapping.items() if k not in ordered})
+    return ordered
+
+
+def shape_flat_types(flat_types: dict) -> dict:
+    """JSON-shape hdb's per-flat-type aggregate.
+
+    _aggregate_by_flat_type carries `latest` as a whole normalised row, which
+    holds a datetime (month_dt) and every raw field. Pick out what the frontend
+    renders instead of serialising the row wholesale — the payload stays small
+    and the response stops depending on hdb's internal row shape.
+    """
+    out = {}
+    for ft, agg in order_by_flat_type(flat_types or {}).items():
+        latest = agg.get("latest") or {}
+        out[ft] = {
+            "count": agg.get("count"),
+            "median_price": agg.get("median_price"),
+            "avg_psf": agg.get("avg_psf"),
+            "typical_lease": agg.get("typical_lease"),
+            "latest": {
+                "price": latest.get("price"),
+                "psf": latest.get("psf"),
+                "area_sqft": round(latest["area_sqft"]) if latest.get("area_sqft") else None,
+                "month": latest.get("month"),
+                "storey_range": latest.get("storey_range"),
+                "flat_model": latest.get("flat_model"),
+                "lease_years": latest.get("lease_years"),
+            } if latest else None,
+        }
+    return out
+
+
+def build_hdb_block_payload(result: dict, coords: dict | None) -> dict:
+    """One block's detail — the HDB answer to build_property_payload.
+
+    `market` and `kind` are what the frontend branches on: one search box
+    serves both markets (a postal code can resolve to either), so the response
+    has to say which one came back rather than leaving it to be inferred.
+
+    A block coordinate is an *address* geocode (block + street), not a name
+    geocode, so it is exact in the way project_xy_coords is and the frontend
+    passes it straight to /api/amenities — cf. the street-geocode caveat on
+    project_xy_coords, which does not apply here.
+    """
+    street = result["street"]
+    payload = {
+        "market": "hdb",
+        "kind": "block",
+        "development": f"Block {result['block']} {street.title()}",
+        "block": result["block"],
+        "street": street,
+        "town": result.get("town"),
+        "flat_types": shape_flat_types(result.get("flat_types")),
+        "total_txns": result.get("total_txns", 0),
+        "lat": coords["lat"] if coords else None,
+        "lng": coords["lng"] if coords else None,
+    }
+    if coords:
+        payload["exact_coords"] = True
+    return payload
+
+
+def build_hdb_street_payload(result: dict) -> dict:
+    """A whole street's aggregate, plus its blocks as follow-up targets.
+
+    No coordinate: a street is an aggregate over blocks spread along its
+    length, so there is no single point that honestly represents it (and the
+    amenity distances measured from one would be wrong for most of its
+    blocks). The frontend offers the blocks instead.
+    """
+    street = result["street"]
+    return {
+        "market": "hdb",
+        "kind": "street",
+        "development": street.title(),
+        "street": street,
+        "town": result.get("town"),
+        "flat_types": shape_flat_types(result.get("flat_types")),
+        "blocks": [{"block": b, "count": n} for b, n in result.get("blocks", [])],
+        "total_txns": result.get("total_txns", 0),
+        "window_months": result.get("window_months"),
+        "lat": None,
+        "lng": None,
+    }
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/api/list")
@@ -168,17 +269,107 @@ def _project_dicts() -> list:
     return transactions
 
 
+# HDB's own lock, not _search_lock: get_hdb_resale_data() refreshes in-line
+# when stale exactly as the URA cache does, and that refresh is now a 60-month
+# fetch measured in minutes. Sharing one lock would park every private search
+# behind it for the duration; they touch different caches and share no state.
+_hdb_lock = threading.Lock()
+
+
+def _hdb_records() -> list:
+    """The cached HDB resale window, read once per request under the lock.
+
+    Every hdb.py entry point loads and normalises the whole window when it is
+    not handed `records`, and the cache is ~130k rows stored as chunked arrays
+    — there is no way to query into it, so one lookup pulls the lot. Callers
+    therefore fetch once here and inject it into every hdb call they make,
+    turning a two- or three-load request into one.
+    """
+    with _hdb_lock:
+        return get_hdb_resale_data()
+
+
+def _geocode_hdb_block(block: str, street: str) -> dict | None:
+    """Resolve an HDB block to coordinates via OneMap: the raw street first,
+    then its abbreviation-expanded form (ST → STREET), which is how the data
+    spells streets that OneMap writes out in full.
+
+    Deliberately a twin of bot.py's helper rather than an import: api.py never
+    imports bot.py (that would pull in the Telegram application and its
+    module-level setup), so the few lines are duplicated on purpose.
+    """
+    seen = set()
+    for q in (f"{block} {street}", f"{block} {hdb.expand_street(street)}"):
+        if q in seen:
+            continue
+        seen.add(q)
+        try:
+            loc = geocode_building(q)
+        except Exception:
+            loc = None
+        if loc:
+            return {"lat": loc["lat"], "lng": loc["lng"]}
+    return None
+
+
+def _hdb_block_response(block: str, street: str, records: list,
+                        coords: dict | None = None) -> dict:
+    """Block detail + its coordinate. `coords` skips geocoding — the postal
+    path already holds the exact OneMap coordinate for the address.
+
+    A block with no coordinate is still a usable answer (prices and the 5-year
+    trend need none), so a geocode miss degrades to a payload without a pin
+    rather than an error — the same call the bot makes.
+    """
+    result = hdb.block_detail(block, street, records)
+    if "error" in result:
+        return result
+    return build_hdb_block_payload(
+        result, coords or _geocode_hdb_block(block, result["street"])
+    )
+
+
+def _hdb_by_postal(postal: str, resolved: dict) -> dict:
+    """An HDB block reached by postal code — mirrors bot.py's
+    _hdb_search_by_postal, including its no-resale explanation."""
+    block, road = resolved.get("block", ""), resolved.get("road", "")
+    if not block or not road:
+        return {"error": f"Postal code {postal} doesn't map to an HDB block."}
+
+    records = _hdb_records()
+    resolution = hdb.resolve_query(f"{block} {road}", records)
+    if resolution.get("kind") == "block":
+        payload = _hdb_block_response(
+            resolution["block"], resolution["street"], records,
+            coords={"lat": resolved["lat"], "lng": resolved["lng"]},
+        )
+        payload["postal"] = resolved.get("postal")
+        return payload
+
+    # A real HDB block with no resale rows is almost always a newer development
+    # still inside its 5-year MOP, so no flat in it *can* be sold yet. Saying
+    # "not found" would read as a bug; this is the bot's wording.
+    building = (resolved.get("building") or "").title()
+    name = f"{building} (Block {block} {road.title()})" if building else f"Block {block} {road.title()}"
+    return {"error": f"{name} is an HDB block, but has no resale transactions on record "
+                     f"(postal {postal}). This usually means it hasn't reached its 5-year "
+                     f"MOP yet, so none of its flats can be sold on the resale market."}
+
+
 def _property_by_postal(postal: str) -> dict:
     """Postal-code search, mirroring bot.py's route_postal discriminator: the
     authoritative HDB Property Information dataset decides HDB vs private —
-    NOT the OneMap building name (BTO blocks carry names just like condos)."""
+    NOT the OneMap building name (BTO blocks carry names just like condos).
+
+    Market-agnostic, as in the bot: one code finds either market, so this is
+    the one entry point that can return an HDB payload from /api/property."""
     resolved = resolve_postal_code(postal)
     if not resolved:
         return {"error": f'Couldn\'t find any address for postal code "{postal}".\nPlease double-check the 6-digit code.'}
 
     block, road = resolved.get("block"), resolved.get("road")
     if block and road and is_hdb_residential_block(block, road):
-        return {"error": f'{resolved.get("address") or "That address"} is an HDB block — the webapp covers private developments only for now. Use the Telegram bot for HDB searches.'}
+        return _hdb_by_postal(postal, resolved)
     if not resolved.get("building"):
         return {"error": f'Postal code {postal} isn\'t a condo/apartment development (likely a landed home or commercial building).'}
 
@@ -530,6 +721,110 @@ def api_trend(q: str = Query(..., min_length=1)):
     button. Returns price_trend's dict unchanged (error/ambiguous passthrough)."""
     with _search_lock:
         return price_trend(q)
+
+
+# The street list is the search box's routing table, so it is memoized on the
+# cache's meta timestamp (a one-document read) rather than recomputed: deriving
+# it costs a full cache load, while the result itself is ~579 short strings.
+# Mirrors cache_ura's _meta_timestamp memo — and note what is held is the
+# derived list, never the 130k rows it came from.
+_hdb_streets_memo: dict = {"ts": None, "payload": None}
+
+
+def _hdb_meta_ts():
+    """The HDB cache's last-refresh timestamp, or None. One tiny read."""
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        doc = db["hdb_cache"].find_one({"_id": "meta"}, {"timestamp": 1})
+        return doc.get("timestamp") if doc else None
+    except Exception:
+        return None
+
+
+@app.get("/api/hdb/streets")
+def api_hdb_streets():
+    """Every distinct HDB street, as stored and as spelled out.
+
+    This exists so the single search box can route free text to the right
+    market *before* asking, which a heuristic cannot do: "8 SAINT THOMAS" is a
+    condo that opens with a number and "BISHAN ST 22" is an HDB street that
+    does not. Routing private-first-and-fall-back-on-error does not work
+    either — a fuzzy private search answers an HDB street name with condos
+    that merely share a word ("BISHAN ST 22" -> BISHAN LOFT), so the fallback
+    never fires.
+
+    Both spellings ride along because the data abbreviates ("ANG MO KIO AVE 6")
+    while users type either that or the full form; matching one string against
+    both covers it without the frontend re-implementing STREET_ABBREV.
+    """
+    ts = _hdb_meta_ts()
+    if _hdb_streets_memo["payload"] is not None and _hdb_streets_memo["ts"] == ts:
+        return _hdb_streets_memo["payload"]
+
+    streets = sorted({r["street"] for r in hdb._normalise_all(_hdb_records())})
+    payload = {
+        "streets": [{"s": s, "c": hdb.expand_street(s)} for s in streets],
+        "count": len(streets),
+    }
+    _hdb_streets_memo.update(ts=ts, payload=payload)
+    return payload
+
+
+@app.get("/api/hdb")
+def api_hdb(q: str = Query(..., min_length=1)):
+    """HDB resale search: free-text block and/or street.
+
+    Postal codes are NOT handled here — they stay with /api/property, which
+    decides the market from the authoritative HDB block dataset and can return
+    either payload. One code has to find both markets (bot convention), and
+    splitting that decision across two endpoints would duplicate it.
+
+    resolve_query's contract is passed through unchanged, error and ambiguous
+    included, exactly as /api/property passes search_property's through. An
+    ambiguous street carries `block` so the frontend can re-ask for the same
+    block on whichever street the user picks.
+    """
+    q = q.strip()
+    records = _hdb_records()
+    resolution = hdb.resolve_query(q, records)
+
+    if resolution.get("ambiguous"):
+        return {
+            "market": "hdb",
+            "ambiguous": True,
+            "block": resolution.get("block"),
+            "candidates": resolution["candidates"],
+        }
+    if "error" in resolution:
+        return {"market": "hdb", "error": resolution["error"]}
+
+    if resolution["kind"] == "block":
+        return _hdb_block_response(resolution["block"], resolution["street"], records)
+
+    summary = hdb.street_summary(resolution["street"], records)
+    if "error" in summary:
+        return {"market": "hdb", **summary}
+    return build_hdb_street_payload(summary)
+
+
+@app.get("/api/hdb/trend")
+def api_hdb_trend(
+    street: str = Query(..., min_length=1),
+    block: str | None = None,
+):
+    """5-year resale PSF trend for one block, or for a whole street when no
+    block is given.
+
+    Its own route rather than a market flag on /api/trend: that one is keyed by
+    development name, and an HDB block is identified by block + street. The
+    *response* needs no such split — hdb.price_trend already returns
+    ura.price_trend's shape, which is why the frontend draws both with the same
+    chart. Re-queried at call time, the same pattern as /api/trend.
+    """
+    block = (block or "").strip() or None
+    return hdb.price_trend(block, street.strip(), _hdb_records())
 
 
 @app.get("/api/transactions")

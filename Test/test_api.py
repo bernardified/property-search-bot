@@ -13,10 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api import (
     app,
+    build_hdb_block_payload,
+    build_hdb_street_payload,
     build_property_payload,
     order_by_band,
+    order_by_flat_type,
     project_xy_coords,
     sale_prices_from_bands,
+    shape_flat_types,
 )
 
 from fastapi.testclient import TestClient
@@ -43,6 +47,28 @@ URA_RESULT = {
 }
 
 RENTAL_RESULT = {"development": "PARC ESTA", "bands": {"<= 600 sqft": {"latest_rent": 3200}}}
+
+# hdb.block_detail's shape. `latest` is a whole normalised row — a datetime and
+# every raw field included — which is exactly what shape_flat_types has to keep
+# out of the JSON.
+HDB_LATEST_ROW = {
+    "town": "BISHAN", "flat_type": "4 ROOM", "block": "257", "street": "BISHAN ST 22",
+    "storey_range": "04 TO 06", "flat_model": "Improved", "area_sqft": 1076.4,
+    "price": 840000.0, "psf": 780, "month": "2026-08",
+    "month_dt": datetime(2026, 8, 1), "lease_years": 65.0,
+}
+HDB_BLOCK = {
+    "block": "257", "street": "BISHAN ST 22", "town": "BISHAN", "total_txns": 23,
+    "flat_types": {
+        "4 ROOM": {"count": 14, "median_price": 840000, "avg_psf": 729,
+                   "typical_lease": 65, "latest": HDB_LATEST_ROW},
+    },
+}
+HDB_STREET = {
+    "street": "BISHAN ST 22", "town": "BISHAN", "total_txns": 52, "window_months": 12,
+    "flat_types": HDB_BLOCK["flat_types"],
+    "blocks": [("257", 5), ("236", 4)],
+}
 
 
 class TestPayloadShaping(unittest.TestCase):
@@ -264,14 +290,35 @@ class TestPostalSearch(_NoProjectCoords):
         self.assertEqual(data["postal"], "408563")
         self.assertEqual(data["lat"], 1.316)
 
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.block_detail", return_value=dict(HDB_BLOCK))
+    @patch("api.hdb.resolve_query", return_value={"kind": "block", "block": "8", "street": "SIMS AVENUE"})
     @patch("api.search_property")
     @patch("api.is_hdb_residential_block", return_value=True)
     @patch("api.resolve_postal_code", return_value={**RESOLVED_PRIVATE, "building": "WOODLEIGH GLEN"})
-    def test_hdb_block_is_not_searched_as_private(self, _res, mock_hdb, mock_search):
+    def test_hdb_block_postal_returns_an_hdb_payload(self, _res, mock_hdb, mock_search, *_):
+        """A postal code is market-agnostic: the HDB block dataset decides, and
+        an HDB block now comes back as a result rather than a rejection."""
         data = client.get("/api/property", params={"q": "361206"}).json()
         mock_hdb.assert_called_once_with("8", "SIMS AVENUE")
         mock_search.assert_not_called()  # never fuzzy-matched to a nearby condo
-        self.assertIn("HDB", data["error"])
+        self.assertEqual(data["market"], "hdb")
+        self.assertEqual(data["kind"], "block")
+        self.assertEqual(data["postal"], "408563")
+        # The postal coordinate is the address itself — no second geocode.
+        self.assertTrue(data["exact_coords"])
+        self.assertEqual(data["lat"], 1.316)
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.resolve_query", return_value={"error": "no such block"})
+    @patch("api.is_hdb_residential_block", return_value=True)
+    @patch("api.resolve_postal_code", return_value={**RESOLVED_PRIVATE, "building": "WOODLEIGH GLEN"})
+    def test_hdb_block_with_no_resale_explains_mop(self, *_):
+        """A real HDB block with no resale rows is a pre-MOP development, not a
+        missing one — saying 'not found' would read as a bug."""
+        data = client.get("/api/property", params={"q": "361206"}).json()
+        self.assertIn("MOP", data["error"])
+        self.assertIn("Woodleigh Glen", data["error"])
 
     @patch("api.resolve_postal_code", return_value=None)
     def test_unknown_postal(self, _):
@@ -558,6 +605,139 @@ class TestNearby(unittest.TestCase):
             data = client.get("/api/nearby", params={"q": "ORIGIN", "radius_m": 1000}).json()
         self.assertEqual([r["project"] for r in data["results"]], ["CLOSE", "MID"])
         self.assertEqual(data["radius_m"], 1000)
+
+
+class TestHDBPayloads(unittest.TestCase):
+    """The FLAT_TYPES parallel to the band shaping above — hdb.py's shapes are
+    passed through unchanged; these helpers only put them in JSON's terms."""
+
+    def test_flat_types_are_ordered_not_encounter_ordered(self):
+        from utils import FLAT_TYPES
+        jumbled = {"EXECUTIVE": 1, "3 ROOM": 2, "5 ROOM": 3}
+        self.assertEqual(list(order_by_flat_type(jumbled)),
+                         [ft for ft in FLAT_TYPES if ft in jumbled])
+
+    def test_unknown_flat_type_still_gets_through(self):
+        out = order_by_flat_type({"MULTI-GENERATION PLUS": 1, "4 ROOM": 2})
+        self.assertEqual(list(out)[0], "4 ROOM")          # known ones lead
+        self.assertIn("MULTI-GENERATION PLUS", out)       # nothing is dropped
+
+    def test_shape_flat_types_keeps_the_datetime_out_of_json(self):
+        """`latest` is a whole normalised row; serialising it wholesale would
+        leak month_dt and every raw field into the response."""
+        shaped = shape_flat_types(HDB_BLOCK["flat_types"])["4 ROOM"]
+        self.assertNotIn("month_dt", shaped["latest"])
+        self.assertNotIn("town", shaped["latest"])
+        self.assertEqual(shaped["latest"]["month"], "2026-08")
+        self.assertEqual(shaped["latest"]["area_sqft"], 1076)   # rounded for display
+        self.assertEqual(shaped["typical_lease"], 65)
+
+    def test_shape_flat_types_tolerates_a_missing_latest(self):
+        out = shape_flat_types({"4 ROOM": {"count": 1, "median_price": 5, "avg_psf": None,
+                                           "typical_lease": None, "latest": None}})
+        self.assertIsNone(out["4 ROOM"]["latest"])
+
+    def test_block_payload_declares_its_market_and_pin(self):
+        p = build_hdb_block_payload(HDB_BLOCK, {"lat": 1.36, "lng": 103.84})
+        self.assertEqual((p["market"], p["kind"]), ("hdb", "block"))
+        self.assertEqual(p["development"], "Block 257 Bishan St 22")
+        # A block coordinate is an ADDRESS geocode, exact in the way a street
+        # geocode is not — the frontend feeds it straight to /api/amenities.
+        self.assertTrue(p["exact_coords"])
+
+    def test_block_payload_without_a_coordinate_is_still_an_answer(self):
+        """Prices and the 5-year trend need no coordinate, so a geocode miss
+        must not turn a good block into an error."""
+        p = build_hdb_block_payload(HDB_BLOCK, None)
+        self.assertIsNone(p["lat"])
+        self.assertNotIn("exact_coords", p)
+        self.assertEqual(p["total_txns"], 23)
+
+    def test_street_payload_has_blocks_and_no_coordinate(self):
+        p = build_hdb_street_payload(HDB_STREET)
+        self.assertEqual((p["market"], p["kind"]), ("hdb", "street"))
+        # A street spans blocks along its length; no single point represents it.
+        self.assertIsNone(p["lat"])
+        self.assertEqual(p["blocks"], [{"block": "257", "count": 5},
+                                       {"block": "236", "count": 4}])
+
+
+class TestHDBEndpoints(unittest.TestCase):
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api._geocode_hdb_block", return_value={"lat": 1.36, "lng": 103.84})
+    @patch("api.hdb.block_detail", return_value=dict(HDB_BLOCK))
+    @patch("api.hdb.resolve_query", return_value={"kind": "block", "block": "257", "street": "BISHAN ST 22"})
+    def test_block_query(self, _rq, _bd, mock_geo, _recs):
+        data = client.get("/api/hdb", params={"q": "257 bishan st 22"}).json()
+        self.assertEqual(data["kind"], "block")
+        self.assertEqual(data["block"], "257")
+        mock_geo.assert_called_once()
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.street_summary", return_value=dict(HDB_STREET))
+    @patch("api.hdb.resolve_query", return_value={"kind": "street", "street": "BISHAN ST 22"})
+    def test_street_query_is_never_geocoded(self, _rq, _ss, _recs):
+        with patch("api._geocode_hdb_block") as mock_geo:
+            data = client.get("/api/hdb", params={"q": "bishan st 22"}).json()
+        self.assertEqual(data["kind"], "street")
+        mock_geo.assert_not_called()
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.resolve_query",
+           return_value={"ambiguous": True, "block": "257", "candidates": ["BISHAN ST 22", "BISHAN ST 23"]})
+    def test_ambiguous_carries_the_block_through(self, _rq, _recs):
+        """Picking a street must re-ask for the same block, not drop the user
+        at street level."""
+        data = client.get("/api/hdb", params={"q": "257 bishan st"}).json()
+        self.assertTrue(data["ambiguous"])
+        self.assertEqual(data["block"], "257")
+        self.assertEqual(data["market"], "hdb")
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.resolve_query", return_value={"error": "No HDB blocks found."})
+    def test_error_is_passed_through_and_labelled(self, _rq, _recs):
+        data = client.get("/api/hdb", params={"q": "zzz"}).json()
+        self.assertEqual(data["market"], "hdb")
+        self.assertIn("No HDB blocks", data["error"])
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.price_trend", return_value={"development": "Block 257 Bishan St 22"})
+    def test_trend_takes_block_and_street(self, mock_trend, _recs):
+        client.get("/api/hdb/trend", params={"street": "BISHAN ST 22", "block": "257"})
+        self.assertEqual(mock_trend.call_args.args[:2], ("257", "BISHAN ST 22"))
+
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb.price_trend", return_value={"development": "Bishan St 22"})
+    def test_trend_without_a_block_is_street_level(self, mock_trend, _recs):
+        """hdb.price_trend takes block=None to aggregate a whole street, so a
+        blank block must arrive as None rather than an empty string."""
+        client.get("/api/hdb/trend", params={"street": "BISHAN ST 22", "block": ""})
+        self.assertIsNone(mock_trend.call_args.args[0])
+
+    @patch("api._hdb_meta_ts", return_value=1.0)
+    @patch("api._hdb_records", return_value=[])
+    @patch("api.hdb._normalise_all", return_value=[{"street": "ANG MO KIO AVE 6"},
+                                                   {"street": "BISHAN ST 22"},
+                                                   {"street": "ANG MO KIO AVE 6"}])
+    def test_street_list_is_distinct_and_carries_both_spellings(self, *_):
+        api_mod = sys.modules["api"]
+        api_mod._hdb_streets_memo.update(ts=None, payload=None)   # cold
+        data = client.get("/api/hdb/streets").json()
+        self.assertEqual(data["count"], 2)
+        amk = next(s for s in data["streets"] if s["s"] == "ANG MO KIO AVE 6")
+        # The data abbreviates, users type either — so both forms ship.
+        self.assertEqual(amk["c"], "ANG MO KIO AVENUE 6")
+
+    @patch("api._hdb_meta_ts", return_value=7.0)
+    @patch("api._hdb_records", return_value=[])
+    def test_street_list_is_memoized_per_cache_refresh(self, mock_recs, _ts):
+        """Deriving the list costs a full cache load; the list itself is tiny.
+        Warm calls must not touch the records at all."""
+        api_mod = sys.modules["api"]
+        api_mod._hdb_streets_memo.update(ts=7.0, payload={"streets": [], "count": 0})
+        client.get("/api/hdb/streets")
+        mock_recs.assert_not_called()
 
 
 if __name__ == "__main__":

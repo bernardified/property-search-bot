@@ -118,6 +118,56 @@ form.addEventListener("submit", (e) => {
   runSearch(input.value.trim());
 });
 
+// ── Market routing ───────────────────────────────────────────────────────────
+//
+// One search box serves both markets — there is no market toggle. A 6-digit
+// postal code is decided server-side (/api/property owns that call, against the
+// authoritative HDB block dataset). Free text is decided here, against the list
+// of real HDB street names from /api/hdb/streets.
+//
+// It has to be the real list. Query *shape* is not a reliable signal ("8 SAINT
+// THOMAS" is a condo opening with a number; "BISHAN ST 22" is an HDB street
+// that doesn't), and asking private first and falling back on failure does not
+// work either: a fuzzy private search answers an HDB street name with condos
+// sharing one word, so the fallback never fires. Asking both markets in
+// parallel would be exact, but an HDB request pulls the whole resale window
+// from Mongo, so it would put ~10s on every private search too.
+//
+// Until the list arrives (one small fetch at boot) routing falls back to the
+// leading-block-token shape, which is right for the block queries most likely
+// to be typed early.
+const HDB_BLOCK_RE = /^(\d+[a-z]?)\s+(\S.*)$/i;
+
+let hdbStreets = null;   // [{s: as stored, c: spelled out}] — see /api/hdb/streets
+let streetsReady = null; // the in-flight fetch, so a search can wait for it
+
+function loadHdbStreets() {
+  streetsReady = (async () => {
+    try {
+      const r = await fetch("/api/hdb/streets");
+      hdbStreets = (await r.json()).streets || [];
+    } catch {
+      hdbStreets = [];   // routing degrades to the shape heuristic, never breaks
+    }
+  })();
+  return streetsReady;
+}
+
+// Every query token must appear in the street, so "bishan st 22" matches
+// BISHAN ST 22 but "bishan" alone does not commit a bare town name to HDB.
+function looksLikeHdb(q) {
+  const blockMatch = q.match(HDB_BLOCK_RE);
+  if (!hdbStreets || !hdbStreets.length) return Boolean(blockMatch);
+
+  const streetPart = (blockMatch ? blockMatch[2] : q).toUpperCase().trim();
+  const tokens = streetPart.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  return hdbStreets.some(({ s, c }) => {
+    const hay = s + " " + c;
+    return tokens.every((t) => hay.includes(t));
+  });
+}
+
 async function runSearch(q) {
   if (!q) return;
   searchActive = true;
@@ -135,11 +185,22 @@ async function runSearch(q) {
   resetMap();
 
   try {
-    const r = await fetch("/api/property?q=" + encodeURIComponent(q));
-    const data = await r.json();
+    // Wait for the routing table rather than route without it. It is normally
+    // long since loaded; the exception is a search in the first seconds after
+    // a cold server start, and being briefly slow there beats confidently
+    // answering an HDB street with a list of condos.
+    if (streetsReady) await streetsReady;
+
+    // Postal codes are market-agnostic and decided server-side; everything
+    // else is routed by the street list above.
+    const url = /^\d{6}$/.test(q) || !looksLikeHdb(q)
+      ? "/api/property?q=" + encodeURIComponent(q)
+      : "/api/hdb?q=" + encodeURIComponent(q);
+    const data = await (await fetch(url)).json();
 
     if (data.ambiguous) {
-      renderCandidates(data.candidates);
+      if (data.market === "hdb") renderHdbCandidates(data.candidates, data.block);
+      else renderCandidates(data.candidates);
       setStatus("");
       return;
     }
@@ -153,9 +214,18 @@ async function runSearch(q) {
     // No coordinate → no origin to search around; the button appears later if
     // the amenity response supplies one (street-geocode fallback).
     nearbyBtn.hidden = data.lat == null;
-    renderProperty(data);
-    placePropertyPin(data);
-    loadAmenities(data);
+
+    if (data.market === "hdb") {
+      renderHdbResult(data);
+      placePropertyPin(data);
+      // A street is an aggregate over blocks spread along it, so it has no
+      // coordinate and nothing to measure amenity distances from.
+      if (data.lat != null) loadAmenities(data);
+    } else {
+      renderProperty(data);
+      placePropertyPin(data);
+      loadAmenities(data);
+    }
     loadTrend(data);
   } catch (err) {
     setStatus("Search failed — is the API running? " + err.message, true);
@@ -174,6 +244,26 @@ function renderCandidates(candidates) {
           `<button data-name="${esc(c.project)}"><div>${esc(c.project)}</div>` +
           `<div class="cand-street">${esc(c.street)}</div></button>`
       )
+      .join("") +
+    "</div>";
+  resultsBox.querySelectorAll("button").forEach((b) => {
+    b.onclick = () => runSearch(b.dataset.name);
+  });
+}
+
+// HDB ambiguity is a list of street names, not {project, street} objects. When
+// the query named a block, it is carried back so picking a street re-asks for
+// that same block on it rather than dropping the user at street level.
+function renderHdbCandidates(candidates, block) {
+  resultsBox.hidden = false;
+  resultsBox.innerHTML =
+    `<h3>Did you mean:</h3><div class='candidates'>` +
+    candidates
+      .map((street) => {
+        const q = block ? `${block} ${street}` : street;
+        return `<button data-name="${esc(q)}"><div>${esc(street.toString().replace(/\b\w/g, (c) => c.toUpperCase()))}</div>` +
+               `<div class="cand-street">${block ? "Block " + esc(block) : "HDB resale"}</div></button>`;
+      })
       .join("") +
     "</div>";
   resultsBox.querySelectorAll("button").forEach((b) => {
@@ -249,7 +339,122 @@ function renderProperty(d) {
   renderBandsChart(d);
 }
 
+// ── HDB results ──────────────────────────────────────────────────────────────
+//
+// A parallel renderer rather than a reuse of renderProperty: HDB groups by flat
+// type where private groups by size band, and its signals are different ones —
+// remaining lease (the thing that decides an HDB flat's value over time) and
+// PSF, with no rental, yield, tenure or TOP to show. Bending one shape into the
+// other's slots would misreport both. The charts and the trend area are shared,
+// because those genuinely are the same thing.
+
+function renderHdbResult(d) {
+  const isBlock = d.kind === "block";
+  const metaBits = [];
+  if (d.postal) metaBits.push(`Postal ${esc(d.postal)}`);
+  if (d.town) metaBits.push(esc(d.town.replace(/\b\w/g, (c) => c.toUpperCase())));
+  metaBits.push(`${d.total_txns} resale transaction${d.total_txns === 1 ? "" : "s"}`);
+
+  let html = `<h2>${esc(d.development)}</h2>`;
+  html += `<p class="street">${esc(d.street)} · <span class="market-tag">HDB resale</span></p>`;
+  html += `<p class="meta">${metaBits.join("<br>")}</p>`;
+
+  if (!isBlock) {
+    html += "<p class='note'>Street-level summary — pick a block below for its own " +
+            "prices, trend and nearby amenities.</p>";
+  }
+
+  html += "<h3>PSF by flat type</h3>";
+  const types = Object.entries(d.flat_types || {});
+  html += `<div class="chart-box"><canvas id="flats-chart" height="${40 + types.length * 34}"></canvas></div>`;
+
+  html += "<details open><summary>Latest sale in each flat type</summary>";
+  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease left</th></tr>";
+  for (const [ft, v] of types) {
+    const latest = v.latest || {};
+    html +=
+      `<tr><td>${esc(ft)}<br><span class="popup-line">${v.count} sold` +
+      (latest.month ? ` · latest ${esc(latest.month)}` : "") + `</span></td>` +
+      `<td class="num">${fmtMoney(v.median_price)}` +
+      (latest.price ? `<br><span class="popup-line">last ${fmtMoney(latest.price)}</span>` : "") + `</td>` +
+      `<td class="num">${v.avg_psf ? fmtMoney(v.avg_psf) : "–"}</td>` +
+      `<td class="num">${v.typical_lease != null ? v.typical_lease + " yrs" : "–"}</td></tr>`;
+  }
+  html += "</table></details>";
+
+  // Blocks on a street double as the way into block detail — the street view's
+  // whole purpose, since only a block has a coordinate and a trend of its own.
+  if (!isBlock && (d.blocks || []).length) {
+    html += `<h3>Blocks on this street</h3><div class="candidates">`;
+    for (const b of d.blocks) {
+      html +=
+        `<button class="hdb-block" data-name="${esc(b.block + " " + d.street)}">` +
+        `<div>Block ${esc(b.block)}</div>` +
+        `<div class="cand-street">${b.count} sold recently</div></button>`;
+    }
+    html += "</div>";
+  }
+
+  html += `<h3>Price trend (5 yr)</h3><div id='trend-area'><p class='note'>Loading trend…</p></div>`;
+
+  // Named rather than left out: someone arriving from a private result will
+  // look for the rental block, and its absence is a data limit, not an omission.
+  html += "<h3>Rental &amp; yield</h3>";
+  html += "<p class='note'>Not available for HDB — the rental data behind the " +
+          "private figures is URA's, which covers private housing only.</p>";
+
+  resultsBox.innerHTML = html;
+  resultsBox.hidden = false;
+  currentDev = d.development;
+  resultsBox.querySelectorAll(".hdb-block").forEach((b) => {
+    b.onclick = () => runSearch(b.dataset.name);
+  });
+  renderFlatTypesChart(d);
+}
+
 // ── Charts (single series, one hue; text stays in ink tokens) ───────────────
+
+function renderFlatTypesChart(d) {
+  const entries = Object.entries(d.flat_types || {}).filter(([, v]) => v.avg_psf);
+  const canvas = el("flats-chart");
+  if (!canvas) return;
+  if (!entries.length) {
+    canvas.closest(".chart-box").innerHTML = "<p class='note'>No PSF available for these sales.</p>";
+    return;
+  }
+  bandsChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: entries.map(([ft]) => ft),
+      datasets: [{
+        label: "Avg PSF",
+        data: entries.map(([, v]) => v.avg_psf),
+        backgroundColor: BRAND,
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const [, v] = entries[c.dataIndex];
+              return `${fmtMoney(v.avg_psf)} psf · ${v.count} sold`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: INK_MUTED }, grid: { color: GRID } },
+        y: { ticks: { color: INK_MUTED }, grid: { display: false } },
+      },
+    },
+  });
+}
 
 function renderBandsChart(d) {
   const entries = Object.entries(d.bands || {});
@@ -429,12 +634,23 @@ resultsBox.addEventListener("click", (e) => {
   if (b) toggleBandDetail(b.dataset.band);
 });
 
+// Private trends are keyed by development name, HDB by block + street (a block
+// number means nothing without its street). The *responses* are the same shape
+// — hdb.price_trend returns ura.price_trend's dict — so only the URL differs
+// and everything below this line is shared.
+function trendUrl(d) {
+  if (d.market !== "hdb") return "/api/trend?q=" + encodeURIComponent(d.development);
+  let url = "/api/hdb/trend?street=" + encodeURIComponent(d.street);
+  if (d.block) url += "&block=" + encodeURIComponent(d.block);
+  return url;
+}
+
 async function loadTrend(d) {
   trendAbort = new AbortController();
   const { signal } = trendAbort;
   let t;
   try {
-    const r = await fetch("/api/trend?q=" + encodeURIComponent(d.development), { signal });
+    const r = await fetch(trendUrl(d), { signal });
     t = await r.json();
   } catch (err) {
     if (err.name === "AbortError") return;
@@ -1234,6 +1450,10 @@ document.addEventListener("click", (e) => {
 el("access-date").textContent = new Date().toLocaleDateString("en-SG", {
   day: "numeric", month: "short", year: "numeric",
 });
+
+// The search box's HDB routing table. Fetched unawaited and never blocking:
+// it is small, and a search typed before it lands still routes by query shape.
+loadHdbStreets();
 
 // Explore is the landing state — the map opens full of developments rather
 // than empty behind a button.
