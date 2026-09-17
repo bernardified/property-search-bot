@@ -72,15 +72,35 @@ STREET_ABBREV = {
     "GDNS": "GARDENS", "GARDENS": "GARDENS",
     "TER": "TERRACE", "TERRACE": "TERRACE",
     "PL": "PLACE", "PLACE": "PLACE",
+    "PK": "PARK", "PARK": "PARK",
+    "TG": "TANJONG", "TANJONG": "TANJONG",
+    "KG": "KAMPONG", "KAMPONG": "KAMPONG",
+    "HTS": "HEIGHTS", "HEIGHTS": "HEIGHTS",
+    "MKT": "MARKET", "MARKET": "MARKET",
 }
+
+# Forms that punctuation-stripping would destroy before the table ever sees
+# them, so they have to be rewritten on the raw string first:
+#   C'WEALTH  — splits into "C" + "WEALTH", which matches nothing.
+#   ST.       — the period is the ONLY thing distinguishing Saint from Street.
+#               "ST. GEORGE'S RD" is Saint; "BISHAN ST 22" is Street and never
+#               carries a period. Expanding it by table would say STREET.
+# Both spellings below are what OneMap returns, which is what these are
+# compared against (checked: 'COMMONWEALTH CRESCENT', "SAINT GEORGE'S ROAD").
+_STREET_PRESUB = (
+    (re.compile(r"\bC'WEALTH\b"), "COMMONWEALTH"),
+    (re.compile(r"\bST\.(?=\s)"), "SAINT"),
+)
 
 
 def canon_street_tokens(text) -> list:
     """Uppercase a street/road string, strip punctuation, and expand HDB
     abbreviations to full words. Returns the significant tokens so two spellings
     of the same road compare equal (e.g. "ANG MO KIO AVE 6" ↔ "...AVENUE 6")."""
-    import re as _re
-    toks = _re.sub(r"[^A-Z0-9 ]", " ", str(text).upper()).split()
+    text = str(text).upper()
+    for pattern, full in _STREET_PRESUB:
+        text = pattern.sub(full, text)
+    toks = re.sub(r"[^A-Z0-9 ]", " ", text).split()
     return [STREET_ABBREV.get(t, t) for t in toks]
 
 

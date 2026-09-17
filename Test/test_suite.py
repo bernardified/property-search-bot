@@ -2050,6 +2050,35 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(hdb.expand_street("ANG MO KIO AVE 10"), "ANG MO KIO AVENUE 10")
         self.assertEqual(hdb.expand_street("bishan st 22"), "BISHAN STREET 22")
 
+    def test_canon_reconciles_hdb_and_onemap_spellings(self):
+        """The HDB datasets abbreviate; OneMap spells out. Both sides of every
+        street/road comparison go through canon_street_tokens, so a spelling it
+        cannot reconcile silently breaks postal routing (a real HDB block reads
+        as "not HDB" and falls through to the private market) and leaves the
+        block uncoordinated. Right-hand strings are OneMap's actual ROAD_NAME.
+        """
+        from utils import canon_street_tokens as canon
+        for abbreviated, spelled_out in [
+            ("ANG MO KIO AVE 6", "ANG MO KIO AVENUE 6"),
+            ("BIDADARI PK DR", "BIDADARI PARK DRIVE"),
+            ("EVERTON PK", "EVERTON PARK"),
+            ("C'WEALTH CRES", "COMMONWEALTH CRESCENT"),
+            ("ST. GEORGE'S RD", "SAINT GEORGE'S ROAD"),
+            ("TG PAGAR PLAZA", "TANJONG PAGAR PLAZA"),
+            ("KG KAYU RD", "KAMPONG KAYU ROAD"),
+            ("TELOK BLANGAH HTS", "TELOK BLANGAH HEIGHTS"),
+            ("NEW MKT RD", "NEW MARKET ROAD"),
+        ]:
+            self.assertEqual(canon(abbreviated), canon(spelled_out),
+                             f"{abbreviated} != {spelled_out}")
+
+    def test_canon_reads_st_as_street_or_saint_by_the_period(self):
+        """"ST" is Street and "ST." is Saint, and the period is the only thing
+        that says which — so it has to be read before punctuation is stripped."""
+        from utils import canon_street_tokens as canon
+        self.assertEqual(canon("BISHAN ST 22"), ["BISHAN", "STREET", "22"])
+        self.assertEqual(canon("ST. GEORGE'S LANE")[0], "SAINT")
+
     def test_hdb_amenity_keyboard_is_location_plus_trend(self):
         from bot import build_hdb_amenity_keyboard
         cbs = [b.callback_data for row in build_hdb_amenity_keyboard("tok123").inline_keyboard for b in row]
