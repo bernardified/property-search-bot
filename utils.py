@@ -73,6 +73,10 @@ STREET_ABBREV = {
     "TER": "TERRACE", "TERRACE": "TERRACE",
     "PL": "PLACE", "PLACE": "PLACE",
     "PK": "PARK", "PARK": "PARK",
+    "TG": "TANJONG", "TANJONG": "TANJONG",
+    "KG": "KAMPONG", "KAMPONG": "KAMPONG",
+    "HTS": "HEIGHTS", "HEIGHTS": "HEIGHTS",
+    "MKT": "MARKET", "MARKET": "MARKET",
 }
 
 # Forms that punctuation-stripping would destroy before the table ever sees

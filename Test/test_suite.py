@@ -2064,6 +2064,10 @@ class TestHDB(unittest.TestCase):
             ("EVERTON PK", "EVERTON PARK"),
             ("C'WEALTH CRES", "COMMONWEALTH CRESCENT"),
             ("ST. GEORGE'S RD", "SAINT GEORGE'S ROAD"),
+            ("TG PAGAR PLAZA", "TANJONG PAGAR PLAZA"),
+            ("KG KAYU RD", "KAMPONG KAYU ROAD"),
+            ("TELOK BLANGAH HTS", "TELOK BLANGAH HEIGHTS"),
+            ("NEW MKT RD", "NEW MARKET ROAD"),
         ]:
             self.assertEqual(canon(abbreviated), canon(spelled_out),
                              f"{abbreviated} != {spelled_out}")
