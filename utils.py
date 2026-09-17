@@ -104,6 +104,22 @@ def canon_street_tokens(text) -> list:
     return [STREET_ABBREV.get(t, t) for t in toks]
 
 
+def hdb_block_key(block, street) -> str:
+    """Stable identity for one HDB block: `<BLOCK>|<canonicalised street>`.
+
+    The `_id` of the Mongo `hdb_block_coords` collection, and therefore the
+    one definition both the warmer script and the API must agree on — the same
+    block reaches us spelled both ways ("BISHAN ST 22" in the resale data,
+    "BISHAN STREET 22" from OneMap), so keying on raw text would store it
+    twice and let a lookup miss it.
+
+    Note what this couples: a change to `canon_street_tokens` re-keys every
+    block on the streets it affects, stranding whatever is already stored
+    under the old spelling (recovery is a warmer rerun, then --prune).
+    """
+    return f"{str(block).strip().upper()}|{' '.join(canon_street_tokens(street))}"
+
+
 def parse_remaining_lease(text) -> float | None:
     """Parse an HDB remaining-lease string to a number of years (float).
 

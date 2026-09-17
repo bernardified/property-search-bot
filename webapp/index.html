@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div id="app">
@@ -34,12 +34,20 @@
       <!-- Explore controls: colour metric + filters. Shown only in explore
            mode; every filter runs client-side over the already-loaded list. -->
       <section id="explore-panel" hidden>
+        <!-- One market at a time: a cluster averaging a condo's PSF with a
+             flat's would describe neither. -->
+        <div class="ctl">
+          <div id="market-toggle" class="segmented" role="radiogroup" aria-label="Market">
+            <button type="button" role="radio" data-market="private" aria-checked="true" class="on">🏢 Private</button>
+            <button type="button" role="radio" data-market="hdb" aria-checked="false">🏠 HDB</button>
+          </div>
+        </div>
+
         <div class="ctl">
           <span class="ctl-label">Colour dots by</span>
-          <div id="metric-toggle" class="segmented" role="radiogroup" aria-label="Colour metric">
-            <button type="button" role="radio" data-metric="psf" aria-checked="true" class="on">Avg PSF</button>
-            <button type="button" role="radio" data-metric="yield" aria-checked="false">Gross yield</button>
-          </div>
+          <!-- Filled by renderMetricToggle: the two markets offer different
+               metrics (gross yield against lease decay). -->
+          <div id="metric-toggle" class="segmented" role="radiogroup" aria-label="Colour metric"></div>
         </div>
 
         <div id="ramp-legend"></div>
@@ -62,16 +70,6 @@
         </div>
 
         <div class="ctl">
-          <span class="ctl-label">Lease tenure</span>
-          <div id="f-tenure" class="chips">
-            <button type="button" class="chip" data-tenure="freehold">Freehold</button>
-            <button type="button" class="chip" data-tenure="999">999-year</button>
-            <button type="button" class="chip" data-tenure="99">99-year</button>
-            <button type="button" class="chip" data-tenure="other">Other lease</button>
-          </div>
-        </div>
-
-        <div class="ctl">
           <span class="ctl-label">Avg PSF range</span>
           <div class="two-up">
             <label class="sr-only" for="f-psf-min">Minimum PSF</label>
@@ -81,9 +79,47 @@
           </div>
         </div>
 
-        <div class="ctl">
-          <span class="ctl-label">Districts</span>
-          <div id="f-districts" class="chips chips-scroll"></div>
+        <!-- Private-only filters. Chips carry data-group/data-key; one
+             delegated handler in map.js reads every cloud. -->
+        <div id="f-private">
+          <div class="ctl">
+            <span class="ctl-label">Lease tenure</span>
+            <div id="f-tenure" class="chips">
+              <button type="button" class="chip" data-group="tenure" data-key="freehold">Freehold</button>
+              <button type="button" class="chip" data-group="tenure" data-key="999">999-year</button>
+              <button type="button" class="chip" data-group="tenure" data-key="99">99-year</button>
+              <button type="button" class="chip" data-group="tenure" data-key="other">Other lease</button>
+            </div>
+          </div>
+
+          <div class="ctl">
+            <span class="ctl-label">Districts</span>
+            <div id="f-districts" class="chips chips-scroll"></div>
+          </div>
+        </div>
+
+        <!-- HDB-only filters. -->
+        <div id="f-hdb" hidden>
+          <div class="ctl">
+            <span class="ctl-label">Flat type</span>
+            <div id="f-flats" class="chips"></div>
+          </div>
+
+          <div class="ctl">
+            <label id="lease-label">Remaining lease
+              <select id="f-lease">
+                <option value="">Any</option>
+                <option value="60">60 years or more</option>
+                <option value="70">70 years or more</option>
+                <option value="80">80 years or more</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="ctl">
+            <span class="ctl-label">Towns</span>
+            <div id="f-towns" class="chips chips-scroll"></div>
+          </div>
         </div>
 
         <div class="ctl ctl-footer">
@@ -108,8 +144,11 @@
         <a href="https://eservice.ura.gov.sg/maps/api/" target="_blank" rel="noopener">URA Data Service</a>,
         made available under the
         <a href="https://data.gov.sg/open-data-licence" target="_blank" rel="noopener">Singapore Open Data Licence v1.0</a>.
+        HDB resale prices and block listings come from HDB via
+        <a href="https://data.gov.sg/" target="_blank" rel="noopener">data.gov.sg</a>,
+        under the same licence.
         Data is provided “as is” — verify independently before relying on it.
-        This site is not affiliated with, or endorsed by, URA.
+        This site is not affiliated with, or endorsed by, URA or HDB.
       </footer>
     </aside>
     <button id="drawer-toggle" type="button" aria-label="Collapse panel" aria-expanded="true">◀</button>
@@ -133,6 +172,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-  <script src="map.js?v=2"></script>
+  <script src="map.js?v=3"></script>
 </body>
 </html>

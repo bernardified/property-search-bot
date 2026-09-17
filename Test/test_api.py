@@ -395,8 +395,9 @@ class TestDevelopments(unittest.TestCase):
     @contextlib.contextmanager
     def _store(self, key=(1.0, 2.0), stored=None, stored_key=None):
         import api
-        api._dev_state.update(key=None, payload=None)
-        api._dev_rebuilding_for = None
+        layer = api.developments_layer
+        layer.state.update(key=None, payload=None)
+        layer.rebuilding_for = None
         try:
             with patch("api.explore_cache.source_key", return_value=key), \
                  patch("api.explore_cache.load",
@@ -404,8 +405,8 @@ class TestDevelopments(unittest.TestCase):
                  patch("api.explore_cache.save") as save:
                 yield save
         finally:
-            api._dev_state.update(key=None, payload=None)
-            api._dev_rebuilding_for = None
+            layer.state.update(key=None, payload=None)
+            layer.rebuilding_for = None
 
     def test_developments_endpoint_memoizes_per_cache_key(self):
         projects = self._projects()
@@ -443,7 +444,7 @@ class TestDevelopments(unittest.TestCase):
             body = client.get("/api/developments").json()
         self.assertEqual(body, stored)
         self.assertEqual([kw["target"] for kw in started],
-                         [api._rebuild_developments_bg])
+                         [api.developments_layer.rebuild_bg])
 
     def test_developments_payload_carries_district_estate_names(self):
         """The dots only carry a district number; the frontend labels them off
@@ -716,6 +717,38 @@ class TestHDBEndpoints(unittest.TestCase):
         self.assertEqual(data["block"], "257")
         mock_geo.assert_called_once()
 
+    def test_block_coordinate_prefers_the_warmed_collection(self):
+        """The same coordinates the explore layer is built from, validated when
+        they were stored. A live geocode can simply fail, and a block search
+        that loses its coordinate loses its pin, amenities and nearby button."""
+        from api import _geocode_hdb_block
+        db = MagicMock()
+        db.__getitem__.return_value.find_one.return_value = {
+            "_id": "257|BISHAN STREET 22", "lat": 1.3597, "lng": 103.8431}
+        with patch("api.get_mongo_db", return_value=db), \
+             patch("api.geocode_building") as mock_geo:
+            self.assertEqual(_geocode_hdb_block("257", "BISHAN ST 22"),
+                             {"lat": 1.3597, "lng": 103.8431})
+        mock_geo.assert_not_called()
+        # Looked up by the shared key, so "ST" finds a street stored "STREET".
+        self.assertEqual(db.__getitem__.call_args.args[0], "hdb_block_coords")
+        self.assertEqual(
+            db.__getitem__.return_value.find_one.call_args.args[0]["_id"],
+            "257|BISHAN STREET 22")
+
+    def test_a_block_missing_from_the_warm_still_geocodes(self):
+        """The warm covers the blocks that were in the window when it last ran;
+        one that has just entered it must still answer."""
+        from api import _geocode_hdb_block
+        db = MagicMock()
+        db.__getitem__.return_value.find_one.return_value = None
+        with patch("api.get_mongo_db", return_value=db), \
+             patch("api.geocode_building",
+                   return_value={"lat": 1.4, "lng": 103.8}) as mock_geo:
+            self.assertEqual(_geocode_hdb_block("999", "NEW RD"),
+                             {"lat": 1.4, "lng": 103.8})
+        mock_geo.assert_called()
+
     @patch("api._hdb_street_records", return_value=[])
     @patch("api._hdb_index_records", return_value=[])
     @patch("api.hdb.street_summary", return_value=dict(HDB_STREET))
@@ -833,3 +866,163 @@ class TestHDBStorageLayout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestHDBExploreLayer(unittest.TestCase):
+    """The HDB half of the explore map: one dot per block.
+
+    Same shape of test as TestDevelopments — a pure builder, then the
+    persisted-payload protocol both layers now share.
+    """
+
+    def _records(self):
+        """Raw resale rows, spelled the way data.gov.sg spells them."""
+        return [
+            # Two sales on the same block, one inside the 12-mo window.
+            {"block": "257", "street_name": "BISHAN ST 22", "town": "BISHAN",
+             "flat_type": "EXECUTIVE", "month": "2026-08", "resale_price": "1300000",
+             "floor_area_sqm": "150", "remaining_lease": "64 years 10 months"},
+            {"block": "257", "street_name": "BISHAN ST 22", "town": "BISHAN",
+             "flat_type": "5 ROOM", "month": "2022-08", "resale_price": "900000",
+             "floor_area_sqm": "120", "remaining_lease": "68 years 10 months"},
+            # A block with no warmed coordinate.
+            {"block": "999", "street_name": "NOWHERE RD", "town": "BISHAN",
+             "flat_type": "3 ROOM", "month": "2026-08", "resale_price": "400000",
+             "floor_area_sqm": "70", "remaining_lease": "50 years"},
+            # A block whose only sale predates the 12-mo window.
+            {"block": "101", "street_name": "YISHUN RING RD", "town": "YISHUN",
+             "flat_type": "4 ROOM", "month": "2023-03", "resale_price": "500000",
+             "floor_area_sqm": "90", "remaining_lease": "60 years 00 months"},
+        ]
+
+    def _coords(self):
+        # Keyed exactly as the warmer writes them: block + canonicalised street,
+        # so "ST" here has to meet "STREET" in the collection.
+        return {
+            "257|BISHAN STREET 22": {"lat": 1.359717, "lng": 103.843103},
+            "101|YISHUN RING ROAD": {"lat": 1.42, "lng": 103.83},
+        }
+
+    def _build(self, **kw):
+        from api import build_hdb_blocks
+        return build_hdb_blocks(self._records(), self._coords(),
+                                now=datetime(2026, 9, 1), **kw)
+
+    def test_blocks_without_a_warmed_coordinate_are_skipped(self):
+        blocks = self._build()
+        self.assertEqual([(b["block"], b["street"]) for b in blocks],
+                         [("257", "BISHAN ST 22"), ("101", "YISHUN RING RD")])
+
+    def test_twelve_month_aggregates_ignore_older_sales(self):
+        bishan = self._build()[0]
+        self.assertEqual(bishan["txns_12mo"], 1)
+        self.assertEqual(bishan["med_price"], 1300000)
+        # 1.3M over 150 sqm -> ~805 psf; the 2022 sale must not pull it down.
+        self.assertEqual(bishan["avg_psf"], round(1300000 / (150 * 10.7639)))
+        self.assertEqual(bishan["last_txn"], "Aug 2026")
+
+    def test_a_block_with_no_recent_sale_keeps_its_identity(self):
+        """No 12-mo value is structural (the dot renders grey), not a reason to
+        drop the block or to quote a stale price as if it were current."""
+        yishun = self._build()[1]
+        self.assertIsNone(yishun["avg_psf"])
+        self.assertIsNone(yishun["med_price"])
+        self.assertEqual(yishun["txns_12mo"], 0)
+        self.assertEqual(yishun["last_txn"], "Mar 2023")
+        self.assertIsNotNone(yishun["lease_years"])
+
+    def test_lease_comes_from_the_latest_sale_and_is_aged_to_today(self):
+        """Every flat in a block shares a lease start, so the spread across the
+        window is just the window. Taking the max would quote the OLDEST
+        reading — a median 4.2 years too much lease, on the metric whose whole
+        point is decay."""
+        bishan, yishun = self._build()
+        # Newest Bishan sale: 64y10m as of Aug 2026, one month before `now`.
+        self.assertAlmostEqual(bishan["lease_years"], round(64.83 - 1 / 12, 1), places=2)
+        # Not the 2022 sale's 68y10m, which is what a max() would have quoted.
+        self.assertLess(bishan["lease_years"], 65)
+        # Yishun's only reading is 3.5 years old and is aged by exactly that.
+        self.assertAlmostEqual(yishun["lease_years"], 60.0 - 42 / 12, places=1)
+
+    def test_flat_types_come_from_the_whole_window_in_display_order(self):
+        """Which types a block holds is a property of the building — a block
+        that sold no 5-rooms this year still has them."""
+        self.assertEqual(self._build()[0]["flat_types"], ["5 ROOM", "EXECUTIVE"])
+
+    def test_mrt_distance_is_injected_not_fetched(self):
+        blocks = self._build(mrt_coords=[(1.3597, 103.8431)])
+        self.assertLess(blocks[0]["mrt_m"], 50)      # station on the doorstep
+        self.assertGreater(blocks[1]["mrt_m"], 5000)  # Yishun is nowhere near it
+
+    # ── The persisted layer ──────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def _store(self, key=(5.0,), stored=None, stored_key=None):
+        import api
+        layer = api.hdb_blocks_layer
+        layer.state.update(key=None, payload=None)
+        layer.rebuilding_for = None
+        try:
+            with patch("api.explore_cache.hdb_source_key", return_value=key), \
+                 patch("api.explore_cache.load",
+                       return_value=(stored, stored_key if stored else None)), \
+                 patch("api.explore_cache.save") as save:
+                yield save
+        finally:
+            layer.state.update(key=None, payload=None)
+            layer.rebuilding_for = None
+
+    def test_endpoint_builds_once_then_serves_the_memo(self):
+        with self._store() as save, \
+             patch("api.get_hdb_resale_data", return_value=self._records()) as load, \
+             patch("api._hdb_block_coords", return_value=self._coords()), \
+             patch("api._mrt_coords", return_value=[]):
+            first = client.get("/api/hdb/blocks").json()
+            second = client.get("/api/hdb/blocks").json()
+        self.assertEqual(first["count"], 2)
+        self.assertEqual(first, second)
+        load.assert_called_once()   # the 130k-row window is read once
+        save.assert_called_once()
+
+    def test_stored_payload_never_touches_the_resale_window(self):
+        stored = {"blocks": [], "count": 1, "flat_types": []}
+        with self._store(stored=stored, stored_key=(5.0,)), \
+             patch("api.get_hdb_resale_data",
+                   side_effect=AssertionError("loaded the window")):
+            self.assertEqual(client.get("/api/hdb/blocks").json(), stored)
+
+    def test_a_refreshed_cache_serves_the_old_layer_and_rebuilds_behind(self):
+        import api
+        stored = {"blocks": [], "count": 1, "flat_types": []}
+        started = []
+        with self._store(key=(9.0,), stored=stored, stored_key=(5.0,)), \
+             patch("api.threading.Thread") as thread:
+            thread.side_effect = lambda **kw: started.append(kw) or MagicMock()
+            self.assertEqual(client.get("/api/hdb/blocks").json(), stored)
+        self.assertEqual([kw["target"] for kw in started],
+                         [api.hdb_blocks_layer.rebuild_bg])
+
+    def test_an_empty_layer_is_never_persisted(self):
+        """A build that yields nothing is a failed load, not an empty city.
+        Persisting one would serve a blank map as current — for a month, on a
+        layer that refreshes monthly."""
+        with self._store() as save, \
+             patch("api.get_hdb_resale_data", return_value=[]), \
+             patch("api._hdb_block_coords", return_value={}), \
+             patch("api._mrt_coords", return_value=[]):
+            body = client.get("/api/hdb/blocks").json()
+            self.assertEqual(body["count"], 0)
+            save.assert_not_called()
+            # and nothing was memoized, so the next request tries again
+            self.assertIsNone(__import__("api").hdb_blocks_layer.state["key"])
+
+    def test_source_key_refuses_a_partial_window(self):
+        """A partial window carries a perfectly recent timestamp. Keying a
+        payload on it would pin dots derived from half the data."""
+        from cache import explore_cache
+        with patch("cache.explore_cache.hdb_meta_timestamp", return_value=123.0), \
+             patch("cache.explore_cache.hdb_is_fresh", return_value=False):
+            self.assertIsNone(explore_cache.hdb_source_key())
+        with patch("cache.explore_cache.hdb_meta_timestamp", return_value=123.0), \
+             patch("cache.explore_cache.hdb_is_fresh", return_value=True):
+            self.assertEqual(explore_cache.hdb_source_key(), (123.0,))

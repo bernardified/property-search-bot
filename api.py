@@ -53,6 +53,7 @@ from utils import (
     SIZE_BANDS,
     get_mongo_db,
     haversine_m,
+    hdb_block_key,
     parse_float,
     parse_mmyy_date,
     sqm_to_sqft,
@@ -346,15 +347,43 @@ def _hdb_street_records(street: str) -> list:
         return get_street_records(street)
 
 
+def _warmed_block_coord(block: str, street: str) -> dict | None:
+    """One indexed read of the warmed `hdb_block_coords` collection.
+
+    The same coordinates the explore layer is built from, and they were
+    validated when stored (OneMap's own BLK_NO and ROAD_NAME had to match what
+    was asked), so this is the better answer as well as the faster one: a live
+    geocode can simply fail, and a block search that loses its coordinate
+    loses its pin, its amenities and its nearby button with it.
+    """
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        doc = db["hdb_block_coords"].find_one(
+            {"_id": hdb_block_key(block, street), "lat": {"$ne": None}})
+        return {"lat": doc["lat"], "lng": doc["lng"]} if doc else None
+    except Exception:
+        return None
+
+
 def _geocode_hdb_block(block: str, street: str) -> dict | None:
-    """Resolve an HDB block to coordinates via OneMap: the raw street first,
-    then its abbreviation-expanded form (ST → STREET), which is how the data
-    spells streets that OneMap writes out in full.
+    """Resolve an HDB block to coordinates: the warmed collection first, then
+    OneMap live — the raw street, then its abbreviation-expanded form
+    (ST → STREET), which is how the data spells streets that OneMap writes out
+    in full.
+
+    Live geocoding stays as the fallback rather than being removed: the warm
+    covers the blocks that were in the resale window when it last ran, and a
+    block that has just entered it should still answer.
 
     Deliberately a twin of bot.py's helper rather than an import: api.py never
     imports bot.py (that would pull in the Telegram application and its
     module-level setup), so the few lines are duplicated on purpose.
     """
+    warmed = _warmed_block_coord(block, street)
+    if warmed:
+        return warmed
     seen = set()
     for q in (f"{block} {street}", f"{block} {hdb.expand_street(street)}"):
         if q in seen:
@@ -664,14 +693,98 @@ def _load_fallback_coords() -> dict:
         return {}
 
 
-# The landing payload and the (ura_ts, rental_ts) key it was built for. The
-# key is the same one cache/explore_cache.py stores against, so the memo, the
-# stored blob and a fresh build all agree on when the dots are current.
-_dev_state: dict = {"key": None, "payload": None}
-_dev_build_lock = threading.Lock()
-# Key a background rebuild has already been kicked off for, so a burst of
-# requests during one rebuild does not spawn a thread each.
-_dev_rebuilding_for = None
+class _DerivedLayer:
+    """One persisted map layer: served from cache/explore_cache, rebuilt only
+    when the caches it is derived from have actually moved.
+
+    Both explore layers follow the same three-step protocol, and it is subtle
+    enough that two copies of it would drift apart:
+
+      1. the in-process memo, when its key is still current;
+      2. otherwise the stored blob — and if that blob predates the caches it
+         came from, it is still handed to this visitor while the rebuild runs
+         behind them, because rebuilding means the multi-second full-cache
+         load and these layers move twice a week at most;
+      3. only an empty store makes a caller wait for a build.
+
+    `key_fn` returning None means "do not use the store" — a cache is missing
+    or stale, so the slow path (which is what refreshes it) has to run.
+    """
+
+    def __init__(self, name: str, doc_id: str, key_fn, build_fn):
+        self.name = name              # log prefix
+        self.doc_id = doc_id          # explore_cache document
+        # Both are called, never stored as the target function itself: the
+        # key functions are looked up on explore_cache at call time so a
+        # patched module attribute is actually seen (a direct reference here
+        # silently kept the original, and the layer answered from the live
+        # caches while a test believed it was driving the store).
+        self.key_fn = key_fn          # () -> key tuple | None
+        self.build_fn = build_fn      # () -> payload dict (the slow path)
+        # The payload and the key it was built for. That key is the same one
+        # explore_cache stores against, so the memo, the stored blob and a
+        # fresh build all agree on when the layer is current.
+        self.state: dict = {"key": None, "payload": None}
+        self.lock = threading.Lock()
+        # Key a background rebuild has already been kicked off for, so a burst
+        # of requests during one rebuild does not spawn a thread each.
+        self.rebuilding_for = None
+
+    def rebuild(self) -> dict:
+        """The slow path: load the source cache(s) and derive the layer.
+
+        Serialized, because two concurrent cold rebuilds would each drag the
+        same tens of megabytes across the wire.
+        """
+        with self.lock:
+            key = self.key_fn()
+            if key is not None and self.state["key"] == key:
+                return self.state["payload"]   # someone rebuilt while we queued
+            payload = self.build_fn()
+            # An empty layer is a failed load, not an empty city. Persisting
+            # or memoizing one would serve a blank map as though it were
+            # current — for a month, on the HDB layer — so it is returned to
+            # this caller and nothing else. The next request retries.
+            if not payload.get("count"):
+                logger.warning(f"[{self.name}] Built an empty layer — not persisting")
+                return payload
+            if key is not None:
+                explore_cache.save(payload, key, self.doc_id)
+            self.state.update(key=key, payload=payload)
+            return payload
+
+    def rebuild_bg(self) -> None:
+        """`rebuild` for the background thread: clears the in-flight marker
+        whatever happens, so a failed rebuild is retried on the next miss
+        rather than pinning the stale payload forever."""
+        try:
+            self.rebuild()
+        except Exception as e:
+            logger.warning(f"[{self.name}] Background rebuild failed: {e}")
+        finally:
+            self.rebuilding_for = None
+
+    def payload(self) -> dict:
+        key = self.key_fn()
+        if key is not None and self.state["key"] == key:
+            return self.state["payload"]
+
+        stored, stored_key = explore_cache.load(self.doc_id)
+        if stored is not None:
+            self.state.update(key=stored_key, payload=stored)
+            if key is not None and stored_key == key:
+                return stored
+            # The blob predates the caches it came from — a refresh has landed.
+            # Hand this visitor the previous layer (at most one cycle old) and
+            # rebuild behind them.
+            if self.rebuilding_for != key:
+                self.rebuilding_for = key
+                threading.Thread(target=self.rebuild_bg, daemon=True).start()
+            return stored
+
+        # Nothing stored at all (first ever boot, or a wiped collection): there
+        # is nothing to serve, so this caller waits for the build.
+        return self.rebuild()
 
 
 def _mrt_coords() -> list:
@@ -683,69 +796,29 @@ def _mrt_coords() -> list:
         return []
 
 
-def _rebuild_developments() -> dict:
-    """The slow path: pull the whole transaction cache and derive the dots.
+def _build_developments() -> dict:
+    """Derive the private layer from the transaction and rental caches.
 
     Cold, that is ~31MB out of Mongo and ~9s — which is the entire reason the
-    result is persisted. Serialized, because two concurrent cold rebuilds
-    would each drag the same 31MB across the wire.
+    result is persisted.
     """
-    with _dev_build_lock:
-        key = explore_cache.source_key()
-        if key is not None and _dev_state["key"] == key:
-            return _dev_state["payload"]   # someone rebuilt while we queued
-        with _search_lock:
-            transactions, _pipeline = get_ura_data()
-            rentals = get_rental_data()
-        devs = build_developments(
-            transactions, _load_fallback_coords(),
-            rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
-        )
-        # District estate names ride along with the dots (28 short strings, and
-        # the payload is already gzipped) rather than costing the frontend a
-        # second request for a static table.
-        payload = {"developments": devs, "count": len(devs),
-                   "districts": {f"{d:02d}": name for d, name in DISTRICT_NAMES.items()}}
-        if key is not None:
-            explore_cache.save(payload, key)
-        _dev_state.update(key=key, payload=payload)
-        return payload
+    with _search_lock:
+        transactions, _pipeline = get_ura_data()
+        rentals = get_rental_data()
+    devs = build_developments(
+        transactions, _load_fallback_coords(),
+        rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
+    )
+    # District estate names ride along with the dots (28 short strings, and
+    # the payload is already gzipped) rather than costing the frontend a
+    # second request for a static table.
+    return {"developments": devs, "count": len(devs),
+            "districts": {f"{d:02d}": name for d, name in DISTRICT_NAMES.items()}}
 
 
-def _rebuild_developments_bg() -> None:
-    """`_rebuild_developments` for the background thread: clears the in-flight
-    marker whatever happens, so a failed rebuild is retried on the next miss
-    rather than pinning the stale payload forever."""
-    global _dev_rebuilding_for
-    try:
-        _rebuild_developments()
-    except Exception as e:
-        logger.warning(f"[Explore] Background rebuild failed: {e}")
-    finally:
-        _dev_rebuilding_for = None
-
-
-def _warm_caches() -> None:
-    """Boot-time warm — see `_lifespan`.
-
-    Two steps, in the order a visitor needs them. The dots come first and are
-    cheap (the persisted payload), then the transaction and rental caches,
-    which are the ~31MB load that every *search* needs. Serving the dots from
-    the blob means the landing page no longer drags those caches in as a side
-    effect, so the first search would otherwise inherit the whole wait —
-    warming them here keeps both paths fast. Both steps swallow their errors:
-    a failed warm only means the first request takes the slow path, as before.
-    """
-    try:
-        developments_payload()
-    except Exception as e:
-        logger.warning(f"[Explore] Warm-up failed, first request will rebuild: {e}")
-    try:
-        with _search_lock:
-            get_ura_data()
-            get_rental_data()
-    except Exception as e:
-        logger.warning(f"[Cache] Warm-up failed, first search will load: {e}")
+developments_layer = _DerivedLayer(
+    "Explore", explore_cache.DOC_ID,
+    lambda: explore_cache.source_key(), _build_developments)
 
 
 def developments_payload() -> dict:
@@ -758,35 +831,191 @@ def developments_payload() -> dict:
     Served from the persisted payload (cache/explore_cache.py) whenever it is
     current, so the landing page never touches the transaction cache.
     """
-    global _dev_rebuilding_for
-
-    key = explore_cache.source_key()
-    if key is not None and _dev_state["key"] == key:
-        return _dev_state["payload"]
-
-    stored, stored_key = explore_cache.load()
-    if stored is not None:
-        _dev_state.update(key=stored_key, payload=stored)
-        if key is not None and stored_key == key:
-            return stored
-        # The blob predates the caches it came from — a refresh has landed.
-        # Rebuilding means the 31MB load, so hand this visitor the previous
-        # dots (at most one cycle old, on a layer URA only moves twice a week)
-        # and rebuild behind them.
-        if _dev_rebuilding_for != key:
-            _dev_rebuilding_for = key
-            threading.Thread(target=_rebuild_developments_bg, daemon=True).start()
-        return stored
-
-    # Nothing stored at all (first ever boot, or a wiped collection): there is
-    # nothing to serve, so this caller waits for the build.
-    return _rebuild_developments()
+    return developments_layer.payload()
 
 
 @app.get("/api/developments")
 def api_developments():
     return developments_payload()
 
+
+# ── HDB explore layer ───────────────────────────────────────────────────────
+#
+# The HDB half of the explore map: one dot per HDB block, the level at which a
+# resale flat actually has an address, a price and a lease. Deliberately NOT
+# folded into the private layer — the two are shown one market at a time,
+# because a cluster bubble averaging a condo's PSF with a flat's says nothing
+# about either.
+#
+# It lives beside the private layer rather than in the HDB section below
+# because it is the same machinery: a _DerivedLayer over a persisted payload,
+# with the same MRT-distance enrichment. The search endpoints are further down.
+
+HDB_EXPLORE_WINDOW_MONTHS = 12
+
+
+def _hdb_block_coords() -> dict:
+    """The warmed `hdb_block_coords` collection: block key -> {lat, lng}.
+
+    ~9.6k documents, warmed once by scripts/build_hdb_block_coords.py (HDB
+    resale records carry no coordinates and neither does HDB Property
+    Information). Misses are stored as lat=None markers and filtered out here;
+    an empty collection means no HDB layer rather than a broken one.
+    """
+    db = get_mongo_db()
+    if db is None:
+        return {}
+    try:
+        return {d["_id"]: d for d in db["hdb_block_coords"].find({"lat": {"$ne": None}})}
+    except Exception as e:
+        logger.warning(f"[HDB Explore] Coordinate load failed: {e}")
+        return {}
+
+
+def build_hdb_blocks(records: list, coords: dict, mrt_coords=None,
+                     window_months: int = HDB_EXPLORE_WINDOW_MONTHS,
+                     now=None) -> list:
+    """One dot per HDB block for the explore map (pure — tested).
+
+    `records` is the raw resale window and `coords` the warmed block
+    coordinates; a block with no coordinate is skipped, exactly as a project
+    with no x/y is on the private side.
+
+    Two things differ from `build_developments` because HDB data differs:
+
+    *Remaining lease* is the dot's second colour metric, and it has to be
+    read off the LATEST transaction and then aged to today. Within one block
+    every flat shares a lease start, so the spread across the cached window is
+    just the window itself — taking the max would quote a median 4.2 years too
+    much lease, on the metric whose whole point is decay. Decay is exactly one
+    year per year, so ageing the newest reading forward is not an estimate.
+
+    *Flat types* come from the full window, not the 12-month one: which types
+    a block contains is a property of the building, and a block that sold no
+    4-rooms this year still has them.
+    """
+    now = now or datetime.now()
+    cutoff = now.replace(day=1) - relativedelta(months=window_months)
+    rows = hdb._normalise_all(records)
+
+    groups: dict = {}
+    for r in rows:
+        if r["block"] and r["street"]:
+            groups.setdefault((r["block"], r["street"]), []).append(r)
+
+    out = []
+    for (block, street), rs in groups.items():
+        coord = coords.get(hdb_block_key(block, street))
+        if not coord:
+            continue
+
+        recent = [r for r in rs if r["month_dt"] and r["month_dt"] >= cutoff]
+        psfs = [r["psf"] for r in recent if r["psf"]]
+        prices = sorted(r["price"] for r in recent if r["price"])
+        dated = [r for r in rs if r["month_dt"]]
+        latest = max(dated, key=lambda r: r["month_dt"]) if dated else None
+
+        types = sorted({r["flat_type"] for r in rs if r["flat_type"]},
+                       key=lambda t: FLAT_TYPES.index(t) if t in FLAT_TYPES else len(FLAT_TYPES))
+        lat, lng = coord["lat"], coord["lng"]
+        out.append({
+            "block": block,
+            "street": street,
+            "town": rs[0]["town"],
+            "lat": round(lat, 6),
+            "lng": round(lng, 6),
+            "avg_psf": round(sum(psfs) / len(psfs)) if psfs else None,
+            "med_price": round(prices[len(prices) // 2]) if prices else None,
+            "txns_12mo": len(recent),
+            "lease_years": _lease_today(latest, now),
+            "flat_types": types,
+            "mrt_m": nearest_mrt_m(lat, lng, mrt_coords),
+            "last_txn": latest["month_dt"].strftime("%b %Y") if latest else None,
+        })
+
+    out.sort(key=lambda d: (d["street"], d["block"]))
+    return out
+
+
+def _lease_today(latest: dict | None, now: datetime) -> float | None:
+    """The block's remaining lease as of `now`, from its most recent sale.
+
+    A lease reading is only true on the day it was recorded, and these run up
+    to five years old; it decays a year per year, so the correction is the age
+    of the reading. Returns None when the newest sale carried no lease (the
+    pre-2017 era the cache deliberately excludes).
+    """
+    if not latest or latest.get("lease_years") is None or not latest.get("month_dt"):
+        return None
+    months = (now.year - latest["month_dt"].year) * 12 + (now.month - latest["month_dt"].month)
+    return round(max(latest["lease_years"] - months / 12, 0), 1)
+
+
+def _build_hdb_blocks() -> dict:
+    """Derive the HDB layer from the full 60-month resale window.
+
+    ~130k rows and ~8s cold — the same reason the private layer is persisted,
+    and why this one is too. `_hdb_lock` because get_hdb_resale_data()
+    refreshes in-line when stale.
+    """
+    with _hdb_lock:
+        records = get_hdb_resale_data()
+    blocks = build_hdb_blocks(records, _hdb_block_coords(), mrt_coords=_mrt_coords())
+    return {"blocks": blocks, "count": len(blocks),
+            "flat_types": FLAT_TYPES, "window_months": HDB_EXPLORE_WINDOW_MONTHS}
+
+
+hdb_blocks_layer = _DerivedLayer(
+    "HDB Explore", explore_cache.HDB_DOC_ID,
+    lambda: explore_cache.hdb_source_key(), _build_hdb_blocks)
+
+
+def hdb_blocks_payload() -> dict:
+    """Every HDB block with a warmed coordinate — the HDB explore layer.
+
+    ~9.6k rows of {block, street, town, lat, lng, avg_psf, med_price,
+    txns_12mo, lease_years, flat_types, mrt_m, last_txn}. Bigger than the
+    private layer (~216KB gzipped against ~77KB) because there are four times
+    as many blocks as developments, which is why it is fetched only when the
+    user actually switches markets — the landing state is still private.
+    """
+    return hdb_blocks_layer.payload()
+
+
+@app.get("/api/hdb/blocks")
+def api_hdb_blocks():
+    return hdb_blocks_payload()
+
+
+def _warm_caches() -> None:
+    """Boot-time warm — see `_lifespan`.
+
+    Three steps, in the order a visitor needs them. The private dots come
+    first and are cheap (the persisted payload), then the transaction and
+    rental caches, which are the ~31MB load that every *search* needs —
+    serving the dots from the blob means the landing page no longer drags
+    those caches in as a side effect, so the first search would otherwise
+    inherit the whole wait. The HDB layer comes last: nobody sees it until
+    they switch markets, and warming it is a small read unless its blob is
+    cold, in which case this thread is a better place to pay than a request.
+
+    Every step swallows its errors: a failed warm only means the first request
+    takes the slow path, as before.
+    """
+    try:
+        developments_payload()
+    except Exception as e:
+        logger.warning(f"[Explore] Warm-up failed, first request will rebuild: {e}")
+    try:
+        with _search_lock:
+            get_ura_data()
+            get_rental_data()
+    except Exception as e:
+        logger.warning(f"[Cache] Warm-up failed, first search will load: {e}")
+    try:
+        hdb_blocks_payload()
+    except Exception as e:
+        logger.warning(f"[HDB Explore] Warm-up failed, first request will rebuild: {e}")
 
 def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
                         limit: int = 40, origin: tuple | None = None) -> dict:

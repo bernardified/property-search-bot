@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cache.cache_hdb import _load_cache, index_records  # read-only; no refresh
 from maps import search_onemap
-from utils import canon_street_tokens, get_mongo_db, get_onemap_token
+from utils import canon_street_tokens, get_mongo_db, get_onemap_token, hdb_block_key
 
 REQUEST_DELAY_S = 0.3
 COORDS_COLLECTION = "hdb_block_coords"
@@ -59,16 +59,6 @@ SOURCE_ONEMAP = "onemap"
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────
-
-def block_key(block, street) -> str:
-    """Stable _id for one (block, street) pair.
-
-    Canonicalised, because the same block reaches us spelled both ways — the
-    resale data says "BISHAN ST 22" and OneMap says "BISHAN STREET 22". Keying
-    on raw text would store that block twice and let a lookup miss it.
-    """
-    return f"{str(block).strip().upper()}|{' '.join(canon_street_tokens(street))}"
-
 
 def match_result(result: dict, blk: str, street_toks: list):
     """(lat, lng) if this OneMap hit really is that block, else None.
@@ -97,7 +87,7 @@ def index_pairs(rows: list, street_filter: str | None = None) -> dict:
             continue
         if street_filter and street_filter.upper() not in street:
             continue
-        out.setdefault(block_key(block, street), {"block": block, "street": street})
+        out.setdefault(hdb_block_key(block, street), {"block": block, "street": street})
     return out
 
 

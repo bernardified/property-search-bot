@@ -189,6 +189,31 @@ def _fetch_resale(resource_id: str, months: list[str]) -> tuple[list, bool]:
 
 # ── Cache read/write ────────────────────────────────────────────────────────
 
+def meta_timestamp() -> float | None:
+    """The cache's last-refresh timestamp, or None. One small projected read.
+
+    Mirrors cache_ura/cache_rental: it is the freshness key a *derived* cache
+    keys itself on (cache/explore_cache.py), never a freshness verdict —
+    `is_cache_fresh()` answers that, and a partial window has a timestamp but
+    is not fresh.
+    """
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        doc = db['hdb_cache'].find_one({"_id": "meta"}, {"timestamp": 1})
+        return doc.get("timestamp") if doc else None
+    except Exception as e:
+        logger.error(f"[HDB Cache] Meta read failed: {e}")
+        return None
+
+
+def is_cache_fresh() -> bool:
+    """Public view of `_is_cache_fresh` — for callers deciding whether data
+    derived from this window can still be trusted."""
+    return _is_cache_fresh()
+
+
 def _is_cache_fresh() -> bool:
     db = get_mongo_db()
     if db is None:
