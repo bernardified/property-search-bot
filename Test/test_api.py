@@ -3,11 +3,12 @@ Tests for api.py's pure payload shaping + endpoint routing.
 Run with: python -m Test.test_api
 All external calls (URA cache, rental, geocode, Mongo) are mocked — no network.
 """
+import contextlib
 import os
 import sys
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -387,11 +388,29 @@ class TestDevelopments(unittest.TestCase):
         bravo = devs[1]
         self.assertEqual((bravo["lat"], bravo["lng"]), (1.30, 103.90))  # fallback
 
-    def test_developments_endpoint_memoizes_per_cache_object(self):
+    # The explore payload is served from a persisted blob keyed on the source
+    # caches' timestamps, so every test below has to say what the store holds:
+    # `stored=None` is a miss (rebuild from the caches), a key equal to
+    # `source_key` is a hit, a different one means a refresh has landed.
+    @contextlib.contextmanager
+    def _store(self, key=(1.0, 2.0), stored=None, stored_key=None):
         import api
+        api._dev_state.update(key=None, payload=None)
+        api._dev_rebuilding_for = None
+        try:
+            with patch("api.explore_cache.source_key", return_value=key), \
+                 patch("api.explore_cache.load",
+                       return_value=(stored, stored_key if stored else None)), \
+                 patch("api.explore_cache.save") as save:
+                yield save
+        finally:
+            api._dev_state.update(key=None, payload=None)
+            api._dev_rebuilding_for = None
+
+    def test_developments_endpoint_memoizes_per_cache_key(self):
         projects = self._projects()
-        api._dev_memo.update(txns=None, rentals=None, payload=None)
-        with patch("api.get_ura_data", return_value=(projects, [])), \
+        with self._store() as save, \
+             patch("api.get_ura_data", return_value=(projects, [])), \
              patch("api.get_rental_data", return_value=[]), \
              patch("api._mrt_coords", return_value=[]), \
              patch("api._load_fallback_coords", return_value={}) as mock_fb:
@@ -400,19 +419,41 @@ class TestDevelopments(unittest.TestCase):
         self.assertEqual(first["count"], 1)  # only ALPHA has usable coords
         self.assertEqual(first, second)
         mock_fb.assert_called_once()  # second call served from the memo
-        api._dev_memo.update(txns=None, rentals=None, payload=None)
+        save.assert_called_once()     # and the rebuild was persisted
+
+    def test_stored_payload_never_touches_the_transaction_cache(self):
+        """The whole point of the store: a current blob answers the landing
+        page without the ~31MB transaction load behind it."""
+        stored = {"developments": [], "count": 0, "districts": {}}
+        with self._store(stored=stored, stored_key=(1.0, 2.0)), \
+             patch("api.get_ura_data", side_effect=AssertionError("loaded the cache")):
+            body = client.get("/api/developments").json()
+        self.assertEqual(body, stored)
+
+    def test_refreshed_cache_serves_the_old_payload_and_rebuilds_behind(self):
+        """A blob keyed to an older refresh is still served — rebuilding is the
+        31MB load, and the dots move twice a week — with the rebuild kicked off
+        in the background rather than under the visitor."""
+        import api
+        stored = {"developments": [], "count": 0, "districts": {}}
+        started = []
+        with self._store(key=(9.0, 9.0), stored=stored, stored_key=(1.0, 2.0)), \
+             patch("api.threading.Thread") as thread:
+            thread.side_effect = lambda **kw: started.append(kw) or MagicMock()
+            body = client.get("/api/developments").json()
+        self.assertEqual(body, stored)
+        self.assertEqual([kw["target"] for kw in started],
+                         [api._rebuild_developments_bg])
 
     def test_developments_payload_carries_district_estate_names(self):
         """The dots only carry a district number; the frontend labels them off
         this table, keyed on the same zero-padded code."""
-        import api
-        api._dev_memo.update(txns=None, rentals=None, payload=None)
-        with patch("api.get_ura_data", return_value=(self._projects(), [])), \
+        with self._store(), \
+             patch("api.get_ura_data", return_value=(self._projects(), [])), \
              patch("api.get_rental_data", return_value=[]), \
              patch("api._mrt_coords", return_value=[]), \
              patch("api._load_fallback_coords", return_value={}):
             body = client.get("/api/developments").json()
-        api._dev_memo.update(txns=None, rentals=None, payload=None)
         self.assertEqual(len(body["districts"]), 28)
         self.assertEqual(body["districts"]["19"], "Hougang / Serangoon / Punggol")
         self.assertEqual(body["districts"]["01"], "Raffles Place / Marina / Cecil")
@@ -601,9 +642,7 @@ class TestNearby(unittest.TestCase):
         self.assertIn("error", nearby_developments(self.DEVS, "NOWHERE"))
 
     def test_nearby_endpoint(self):
-        import api
-        api._dev_memo.update(txns=None, rentals=None, payload=None)
-        with patch("api.api_developments", return_value={"developments": self.DEVS}):
+        with patch("api.developments_payload", return_value={"developments": self.DEVS}):
             data = client.get("/api/nearby", params={"q": "ORIGIN", "radius_m": 1000}).json()
         self.assertEqual([r["project"] for r in data["results"]], ["CLOSE", "MID"])
         self.assertEqual(data["radius_m"], 1000)

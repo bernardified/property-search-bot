@@ -21,6 +21,8 @@ this app (StaticFiles below). Revisit if the webapp ever moves to its own
 domain for a client-facing version.
 """
 
+import contextlib
+import logging
 import re
 import threading
 from datetime import datetime
@@ -41,6 +43,7 @@ from cache.cache_hdb import (
     get_street_records,
     is_hdb_residential_block,
 )
+from cache import explore_cache
 from cache.cache_ura import get_ura_data
 from cache.cache_rental import get_rental_data
 from cache.onemap_mrt import build_mrt_cache
@@ -58,7 +61,23 @@ from utils import (
 
 _POSTAL_RE = re.compile(r"^\d{6}$")
 
-app = FastAPI(title="Property Bot API")
+logger = logging.getLogger(__name__)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    """Warm the landing payload in the background at boot.
+
+    The explore map is the landing state, so the first visitor after a deploy
+    or restart is the one who pays for a cold `/api/developments`. Doing it
+    here moves that cost to container start, where nobody is waiting, and the
+    thread is daemonic so a slow or failing warm never holds up serving.
+    """
+    threading.Thread(target=_warm_caches, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Property Bot API", lifespan=_lifespan)
 # /api/developments is ~540KB of JSON — gzip takes it to roughly a quarter of
 # that, and every other response is small enough that the threshold skips it.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -645,10 +664,14 @@ def _load_fallback_coords() -> dict:
         return {}
 
 
-# Memo keyed by the identity of the memoized transaction + rental lists from
-# the cache modules — rebuilt only when a cache actually refreshes (new list
-# object), which is also when the MRT coords are re-read.
-_dev_memo = {"txns": None, "rentals": None, "payload": None}
+# The landing payload and the (ura_ts, rental_ts) key it was built for. The
+# key is the same one cache/explore_cache.py stores against, so the memo, the
+# stored blob and a fresh build all agree on when the dots are current.
+_dev_state: dict = {"key": None, "payload": None}
+_dev_build_lock = threading.Lock()
+# Key a background rebuild has already been kicked off for, so a burst of
+# requests during one rebuild does not spawn a thread each.
+_dev_rebuilding_for = None
 
 
 def _mrt_coords() -> list:
@@ -660,31 +683,109 @@ def _mrt_coords() -> list:
         return []
 
 
-@app.get("/api/developments")
-def api_developments():
+def _rebuild_developments() -> dict:
+    """The slow path: pull the whole transaction cache and derive the dots.
+
+    Cold, that is ~31MB out of Mongo and ~9s — which is the entire reason the
+    result is persisted. Serialized, because two concurrent cold rebuilds
+    would each drag the same 31MB across the wire.
+    """
+    with _dev_build_lock:
+        key = explore_cache.source_key()
+        if key is not None and _dev_state["key"] == key:
+            return _dev_state["payload"]   # someone rebuilt while we queued
+        with _search_lock:
+            transactions, _pipeline = get_ura_data()
+            rentals = get_rental_data()
+        devs = build_developments(
+            transactions, _load_fallback_coords(),
+            rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
+        )
+        # District estate names ride along with the dots (28 short strings, and
+        # the payload is already gzipped) rather than costing the frontend a
+        # second request for a static table.
+        payload = {"developments": devs, "count": len(devs),
+                   "districts": {f"{d:02d}": name for d, name in DISTRICT_NAMES.items()}}
+        if key is not None:
+            explore_cache.save(payload, key)
+        _dev_state.update(key=key, payload=payload)
+        return payload
+
+
+def _rebuild_developments_bg() -> None:
+    """`_rebuild_developments` for the background thread: clears the in-flight
+    marker whatever happens, so a failed rebuild is retried on the next miss
+    rather than pinning the stale payload forever."""
+    global _dev_rebuilding_for
+    try:
+        _rebuild_developments()
+    except Exception as e:
+        logger.warning(f"[Explore] Background rebuild failed: {e}")
+    finally:
+        _dev_rebuilding_for = None
+
+
+def _warm_caches() -> None:
+    """Boot-time warm — see `_lifespan`.
+
+    Two steps, in the order a visitor needs them. The dots come first and are
+    cheap (the persisted payload), then the transaction and rental caches,
+    which are the ~31MB load that every *search* needs. Serving the dots from
+    the blob means the landing page no longer drags those caches in as a side
+    effect, so the first search would otherwise inherit the whole wait —
+    warming them here keeps both paths fast. Both steps swallow their errors:
+    a failed warm only means the first request takes the slow path, as before.
+    """
+    try:
+        developments_payload()
+    except Exception as e:
+        logger.warning(f"[Explore] Warm-up failed, first request will rebuild: {e}")
+    try:
+        with _search_lock:
+            get_ura_data()
+            get_rental_data()
+    except Exception as e:
+        logger.warning(f"[Cache] Warm-up failed, first search will load: {e}")
+
+
+def developments_payload() -> dict:
     """Every non-landed development with a coordinate — the explore-map layer.
     ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo,
     yield_pct, tenure, mrt_m, last_txn}: the last four drive the colour
     metrics and the client-side filters, and cost no extra IO. Plus
-    `districts`, the district -> estate-name table the dots label against."""
-    with _search_lock:
-        transactions, _pipeline = get_ura_data()
-        rentals = get_rental_data()
-    if (_dev_memo["txns"] is transactions and _dev_memo["rentals"] is rentals
-            and _dev_memo["payload"] is not None):
-        return _dev_memo["payload"]
-    devs = build_developments(
-        transactions, _load_fallback_coords(),
-        rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
-    )
-    # District estate names ride along with the dots (28 short strings, and
-    # the payload is already gzipped) rather than costing the frontend a
-    # second request for a static table.
-    payload = {"developments": devs, "count": len(devs),
-               "districts": {f"{d:02d}": name for d, name in DISTRICT_NAMES.items()}}
-    _dev_memo["txns"], _dev_memo["rentals"] = transactions, rentals
-    _dev_memo["payload"] = payload
-    return payload
+    `districts`, the district -> estate-name table the dots label against.
+
+    Served from the persisted payload (cache/explore_cache.py) whenever it is
+    current, so the landing page never touches the transaction cache.
+    """
+    global _dev_rebuilding_for
+
+    key = explore_cache.source_key()
+    if key is not None and _dev_state["key"] == key:
+        return _dev_state["payload"]
+
+    stored, stored_key = explore_cache.load()
+    if stored is not None:
+        _dev_state.update(key=stored_key, payload=stored)
+        if key is not None and stored_key == key:
+            return stored
+        # The blob predates the caches it came from — a refresh has landed.
+        # Rebuilding means the 31MB load, so hand this visitor the previous
+        # dots (at most one cycle old, on a layer URA only moves twice a week)
+        # and rebuild behind them.
+        if _dev_rebuilding_for != key:
+            _dev_rebuilding_for = key
+            threading.Thread(target=_rebuild_developments_bg, daemon=True).start()
+        return stored
+
+    # Nothing stored at all (first ever boot, or a wiped collection): there is
+    # nothing to serve, so this caller waits for the build.
+    return _rebuild_developments()
+
+
+@app.get("/api/developments")
+def api_developments():
+    return developments_payload()
 
 
 def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
@@ -747,7 +848,7 @@ def api_nearby(
     """Neighbouring developments for the map's nearby view. Each row is an
     explore-map dot (same keys, so the popups render identically) plus
     `distance_m`; `total` says how many were inside the radius before `limit`."""
-    devs = api_developments()["developments"]
+    devs = developments_payload()["developments"]
     origin = (lat, lng) if lat is not None and lng is not None else None
     return nearby_developments(devs, q, radius_m=radius_m, limit=limit, origin=origin)
 
