@@ -117,6 +117,12 @@ def _meta_timestamp() -> float | None:
         return None
 
 
+def meta_timestamp() -> float | None:
+    """Public view of `_meta_timestamp` — the freshness key derived caches key
+    themselves on (see cache/explore_cache.py). One small projected read."""
+    return _meta_timestamp()
+
+
 def _is_cache_fresh() -> bool:
     """
     Return True if the cache is up-to-date — i.e. no URA rental release
@@ -139,16 +145,15 @@ def _load_cache() -> list:
     if db is None:
         return []
     try:
-        # Load from chunks (rental data can also be large)
-        projects = []
-        chunk = 0
-        while True:
-            doc = db['rental_cache'].find_one({"_id": f"chunk_{chunk}"})
-            if not doc:
-                break
-            projects.extend(doc.get("projects", []))
-            chunk += 1
-        return projects
+        # One batched cursor rather than a find_one per chunk — see the same
+        # change in cache_ura._load_cache. Sorted by the _id's index so the
+        # order is stable across loads.
+        docs = sorted(
+            db['rental_cache'].find({"_id": {"$regex": r"^chunk_\d+$"}},
+                                    batch_size=200),
+            key=lambda d: int(d["_id"].rsplit("_", 1)[1]),
+        )
+        return [p for d in docs for p in d.get("projects", [])]
     except Exception as e:
         logger.error(f"[Rental Cache] Load failed: {e}")
         return []
