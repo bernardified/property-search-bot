@@ -27,11 +27,17 @@ L.tileLayer("https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png", {
     '(<a href="https://data.gov.sg/open-data-licence" target="_blank">SODL v1.0</a>)',
 }).addTo(map);
 
+// The amenity render loop is driven entirely by this table, so a category is
+// its colour, its label and nothing else. Hawker centres take the warm dark
+// that sits in the widest gap left in the palette — five categorical hues on a
+// light tile surface is already crowded, which is why the popup names the
+// place and the legend labels every swatch rather than leaning on hue alone.
 const AMENITY_STYLES = {
   mrts: { color: "#dc2626", label: "MRT" },
   schools: { color: "#2563eb", label: "School" },
   malls: { color: "#9333ea", label: "Mall" },
   supermarkets: { color: "#16a34a", label: "Supermarket" },
+  hawkers: { color: "#b45309", label: "Hawker centre" },
 };
 
 // Primary-school admission priority is drawn at 1 km straight-line, which is
@@ -1070,6 +1076,10 @@ async function loadAmenities(d) {
             `<div class="popup-line"><span class="muted">Click the dot to toggle its 1 km ring</span></div>`
           );
         }
+        // The honest difference between a centre with 112 cooked-food stalls
+        // and one with 12, which the name never carries.
+        if (key === "hawkers" && item.stalls)
+          lines.push(`<div class="popup-line">🍜 ${item.stalls} cooked-food stalls</div>`);
         if (item.maps_link)
           lines.push(`<div class="popup-line"><a href="${esc(item.maps_link)}" target="_blank">Directions ↗</a></div>`);
         const marker = L.circleMarker([item.dest_lat, item.dest_lng], {

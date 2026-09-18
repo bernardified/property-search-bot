@@ -352,7 +352,12 @@ body {
   left: 12px;
   z-index: 1000;
   display: flex;
-  gap: 12px;
+  /* Six entries no longer fit one line on a narrow map, and a label broken
+     mid-phrase ("Hawker / centres") reads as two entries. Wrap between
+     entries, never inside one. */
+  flex-wrap: wrap;
+  max-width: calc(100% - 24px);
+  gap: 4px 12px;
   padding: 6px 12px;
   font-size: 0.78rem;
   background: #fff;
@@ -361,7 +366,12 @@ body {
   box-shadow: 0 2px 8px rgba(0,0,0,.12);
 }
 #legend[hidden], #nearby-legend[hidden] { display: none; }
-#legend span, #nearby-legend span { display: flex; align-items: center; gap: 4px; }
+#legend span, #nearby-legend span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
 .dot {
   width: 10px;
   height: 10px;
@@ -372,6 +382,7 @@ body {
 .dot.school { background: #2563eb; }
 .dot.mall { background: #9333ea; }
 .dot.mart { background: #16a34a; }
+.dot.hawker { background: #b45309; }
 /* Ring swatch mirrors the school-catchment circle drawn on the map. */
 .ring {
   width: 10px;

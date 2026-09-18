@@ -2085,6 +2085,7 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(cbs, [
             "amenity:mrt:tok123", "amenity:schools:tok123",
             "amenity:malls:tok123", "amenity:supermarkets:tok123",
+            "amenity:hawkers:tok123",
             "hdbtrend:tok123",
             "new_search",
         ])
@@ -2097,6 +2098,173 @@ class TestHDB(unittest.TestCase):
 # ══════════════════════════════════════════════════════
 # HDB CACHE COMPLETENESS (a partial fetch must not win)
 # ══════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════
+# HAWKER CENTRES (NEA register, not Google Places)
+# ══════════════════════════════════════════════════════
+
+class TestHawkerCentres(unittest.TestCase):
+    """NEA's hawker-centre register: parsing, nearest-N, and how it joins the
+    amenity bundle."""
+
+    GEOJSON = {"features": [
+        {"properties": {"NAME": "Tiong Bahru Market", "STATUS": "Existing",
+                        "ADDRESS_MYENV": "30, Seng Poh Road, Singapore 168898",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 83},
+         "geometry": {"coordinates": [103.8325, 1.2848]}},
+        {"properties": {"NAME": "Yew Tee Hawker Centre", "STATUS": "Under Construction",
+                        "ADDRESS_MYENV": "", "NUMBER_OF_COOKED_FOOD_STALLS": 40},
+         "geometry": {"coordinates": [103.7470, 1.3970]}},
+        # Open under every other status the dataset uses — "(new)",
+        # "(replacement)" and "Interim Centre" are all serving food.
+        {"properties": {"NAME": "Ci Yuan Hawker Centre", "STATUS": "Existing (new)",
+                        "ADDRESS_MYENV": "51 Hougang Avenue 9",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 40},
+         "geometry": {"coordinates": [103.8760, 1.3760]}},
+        {"properties": {"NAME": "", "STATUS": "Existing",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 10},
+         "geometry": {"coordinates": [103.8, 1.3]}},
+        {"properties": {"NAME": "No Geometry", "STATUS": "Existing",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": None},
+         "geometry": {"coordinates": []}},
+    ]}
+
+    def test_coordinates_are_read_lng_first(self):
+        """GeoJSON is lng-first, and reading it the other way round is the one
+        mistake here that still computes: Singapore's coordinates swapped land
+        in the Indian Ocean and every distance would look plausible."""
+        from cache.hawker_cache import parse_hawker_geojson
+        row = parse_hawker_geojson(self.GEOJSON)[0]
+        self.assertAlmostEqual(row["lat"], 1.2848)
+        self.assertAlmostEqual(row["lng"], 103.8325)
+
+    def test_only_under_construction_is_dropped(self):
+        from cache.hawker_cache import parse_hawker_geojson
+        names = [h["name"] for h in parse_hawker_geojson(self.GEOJSON)]
+        self.assertEqual(names, ["Tiong Bahru Market", "Ci Yuan Hawker Centre"])
+
+    def test_unusable_rows_are_skipped_not_crashed_on(self):
+        """A nameless row and one with no geometry are dropped rather than
+        raising — a single bad record must never cost the whole amenity."""
+        from cache.hawker_cache import parse_hawker_geojson
+        self.assertEqual(len(parse_hawker_geojson(self.GEOJSON)), 2)
+        self.assertEqual(parse_hawker_geojson({}), [])
+
+    def test_stall_count_survives(self):
+        from cache.hawker_cache import parse_hawker_geojson
+        self.assertEqual(parse_hawker_geojson(self.GEOJSON)[0]["stalls"], 83)
+
+    # ── nearest-N ────────────────────────────────────────────────────────────
+
+    CACHE = [
+        {"name": "Near", "lat": 1.3000, "lng": 103.8000, "address": "", "stalls": 20},
+        {"name": "Mid", "lat": 1.3050, "lng": 103.8000, "address": "", "stalls": 30},
+        {"name": "Edge", "lat": 1.3170, "lng": 103.8000, "address": "", "stalls": 40},
+        # ~3.3 km — beyond the radius even though it is only the fourth nearest.
+        {"name": "Far", "lat": 1.3300, "lng": 103.8000, "address": "", "stalls": 50},
+    ]
+
+    def nearest(self, top_n=3):
+        with patch("cache.hawker_cache.get_hawker_cache", return_value=self.CACHE):
+            from cache.hawker_cache import find_nearest_hawkers
+            return find_nearest_hawkers(1.3000, 103.8000, top_n=top_n)
+
+    def test_nearest_first_within_the_radius(self):
+        self.assertEqual([h["name"] for h in self.nearest()], ["Near", "Mid", "Edge"])
+
+    def test_beyond_the_radius_is_excluded_even_when_short_of_top_n(self):
+        """2km is the cap, not a suggestion: a centre 3.3km away is not a
+        useful answer to "what can I walk to"."""
+        self.assertNotIn("Far", [h["name"] for h in self.nearest(top_n=4)])
+
+    def test_radius_covers_the_map(self):
+        """Why 2km and not the supermarkets' 1km: measured against the map's
+        own dots, 1km leaves ~30% of HDB blocks with no answer at all."""
+        from cache.hawker_cache import MAX_RADIUS_M
+        self.assertEqual(MAX_RADIUS_M, 2000)
+
+    # ── the in-process memo ──────────────────────────────────────────────────
+
+    def setUp(self):
+        import cache.hawker_cache as hc
+        hc._memo.update(at=0.0, hawkers=[])
+
+    def test_one_fetch_serves_the_whole_hour(self):
+        """Every amenity lookup used to re-run the freshness check and, with no
+        Mongo, re-fetch — which data.gov.sg rate-limits, so the second lookup
+        in a row came back empty and the amenity silently vanished."""
+        import cache.hawker_cache as hc
+        with patch.object(hc, "_is_cache_fresh", return_value=False), \
+             patch.object(hc, "_save_cache"), \
+             patch.object(hc, "_fetch_hawkers", return_value=self.CACHE) as fetch:
+            hc.get_hawker_cache(now=1000.0)
+            hc.get_hawker_cache(now=1000.0 + hc.MEMO_TTL_S - 1)
+            fetch.assert_called_once()
+            hc.get_hawker_cache(now=1000.0 + hc.MEMO_TTL_S + 1)
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_an_empty_answer_is_never_memoized(self):
+        """A failed fetch is not an empty Singapore. Holding [] for an hour
+        would drop the amenity from every result in that window."""
+        import cache.hawker_cache as hc
+        with patch.object(hc, "_is_cache_fresh", return_value=False), \
+             patch.object(hc, "_load_cache", return_value=[]), \
+             patch.object(hc, "_fetch_hawkers", return_value=[]) as fetch:
+            self.assertEqual(hc.get_hawker_cache(now=1000.0), [])
+            hc.get_hawker_cache(now=1001.0)
+            self.assertEqual(fetch.call_count, 2)
+
+    # ── the amenity bundle ───────────────────────────────────────────────────
+
+    def test_get_nearby_info_returns_hawkers_without_a_transit_leg(self):
+        """A hawker centre is somewhere you walk to, so it skips
+        _enrich_with_transit — that pass is a second Distance Matrix round
+        trip on the slowest endpoint in the app."""
+        import maps
+        walk = [{"distance_text": "450 m", "duration_text": "6 mins", "distance_m": 450}]
+        with patch("maps.onemap_find_nearest_mrts", return_value=[]), \
+             patch("maps.find_nearest_mall", return_value=[]), \
+             patch("maps.find_nearest_primary_schools", return_value=[]), \
+             patch("maps.find_nearest_supermarkets", return_value=[]), \
+             patch("maps.get_walking_distances_bulk", return_value=walk), \
+             patch("maps._enrich_with_transit") as transit, \
+             patch("maps.find_nearest_hawkers", return_value=[
+                 {"name": "Tiong Bahru Market", "lat": 1.2848, "lng": 103.8325,
+                  "address": "30 Seng Poh Road", "stalls": 83, "dist": 430.0}]):
+            out = maps.get_nearby_info("SOMEWHERE", lat=1.2860, lng=103.8300)
+
+        self.assertEqual(len(out["hawkers"]), 1)
+        row = out["hawkers"][0]
+        self.assertEqual(row["name"], "Tiong Bahru Market")
+        self.assertEqual(row["stalls"], 83)
+        self.assertEqual((row["dest_lat"], row["dest_lng"]), (1.2848, 103.8325))
+        self.assertNotIn("transit_duration", row)
+        transit.assert_not_called()
+
+    def test_the_bot_message_carries_the_stall_count(self):
+        from bot import format_amenity_list
+        text = format_amenity_list(
+            [{"name": "Tiong Bahru Market", "distance": "450 m", "duration": "6 mins",
+              "maps_link": "https://maps.example/x", "stalls": 83}],
+            "title", "empty",
+            detail=lambda h: f" _({h['stalls']} stalls)_" if h.get("stalls") else "",
+        )
+        self.assertIn("Tiong Bahru Market _(83 stalls)_", text)
+
+    def test_detail_is_optional_for_every_other_amenity(self):
+        from bot import format_amenity_list
+        text = format_amenity_list(
+            [{"name": "Somewhere", "distance": "1 km", "duration": "12 mins",
+              "maps_link": "https://maps.example/y"}],
+            "title", "empty")
+        self.assertIn("1. Somewhere\n", text)
+
+    def test_the_hawker_button_is_on_both_keyboards(self):
+        from bot import build_amenity_keyboard, build_hdb_amenity_keyboard
+        for keyboard in (build_amenity_keyboard("tok"), build_hdb_amenity_keyboard("tok")):
+            data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+            self.assertIn("amenity:hawkers:tok", data)
+
 
 class TestHDBCacheCompleteness(unittest.TestCase):
     """The refresh asks for 60 months. A run that comes back with a handful of
@@ -2263,6 +2431,7 @@ def run_tests():
         TestUnitCountsHarvest,
         TestHDB,
         TestHDBCacheCompleteness,
+        TestHawkerCentres,
     ]
 
     for cls in test_classes:

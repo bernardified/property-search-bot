@@ -404,6 +404,17 @@ def find_nearest_primary_schools(lat: float, lng: float) -> list:
     return cached_schools(lat, lng, top_n=5)
 
 
+def find_nearest_hawkers(lat: float, lng: float) -> list:
+    """Nearest government hawker centres, from NEA's own register.
+
+    Not a Places call: `keyword=hawker centre` answers with coffee shops and
+    mall food courts mixed in, and no Places type separates them. See
+    cache/hawker_cache.py.
+    """
+    from cache.hawker_cache import find_nearest_hawkers as cached_hawkers
+    return cached_hawkers(lat, lng, top_n=3)
+
+
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def get_nearby_info(address: str, lat: float | None = None, lng: float | None = None) -> dict:
@@ -513,4 +524,29 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
             })
         supermarket_results = _enrich_with_transit(lat, lng, origin, supermarket_results)
 
-    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results}
+    # ── Hawker centres via NEA's register (no Places call) ───────────────────
+    #
+    # The one amenity with no _enrich_with_transit pass. Everything else here
+    # can plausibly be reached by bus or train; a hawker centre is somewhere
+    # you walk to, and the transit leg is a second Distance Matrix round trip
+    # on the slowest endpoint in the app. Walking distance alone answers it.
+    hawker_results = []
+    hawkers = find_nearest_hawkers(lat, lng)
+    if hawkers:
+        dest_list = [{"lat": h["lat"], "lng": h["lng"]} for h in hawkers]
+        distances = get_walking_distances_bulk(lat, lng, dest_list)
+        for hawker, dist in zip(hawkers, distances):
+            if dist:
+                hawker_results.append({
+                    "name": hawker["name"],
+                    "distance": dist["distance_text"],
+                    "duration": dist["duration_text"],
+                    "distance_m": dist["distance_m"],
+                    "dest_lat": hawker["lat"],
+                    "dest_lng": hawker["lng"],
+                    "maps_link": build_google_maps_link(origin, hawker["lat"], hawker["lng"]),
+                    "stalls": hawker["stalls"],
+                    "dist": hawker["dist"],
+                })
+
+    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results, "hawkers": hawker_results}
