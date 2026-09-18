@@ -215,6 +215,10 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
         ],
         [
+            InlineKeyboardButton("🍜 Hawker Centres", callback_data=f"amenity:hawkers:{token}"),
+            InlineKeyboardButton("☕ Coffee Shops", callback_data=f"amenity:coffeeshops:{token}"),
+        ],
+        [
             InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{token}"),
             InlineKeyboardButton("📈 Price Trend", callback_data=f"amenity:trend:{token}"),
         ],
@@ -248,6 +252,10 @@ def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛒 Supermarkets", callback_data=f"amenity:supermarkets:{token}"),
         ],
         [
+            InlineKeyboardButton("🍜 Hawker Centres", callback_data=f"amenity:hawkers:{token}"),
+            InlineKeyboardButton("☕ Coffee Shops", callback_data=f"amenity:coffeeshops:{token}"),
+        ],
+        [
             InlineKeyboardButton("📈 Price Trend (5yr)", callback_data=f"hdbtrend:{token}"),
         ],
         [
@@ -257,12 +265,19 @@ def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
     ])
 
 
-def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "") -> str:
-    """Format a list of amenity results into a Telegram message."""
+def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "",
+                        detail=None) -> str:
+    """Format a list of amenity results into a Telegram message.
+
+    `detail` is an optional callable returning one extra line for an item (or
+    "" for none) — what a category carries that the others do not, such as a
+    hawker centre's stall count.
+    """
     if not items:
         return empty_msg
     lines = [title, "─────────────────────"]
     for i, item in enumerate(items, 1):
+        extra = detail(item) if detail else ""
         walk_line = f"     🚶 {item['duration']} ({item['distance']})"
         if item.get("transit_duration"):
             transit_line = f"\n     🚌 ~{item['transit_duration']} ({item['transit_distance']}) by transit _(est. Tue 9am)_"
@@ -270,7 +285,7 @@ def format_amenity_list(items: list, title: str, empty_msg: str, note: str = "")
             transit_line = ""
         link_label = "Transit directions" if item.get("transit_duration") else "Walking directions"
         lines.append(
-            f"  {i}. {item['name']}\n"
+            f"  {i}. {item['name']}{extra}\n"
             f"{walk_line}{transit_line}\n"
             f"     [{link_label}]({item['maps_link']})"
         )
@@ -977,7 +992,8 @@ async def district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all amenity button taps: MRT, schools, malls, supermarkets, rental."""
+    """Handle all amenity button taps: MRT, schools, malls, supermarkets,
+    hawker centres, coffee shops, rental."""
     query = update.callback_query
     await query.answer()
 
@@ -1105,6 +1121,30 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     maps_result.get("supermarkets", []),
                     f"🛒 *Nearest Supermarkets — {display_name}* _(within 1km)_",
                     "🛒 No major supermarkets found within 1km"
+                )
+            elif amenity == "hawkers":
+                # NEA's register lists government hawker centres only, so say
+                # so — a user who can see a food court from the window should
+                # not read its absence as a gap in the search.
+                text = format_amenity_list(
+                    maps_result.get("hawkers", []),
+                    f"🍜 *Nearest Hawker Centres — {display_name}* _(within 2km)_",
+                    "🍜 No hawker centres found within 2km",
+                    note="_Government hawker centres only (NEA). Private food "
+                         "courts and coffee shops are not listed._",
+                    detail=lambda h: f" _({h['stalls']} stalls)_" if h.get("stalls") else "",
+                )
+            elif amenity == "coffeeshops":
+                # Google, not a register — the note says so, because the
+                # hawker list beside it IS authoritative and the two should
+                # not be read as carrying the same weight.
+                text = format_amenity_list(
+                    maps_result.get("coffeeshops", []),
+                    f"☕ *Nearest Coffee Shops — {display_name}* _(within 1km)_",
+                    "☕ No coffee shops found within 1km",
+                    note="_Coffee shops are matched by name from Google Places — "
+                         "there is no official register of them, so treat this as "
+                         "indicative._",
                 )
             else:
                 text = "Unknown amenity type."

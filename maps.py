@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -192,6 +193,26 @@ def get_exit_letter(name: str) -> str:
 
 # ── Google Places — mall only ─────────────────────────────────────────────────
 
+def is_shopping_mall(place: dict) -> bool:
+    """True only for places Google itself classifies as a shopping mall.
+
+    The keyword search returns the mall AND everything trading inside it, so
+    Paya Lebar Quarter answered with "SKP @ Paya Lebar Quarter Mall", "OWNDAYS
+    PLQ Mall", "2nd STREET PLQ Mall" and "Starbucks Reserve @ PLQ" — shops
+    whose names contain "Mall", ahead of PLQ Mall itself. Their `types` say
+    what they are (`store`, `clothing_store`, `cafe`), and the mall's says
+    `shopping_mall`, so the RESPONSE's types are the filter.
+
+    Note this is not the `type=shopping_mall` REQUEST parameter, which is a
+    different thing and is still avoided (see find_nearest_mall): that changes
+    what Google searches for and drags in mis-tagged warehouses.
+
+    Measured across 11 spread-out origins — CBD, heartland, Sentosa, Lim Chu
+    Kang — the filter never left fewer than 8 malls, so it needs no fallback.
+    """
+    return "shopping_mall" in (place.get("types") or [])
+
+
 def find_nearest_mall(lat: float, lng: float) -> dict | None:
     """Use Google Places to find nearest shopping mall.
 
@@ -199,8 +220,15 @@ def find_nearest_mall(lat: float, lng: float) -> dict | None:
     A radius+keyword search ranks by Google's "prominence" instead, which
     drops small neighbourhood malls — e.g. Hougang 1 (388m) was being hidden
     behind prominent malls 1.6km+ away. rankby=distance forbids `radius` and
-    needs a keyword/type; "shopping mall" keeps the list to real malls
-    (type=shopping_mall alone pulls in mis-tagged shops/warehouses).
+    needs a keyword/type; "shopping mall" keeps the search broad, and
+    is_shopping_mall then drops the tenants it also returns.
+
+    A handful of Google mis-tags survive (a craft shop inside PLQ carries
+    `shopping_mall`). Both discriminators tried against them cost more than
+    they saved: a `user_ratings_total` floor drops real malls at about 1:1
+    (Marina Bay Link Mall has 12 ratings; a mis-tagged salon has 146), and
+    collapsing near-neighbours to the best-rated one picks the loudest tenant
+    over the quiet mall it sits in. So the mis-tags stay.
     """
     params = {
         "location": f"{lat},{lng}",
@@ -213,12 +241,16 @@ def find_nearest_mall(lat: float, lng: float) -> dict | None:
         data = r.json()
         if data["status"] == "OK" and data["results"]:
             candidates = []
-            for p in data["results"][:8]:
+            for p in data["results"]:
+                if not is_shopping_mall(p):
+                    continue
                 candidates.append({
                     "name": p["name"],
                     "lat": p["geometry"]["location"]["lat"],
                     "lng": p["geometry"]["location"]["lng"],
                 })
+                if len(candidates) >= 8:
+                    break      # rankby=distance, so these are already the nearest
             return candidates
         return []
     except Exception as e:
@@ -404,10 +436,98 @@ def find_nearest_primary_schools(lat: float, lng: float) -> list:
     return cached_schools(lat, lng, top_n=5)
 
 
+# ── Coffee shops / kopitiams via Google Places ───────────────────────────────
+#
+# The one food amenity with no register behind it. A kopitiam is a private
+# tenancy in an HDB commercial block, so nothing authoritative lists them:
+# HDB's own Property Information dataset flags 2,526 blocks as `commercial`,
+# but that is every block with a minimart, clinic or hairdresser, and its
+# `market_hawker` flag (107 blocks) means a market, not a coffee shop. So this
+# one does go through Places — and needs a name filter to be worth anything.
+#
+# Two kinds of noise come back consistently, both verified against real
+# origins: individual STALLS inside a coffee shop ("Hao Yun Lai Fried Hokkien
+# Prawn Mee", "Tham's Roasted Delights"), which would list one venue five
+# times, and SPECIALITY CAFES ("Starbucks Reserve @ PLQ", "Tiong Hoe Specialty
+# Coffee", "144 Brew Kopi"), which are not what anyone means by the coffee shop
+# downstairs. The filter is deliberately conservative: it keeps only names that
+# say what they are, so it misses the occasional genuine one ("Johnson Eatery")
+# rather than promising a Starbucks is your kopitiam.
+
+COFFEESHOP_WORDS = [
+    "coffee shop", "coffeeshop", "coffee house", "kopitiam",
+    "food house", "foodhouse", "eating house", "kopi house",
+    "food centre", "food court",
+]
+
+NOT_A_COFFEESHOP = [
+    "starbucks", "specialty", "speciality", "roaster", "brew",
+    "cafe bar", "% arabica", "coffee bean", "toast box", "ya kun",
+    "coffee co", "craft coffee", "cart coffee",
+]
+
+# rankby=distance (as with malls) rather than a radius: prominence ranking
+# answered an Ang Mo Kio origin with a Hougang coffee shop 4km away. rankby
+# forbids `radius`, so the cap is applied here instead — 1km, the supermarket
+# radius, because a coffee shop is a downstairs amenity and one 2km away is
+# not the question being asked.
+COFFEESHOP_MAX_M = 1000
+
+
+def is_coffeeshop(name: str) -> bool:
+    """True only for names that say they are a coffee shop. Exclusions run
+    FIRST — "Kimly Coffeeshop" must pass while "144 Brew Kopi" does not."""
+    n = (name or "").lower()
+    if any(w in n for w in NOT_A_COFFEESHOP):
+        return False
+    return any(w in n for w in COFFEESHOP_WORDS)
+
+
+def find_nearest_coffeeshops(lat: float, lng: float) -> list:
+    """Nearest HDB-style coffee shops / kopitiams, filtered by name."""
+    params = {
+        "location": f"{lat},{lng}",
+        "rankby": "distance",
+        "keyword": "coffeeshop",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    try:
+        r = requests.get(PLACES_URL, params=params, timeout=10)
+        data = r.json()
+        if data.get("status") != "OK" or not data.get("results"):
+            return []
+        out = []
+        for p in data["results"]:
+            if not is_coffeeshop(p["name"]):
+                continue
+            loc = p["geometry"]["location"]
+            dist = haversine_m(lat, lng, loc["lat"], loc["lng"])
+            if dist > COFFEESHOP_MAX_M:
+                break            # rankby=distance, so everything after is further
+            out.append({"name": p["name"], "lat": loc["lat"], "lng": loc["lng"],
+                        "dist": dist})
+        return out[:3]
+    except Exception as e:
+        print(f"[Maps] Coffee shop search failed: {e}")
+        return []
+
+
+def find_nearest_hawkers(lat: float, lng: float) -> list:
+    """Nearest government hawker centres, from NEA's own register.
+
+    Not a Places call: `keyword=hawker centre` answers with coffee shops and
+    mall food courts mixed in, and no Places type separates them. See
+    cache/hawker_cache.py.
+    """
+    from cache.hawker_cache import find_nearest_hawkers as cached_hawkers
+    return cached_hawkers(lat, lng, top_n=3)
+
+
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def get_nearby_info(address: str, lat: float | None = None, lng: float | None = None) -> dict:
-    """Find nearby amenities (MRT, malls, schools, supermarkets) for a location.
+    """Find nearby amenities (MRT, malls, schools, supermarkets, hawker centres
+    and coffee shops) for a location.
 
     The origin coordinate drives both candidate selection (nearest N) and the
     walking/transit distances. When `lat`/`lng` are supplied (e.g. the exact
@@ -425,92 +545,180 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
         lat, lng = coords
         origin = address      # only the address text is known — geocode by name
 
-    # ── MRT via OneMap cached station data ───────────────────────────────────
-    mrt_candidates = onemap_find_nearest_mrts(lat, lng, top_n=3)
+    def _mrts():
+        # ── MRT via OneMap cached station data ───────────────────────────────────
+        mrt_candidates = onemap_find_nearest_mrts(lat, lng, top_n=3)
 
-    mrt_results = []
-    if mrt_candidates:
-        dest_list = [{"lat": m["dest_lat"], "lng": m["dest_lng"]} for m in mrt_candidates]
-        distances = get_walking_distances_bulk(lat, lng, dest_list)
+        mrt_results = []
+        if mrt_candidates:
+            dest_list = [{"lat": m["dest_lat"], "lng": m["dest_lng"]} for m in mrt_candidates]
+            distances = get_walking_distances_bulk(lat, lng, dest_list)
 
-        for station, dist in zip(mrt_candidates, distances):
-            if dist:
-                raw_name = f"{station['name']} MRT{station['exit_label']}"
-                line_label = get_line_for_exit(raw_name)   # e.g. " [🟡 CCL, 🟣 NEL]"
-                mrt_results.append({
-                    "name": f"{raw_name}{line_label}",
-                    "distance": dist["distance_text"],
-                    "duration": dist["duration_text"],
-                    "distance_m": dist["distance_m"],
-                    "dest_lat": station["dest_lat"],
-                    "dest_lng": station["dest_lng"],
-                    "maps_link": build_google_maps_link(origin, station["dest_lat"], station["dest_lng"]),
+            for station, dist in zip(mrt_candidates, distances):
+                if dist:
+                    raw_name = f"{station['name']} MRT{station['exit_label']}"
+                    line_label = get_line_for_exit(raw_name)   # e.g. " [🟡 CCL, 🟣 NEL]"
+                    mrt_results.append({
+                        "name": f"{raw_name}{line_label}",
+                        "distance": dist["distance_text"],
+                        "duration": dist["duration_text"],
+                        "distance_m": dist["distance_m"],
+                        "dest_lat": station["dest_lat"],
+                        "dest_lng": station["dest_lng"],
+                        "maps_link": build_google_maps_link(origin, station["dest_lat"], station["dest_lng"]),
+                    })
+
+            mrt_results = _enrich_with_transit(lat, lng, origin, mrt_results)
+        return mrt_results
+
+    def _malls():
+        # ── Mall via Google Places ────────────────────────────────────────────────
+        mall_results = []
+        mall_candidates = find_nearest_mall(lat, lng)
+        if mall_candidates:
+            distances = get_walking_distances_bulk(lat, lng, mall_candidates)
+            combined = []
+            for place, dist in zip(mall_candidates, distances):
+                if dist:
+                    combined.append({**place, **dist})
+            combined.sort(key=lambda x: x["distance_m"])
+            for item in combined[:3]:
+                mall_results.append({
+                    "name": item["name"],
+                    "distance": item["distance_text"],
+                    "duration": item["duration_text"],
+                    "distance_m": item["distance_m"],
+                    "dest_lat": item["lat"],
+                    "dest_lng": item["lng"],
+                    "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
                 })
+            mall_results = _enrich_with_transit(lat, lng, origin, mall_results)
+        return mall_results
 
-        mrt_results = _enrich_with_transit(lat, lng, origin, mrt_results)
+    def _schools():
+        # ── Primary schools via OneMap ───────────────────────────────────────────
+        school_results = []
+        schools = find_nearest_primary_schools(lat, lng)
+        if schools:
+            dest_list = [{"lat": s["lat"], "lng": s["lng"]} for s in schools]
+            distances = get_walking_distances_bulk(lat, lng, dest_list)
+            for school, dist in zip(schools, distances):
+                if dist:
+                    school_results.append({
+                        "name": school["name"],
+                        "distance": dist["distance_text"],
+                        "duration": dist["duration_text"],
+                        "distance_m": dist["distance_m"],
+                        "dest_lat": school["lat"],
+                        "dest_lng": school["lng"],
+                        "maps_link": build_google_maps_link(origin, school["lat"], school["lng"]),
+                        "dist": school["dist"],
+                    })
+            school_results = _enrich_with_transit(lat, lng, origin, school_results)
+        return school_results
 
-    # ── Mall via Google Places ────────────────────────────────────────────────
-    mall_results = []
-    mall_candidates = find_nearest_mall(lat, lng)
-    if mall_candidates:
-        distances = get_walking_distances_bulk(lat, lng, mall_candidates)
-        combined = []
-        for place, dist in zip(mall_candidates, distances):
-            if dist:
-                combined.append({**place, **dist})
-        combined.sort(key=lambda x: x["distance_m"])
-        for item in combined[:3]:
-            mall_results.append({
-                "name": item["name"],
-                "distance": item["distance_text"],
-                "duration": item["duration_text"],
-                "distance_m": item["distance_m"],
-                "dest_lat": item["lat"],
-                "dest_lng": item["lng"],
-                "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
-            })
-        mall_results = _enrich_with_transit(lat, lng, origin, mall_results)
-
-    # ── Primary schools via OneMap ───────────────────────────────────────────
-    school_results = []
-    schools = find_nearest_primary_schools(lat, lng)
-    if schools:
-        dest_list = [{"lat": s["lat"], "lng": s["lng"]} for s in schools]
-        distances = get_walking_distances_bulk(lat, lng, dest_list)
-        for school, dist in zip(schools, distances):
-            if dist:
-                school_results.append({
-                    "name": school["name"],
-                    "distance": dist["distance_text"],
-                    "duration": dist["duration_text"],
-                    "distance_m": dist["distance_m"],
-                    "dest_lat": school["lat"],
-                    "dest_lng": school["lng"],
-                    "maps_link": build_google_maps_link(origin, school["lat"], school["lng"]),
-                    "dist": school["dist"],
+    def _supermarkets():
+        # ── Supermarkets via Google Places ──────────────────────────────────────────
+        supermarket_results = []
+        supermarket_candidates = find_nearest_supermarkets(lat, lng)
+        if supermarket_candidates:
+            distances = get_walking_distances_bulk(lat, lng, supermarket_candidates)
+            combined = []
+            for place, dist in zip(supermarket_candidates, distances):
+                if dist:
+                    combined.append({**place, **dist})
+            combined.sort(key=lambda x: x["distance_m"])
+            for item in combined[:3]:
+                supermarket_results.append({
+                    "name": item["name"],
+                    "distance": item["distance_text"],
+                    "duration": item["duration_text"],
+                    "distance_m": item["distance_m"],
+                    "dest_lat": item["lat"],
+                    "dest_lng": item["lng"],
+                    "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
                 })
-        school_results = _enrich_with_transit(lat, lng, origin, school_results)
+            supermarket_results = _enrich_with_transit(lat, lng, origin, supermarket_results)
+        return supermarket_results
 
-    # ── Supermarkets via Google Places ──────────────────────────────────────────
-    supermarket_results = []
-    supermarket_candidates = find_nearest_supermarkets(lat, lng)
-    if supermarket_candidates:
-        distances = get_walking_distances_bulk(lat, lng, supermarket_candidates)
-        combined = []
-        for place, dist in zip(supermarket_candidates, distances):
-            if dist:
-                combined.append({**place, **dist})
-        combined.sort(key=lambda x: x["distance_m"])
-        for item in combined[:3]:
-            supermarket_results.append({
-                "name": item["name"],
-                "distance": item["distance_text"],
-                "duration": item["duration_text"],
-                "distance_m": item["distance_m"],
-                "dest_lat": item["lat"],
-                "dest_lng": item["lng"],
-                "maps_link": build_google_maps_link(origin, item["lat"], item["lng"]),
-            })
-        supermarket_results = _enrich_with_transit(lat, lng, origin, supermarket_results)
+    def _hawkers():
+        # ── Hawker centres via NEA's register (no Places call) ───────────────────
+        #
+        # The one amenity with no _enrich_with_transit pass. Everything else here
+        # can plausibly be reached by bus or train; a hawker centre is somewhere
+        # you walk to, and the transit leg is a second Distance Matrix round trip
+        # on the slowest endpoint in the app. Walking distance alone answers it.
+        hawker_results = []
+        hawkers = find_nearest_hawkers(lat, lng)
+        if hawkers:
+            dest_list = [{"lat": h["lat"], "lng": h["lng"]} for h in hawkers]
+            distances = get_walking_distances_bulk(lat, lng, dest_list)
+            for hawker, dist in zip(hawkers, distances):
+                if dist:
+                    hawker_results.append({
+                        "name": hawker["name"],
+                        "distance": dist["distance_text"],
+                        "duration": dist["duration_text"],
+                        "distance_m": dist["distance_m"],
+                        "dest_lat": hawker["lat"],
+                        "dest_lng": hawker["lng"],
+                        "maps_link": build_google_maps_link(origin, hawker["lat"], hawker["lng"]),
+                        "stalls": hawker["stalls"],
+                        "dist": hawker["dist"],
+                    })
+        return hawker_results
 
-    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results}
+    def _coffeeshops():
+        # ── Coffee shops / kopitiams via Google Places ──────────────────────────
+        #
+        # No transit leg, for the same reason hawker centres have none: this is a
+        # walk-downstairs amenity, and the pass is a second Distance Matrix round
+        # trip on the slowest endpoint in the app.
+        coffeeshop_results = []
+        coffeeshops = find_nearest_coffeeshops(lat, lng)
+        if coffeeshops:
+            dest_list = [{"lat": c["lat"], "lng": c["lng"]} for c in coffeeshops]
+            distances = get_walking_distances_bulk(lat, lng, dest_list)
+            for shop, dist in zip(coffeeshops, distances):
+                if dist:
+                    coffeeshop_results.append({
+                        "name": shop["name"],
+                        "distance": dist["distance_text"],
+                        "duration": dist["duration_text"],
+                        "distance_m": dist["distance_m"],
+                        "dest_lat": shop["lat"],
+                        "dest_lng": shop["lng"],
+                        "maps_link": build_google_maps_link(origin, shop["lat"], shop["lng"]),
+                        "dist": shop["dist"],
+                    })
+        return coffeeshop_results
+
+    # Six independent lookups, run concurrently.
+    #
+    # They share nothing but the origin coordinate and are only combined in the
+    # return below, so running them in sequence made the endpoint's latency the
+    # SUM of six chains rather than the longest one — 17 blocking round trips
+    # to Google, ~3.5s warm. These are `requests` calls waiting on a socket, so
+    # threads are the right tool and the GIL is not in the way.
+    #
+    # A category that raises loses itself and nothing else: the amenity list
+    # comes back short rather than the whole request failing. (Each find_*
+    # already swallows its own network errors; this is the backstop for
+    # anything they don't.)
+    jobs = {
+        "mrts": _mrts, "malls": _malls, "schools": _schools,
+        "supermarkets": _supermarkets, "hawkers": _hawkers,
+        "coffeeshops": _coffeeshops,
+    }
+    found = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                found[key] = future.result()
+            except Exception as e:
+                print(f"[Maps] {key} lookup failed: {e}")
+                found[key] = []
+
+    return {"address": address, "lat": lat, "lng": lng, **found}

@@ -1017,9 +1017,26 @@ def _warm_caches() -> None:
     except Exception as e:
         logger.warning(f"[HDB Explore] Warm-up failed, first request will rebuild: {e}")
 
-def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
-                        limit: int = 40, origin: tuple | None = None) -> dict:
-    """Developments within `radius_m` of a project, nearest first (pure).
+# Identity differs by market — a private development is its name, an HDB
+# address is a block on a street — and that is the only thing the radius
+# filter below needs to know about either.
+def dev_key(d: dict) -> str:
+    return str(d.get("project", "")).strip().upper()
+
+
+def block_key(d: dict) -> str:
+    return f"{d.get('block', '')} {d.get('street', '')}".strip().upper()
+
+
+NEARBY_MARKETS = {
+    "private": {"rows": lambda: developments_payload()["developments"], "key": dev_key},
+    "hdb": {"rows": lambda: hdb_blocks_payload()["blocks"], "key": block_key},
+}
+
+
+def nearby_dots(dots: list, origin_name: str, key_of=dev_key, radius_m: int = 1000,
+                limit: int = 40, origin: tuple | None = None) -> dict:
+    """Dots within `radius_m` of a point, nearest first (pure).
 
     Deliberately NOT a wrapper over nearby.nearby_for_project. That module
     bounds candidates to the origin's own *district* — a tractability measure
@@ -1032,12 +1049,19 @@ def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
     So this is a radius filter over that payload — no extra IO, no domain
     logic of its own.
 
+    It serves both markets off the same payloads the explore map draws, so a
+    neighbour's popup is its explore popup whichever market it came from.
+    `key_of` is the only difference: it names a row, so the origin can be
+    excluded from its own results.
+
     `origin` overrides the origin coordinate: the frontend passes the pin it
     is already showing (URA x/y, or an exact postal coordinate), so the
-    circle is centred on the same point the user sees.
+    circle is centred on the same point the user sees. It is also what lets
+    an origin search the *other* market, where by definition it is not in the
+    list to be looked up.
     """
     key = (origin_name or "").strip().upper()
-    origin_row = next((d for d in devs if d["project"].strip().upper() == key), None)
+    origin_row = next((d for d in dots if key_of(d) == key), None)
     if origin is None:
         if origin_row is None:
             return {"error": f'Could not pinpoint "{origin_name}" on the map.'}
@@ -1045,8 +1069,8 @@ def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
     lat, lng = origin
 
     rows = []
-    for d in devs:
-        if d["project"].strip().upper() == key:
+    for d in dots:
+        if key_of(d) == key:
             continue                                   # exclude the origin itself
         dist = haversine_m(lat, lng, d["lat"], d["lng"])
         if dist <= radius_m:
@@ -1055,7 +1079,7 @@ def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
 
     return {
         "origin": {
-            "project": origin_row["project"] if origin_row else origin_name,
+            "name": key_of(origin_row) if origin_row else origin_name,
             "street": origin_row["street"] if origin_row else "",
             "lat": lat,
             "lng": lng,
@@ -1069,17 +1093,36 @@ def nearby_developments(devs: list, origin_name: str, radius_m: int = 1000,
 @app.get("/api/nearby")
 def api_nearby(
     q: str = Query(..., min_length=1),
+    market: str = Query("private", pattern="^(private|hdb)$"),
     lat: float | None = None,
     lng: float | None = None,
     radius_m: int = Query(1000, ge=100, le=5000),
     limit: int = Query(40, ge=1, le=200),
 ):
-    """Neighbouring developments for the map's nearby view. Each row is an
-    explore-map dot (same keys, so the popups render identically) plus
-    `distance_m`; `total` says how many were inside the radius before `limit`."""
-    devs = developments_payload()["developments"]
+    """Neighbouring dots for the map's nearby view. Each row is an explore-map
+    dot of the requested market (same keys, so the popups render identically)
+    plus `distance_m`; `total` says how many were inside the radius before
+    `limit`.
+
+    One market per call, the same rule the explore map follows, and here for a
+    measured reason as well as a conceptual one: an HDB block typically has
+    150-270 HDB blocks within 1 km against 3-36 private developments (810A
+    Choa Chu Kang Ave 7: 210 and 5; 109 Tampines St 11: 232 and 3), so a
+    merged list would be 40 rows of the same estate with private buried under
+    it. The frontend toggles between them instead, defaulting to the origin's
+    own market.
+
+    `q` is the origin's key in the requested market's own terms — a project
+    name, or "<block> <street>" — and is used only to keep the origin out of
+    its own results; the coordinate comes from `lat`/`lng`.
+    """
+    spec = NEARBY_MARKETS[market]
     origin = (lat, lng) if lat is not None and lng is not None else None
-    return nearby_developments(devs, q, radius_m=radius_m, limit=limit, origin=origin)
+    out = nearby_dots(spec["rows"](), q, key_of=spec["key"],
+                      radius_m=radius_m, limit=limit, origin=origin)
+    if "error" not in out:
+        out["market"] = market
+    return out
 
 
 @app.get("/api/trend")
@@ -1111,38 +1154,62 @@ def _hdb_meta_ts():
         return None
 
 
+def build_hdb_street_index(records: list) -> dict:
+    """The search box's HDB table: every street, both spellings, its blocks.
+
+    Pure, so the endpoint below is only memoization around it.
+
+    Two jobs ride on one payload. *Routing* needs the street names: the box
+    has to pick a market before asking, which a heuristic cannot do ("8 SAINT
+    THOMAS" is a condo opening with a number; "BISHAN ST 22" is an HDB street
+    that does not), and asking private first does not work either, because a
+    fuzzy private search answers an HDB street with condos that merely share a
+    word ("BISHAN ST 22" -> BISHAN LOFT) so the fallback never fires.
+    *Type-ahead* needs the blocks, since an HDB address is a block on a street
+    and completing only the street stops one token short of the answer.
+
+    The blocks are worth shipping because they are small: 9.6k of them across
+    579 streets take the whole table to ~87KB of JSON, ~18KB once
+    GZipMiddleware has it — under a quarter of the private dot layer, on a
+    response the frontend already fetches once at boot. That keeps type-ahead what it is on the private
+    side: a scan over strings already in the browser, with no endpoint, no
+    request and no debounce behind each keystroke.
+
+    Both spellings ride along because the data abbreviates ("ANG MO KIO AVE
+    6") while users type either that or the full form; matching one string
+    against both covers it without the frontend re-implementing STREET_ABBREV.
+    """
+    blocks: dict = {}
+    for r in hdb._normalise_all(records):
+        if r["street"]:
+            blocks.setdefault(r["street"], set()).add(r["block"])
+
+    streets = [
+        {"s": s, "c": hdb.expand_street(s), "b": sorted(blocks[s] - {""})}
+        for s in sorted(blocks)
+    ]
+    return {
+        "streets": streets,
+        "count": len(streets),
+        "blocks": sum(len(s["b"]) for s in streets),
+    }
+
+
 @app.get("/api/hdb/streets")
 def api_hdb_streets():
-    """Every distinct HDB street, as stored and as spelled out.
-
-    This exists so the single search box can route free text to the right
-    market *before* asking, which a heuristic cannot do: "8 SAINT THOMAS" is a
-    condo that opens with a number and "BISHAN ST 22" is an HDB street that
-    does not. Routing private-first-and-fall-back-on-error does not work
-    either — a fuzzy private search answers an HDB street name with condos
-    that merely share a word ("BISHAN ST 22" -> BISHAN LOFT), so the fallback
-    never fires.
-
-    Both spellings ride along because the data abbreviates ("ANG MO KIO AVE 6")
-    while users type either that or the full form; matching one string against
-    both covers it without the frontend re-implementing STREET_ABBREV.
-    """
+    """The HDB street + block index — see build_hdb_street_index."""
     ts = _hdb_meta_ts()
     if _hdb_streets_memo["payload"] is not None and _hdb_streets_memo["ts"] == ts:
         return _hdb_streets_memo["payload"]
 
     # Derived from the index set, not the window: it already holds every
-    # distinct street, at a fraction of the rows.
-    streets = sorted({r["street"] for r in hdb._normalise_all(_hdb_index_records())})
-    payload = {
-        "streets": [{"s": s, "c": hdb.expand_street(s)} for s in streets],
-        "count": len(streets),
-    }
+    # distinct (block, street) pair, at a fraction of the rows.
+    payload = build_hdb_street_index(_hdb_index_records())
     # Only a real answer is worth keeping. An empty list here means the read
     # failed, not that Singapore has no HDB streets, and memoizing it would
     # poison routing for the life of the process — every HDB query would then
     # fall back to the shape heuristic and quietly land in the private market.
-    if streets:
+    if payload["streets"]:
         _hdb_streets_memo.update(ts=ts, payload=payload)
     return payload
 

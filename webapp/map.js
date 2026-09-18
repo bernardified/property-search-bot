@@ -27,11 +27,24 @@ L.tileLayer("https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png", {
     '(<a href="https://data.gov.sg/open-data-licence" target="_blank">SODL v1.0</a>)',
 }).addTo(map);
 
+// The amenity render loop is driven entirely by this table, so a category is
+// its colour, its label and nothing else.
+//
+// Hawker centres are BRIGHT orange, not the darker amber tried first: at
+// #b45309 the luminance ratio against MRT red was 1.04:1 — the same
+// brightness — which left hue as the only thing separating two warm dots, and
+// on the map they read as one category. #f97316 is 1.72:1 against that red, so
+// lightness separates them before hue has to.
 const AMENITY_STYLES = {
   mrts: { color: "#dc2626", label: "MRT" },
   schools: { color: "#2563eb", label: "School" },
   malls: { color: "#9333ea", label: "Mall" },
   supermarkets: { color: "#16a34a", label: "Supermarket" },
+  hawkers: { color: "#f97316", label: "Hawker centre" },
+  // Dark brown against the hawker orange: same family, because both are
+  // food, but separated by lightness rather than hue alone (7.7:1 against
+  // the tile, and its nearest neighbour in the palette is 1.7:1).
+  coffeeshops: { color: "#78350f", label: "Coffee shop" },
 };
 
 // Primary-school admission priority is drawn at 1 km straight-line, which is
@@ -139,7 +152,7 @@ form.addEventListener("submit", (e) => {
 // to be typed early.
 const HDB_BLOCK_RE = /^(\d+[a-z]?)\s+(\S.*)$/i;
 
-let hdbStreets = null;   // [{s: as stored, c: spelled out}] — see /api/hdb/streets
+let hdbStreets = null;   // [{s: as stored, c: spelled out, b: [blocks]}] — /api/hdb/streets
 let streetsReady = null; // the in-flight fetch, so a search can wait for it
 
 function loadHdbStreets() {
@@ -169,7 +182,10 @@ function looksLikeHdb(q) {
   });
 }
 
-async function runSearch(q) {
+// `market` is set only when the caller already knows it — a picked type-ahead
+// row, which was matched against one market's own list. Everything else is
+// routed below.
+async function runSearch(q, market) {
   if (!q) return;
   searchActive = true;
   backBtn.hidden = false;
@@ -194,10 +210,13 @@ async function runSearch(q) {
     if (streetsReady) await streetsReady;
 
     // Postal codes are market-agnostic and decided server-side; everything
-    // else is routed by the street list above.
-    const url = /^\d{6}$/.test(q) || !looksLikeHdb(q)
-      ? "/api/property?q=" + encodeURIComponent(q)
-      : "/api/hdb?q=" + encodeURIComponent(q);
+    // else is routed by the street list above, unless the caller already knew.
+    const hdb = /^\d{6}$/.test(q) ? false
+              : market ? market === "hdb"
+              : looksLikeHdb(q);
+    const url = hdb
+      ? "/api/hdb?q=" + encodeURIComponent(q)
+      : "/api/property?q=" + encodeURIComponent(q);
     const data = await (await fetch(url)).json();
 
     if (data.ambiguous) {
@@ -255,42 +274,109 @@ function renderCandidates(candidates) {
 
 // ── Type-ahead suggestions ───────────────────────────────────────────────────
 //
-// Purely client-side: /api/developments has already put every dot's project +
-// street in the private market's dot list (explore is the landing state), so
-// matching is a scan over ~2.4k short strings — no endpoint, no request, no
-// debounce. Private only, on purpose: it is loaded whichever market is on the
-// map, while the 9.6k HDB blocks are not, and a block number is not a name to
-// complete. It follows
-// that suggestions cover exactly the *mappable* developments: a project URA
-// can search but has no coordinate never got a dot, so it never appears here.
-// Typing its name in full still works, and the server's fuzzy "Did you mean"
-// still catches typos on submit — the dropdown is a shortcut, not the search.
+// Purely client-side, over two lists the browser already holds: the private
+// dot list from /api/developments (explore is the landing state) and the HDB
+// street+block table from /api/hdb/streets (fetched at boot for market
+// routing). So matching is a scan over short strings — no endpoint, no
+// request, no debounce.
+//
+// It follows that private suggestions cover exactly the *mappable*
+// developments: a project URA can search but has no coordinate never got a
+// dot, so it never appears here. Typing its name in full still works, and the
+// server's fuzzy "Did you mean" still catches typos on submit — the dropdown
+// is a shortcut, not the search.
+//
+// An HDB address is a block on a street, so completing only the street stops
+// one token short of the answer. Blocks are therefore listed once the query
+// names one ("406 ang mo"); a query with no block token suggests streets
+// alone, because "ANG MO KIO AVE 10" would otherwise unfold into its hundred
+// blocks. Picking either passes the market to runSearch, so a picked row is
+// never re-guessed by looksLikeHdb.
 
 const suggestBox = el("suggest");
 const SUGGEST_MAX = 8;
 const SUGGEST_MIN_CHARS = 2;
 
-let suggestions = [];    // the devs currently listed
+let suggestions = [];    // the rows currently listed
 let suggestIndex = -1;   // keyboard highlight; -1 = none, Enter submits the raw text
 
 // Name matches rank above street matches, and prefix above mid-word, so
 // "the s" leads with THE SAIL rather than a street three screens down.
-function matchDevelopments(q) {
-  const needle = q.trim().toUpperCase();
-  if (needle.length < SUGGEST_MIN_CHARS) return [];
+function matchDevelopments(needle) {
   const starts = [], contains = [], streets = [];
   for (const { dev } of MARKETS.private.dots) {
     const i = dev.project.toUpperCase().indexOf(needle);
-    if (i === 0) starts.push(dev);
-    else if (i > 0) contains.push(dev);
-    else if (String(dev.street || "").toUpperCase().includes(needle)) streets.push(dev);
+    const row = {
+      market: "private", query: dev.project,
+      title: dev.project, sub: dev.street, hl: needle, hlSub: needle,
+    };
+    if (i === 0) starts.push(row);
+    else if (i > 0) contains.push(row);
+    else if (String(dev.street || "").toUpperCase().includes(needle)) streets.push(row);
     if (starts.length >= SUGGEST_MAX) break;   // nothing later can outrank a full page of prefixes
   }
-  return starts.concat(contains, streets).slice(0, SUGGEST_MAX);
+  return { starts, contains, streets };
+}
+
+// A street matches when every token of the query appears in it — the same
+// rule looksLikeHdb routes by, so what the dropdown offers and what the box
+// would have routed to can never disagree.
+function streetMatches(tokens) {
+  if (!hdbStreets || !tokens.length) return [];
+  return hdbStreets.filter(({ s, c }) => {
+    const hay = s + " " + c;
+    return tokens.every((t) => hay.includes(t));
+  });
+}
+
+function hdbRow(street, block) {
+  const name = titleCase(street.s);
+  // The expanded spelling is worth a second line only where it differs —
+  // "ADMIRALTY LINK" expands to itself, and repeating it says nothing.
+  const expanded = street.c !== street.s ? titleCase(street.c) : "";
+  return block
+    ? { market: "hdb", query: `${block} ${street.s}`, title: `${block} ${name}`,
+        sub: expanded || "HDB block", hl: block }
+    : { market: "hdb", query: street.s, title: name,
+        sub: expanded || "HDB street", hl: "" };
+}
+
+function matchHdb(needle) {
+  const blockMatch = needle.match(HDB_BLOCK_RE);
+  const streetPart = (blockMatch ? blockMatch[2] : needle).trim();
+  const matched = streetMatches(streetPart.split(/\s+/).filter(Boolean));
+
+  if (!blockMatch) return { blocks: [], streets: matched.map((s) => hdbRow(s, null)) };
+
+  // A typed block number is a prefix over that street's blocks, so "40" finds
+  // 406 and 40 alike, and "406a" finds only 406A.
+  const blocks = [];
+  for (const street of matched) {
+    for (const b of street.b) {
+      if (b.startsWith(blockMatch[1])) blocks.push(hdbRow(street, b));
+      if (blocks.length >= SUGGEST_MAX) return { blocks, streets: [] };
+    }
+  }
+  // The streets themselves stay out: the query named a block, and a street
+  // that has no such block is not what was asked for.
+  return { blocks, streets: [] };
+}
+
+// A name match ranks above anything matched only by a street, and among the
+// street-matched rows a block is more specific than the street it sits on.
+function matchSuggestions(q) {
+  const needle = q.trim().toUpperCase();
+  if (needle.length < SUGGEST_MIN_CHARS) return [];
+  const p = matchDevelopments(needle);
+  const h = matchHdb(needle);
+  return p.starts
+    .concat(p.contains, h.blocks, h.streets, p.streets)
+    .slice(0, SUGGEST_MAX);
 }
 
 function highlight(text, needle) {
   const s = String(text ?? "");
+  if (!needle) return esc(s);
   const i = s.toUpperCase().indexOf(needle);
   if (i < 0) return esc(s);
   return esc(s.slice(0, i)) + "<b>" + esc(s.slice(i, i + needle.length)) + "</b>" +
@@ -306,13 +392,13 @@ function hideSuggest() {
   input.removeAttribute("aria-activedescendant");
 }
 
-function renderSuggest(q) {
-  const needle = q.trim().toUpperCase();
+function renderSuggest() {
   suggestBox.innerHTML = suggestions
     .map((d, i) =>
       `<div class="sug" role="option" id="sug-${i}" aria-selected="false" data-i="${i}">` +
-      `<div>${highlight(d.project, needle)}</div>` +
-      `<div class="sug-street">${highlight(d.street, needle)}</div></div>`
+      `<div><span class="sug-badge" aria-hidden="true">${d.market === "hdb" ? "🏠" : "🏢"}</span>` +
+      `${highlight(d.title, d.hl)}</div>` +
+      `<div class="sug-street">${highlight(d.sub, d.hlSub || "")}</div></div>`
     )
     .join("");
   suggestBox.hidden = false;
@@ -331,15 +417,21 @@ function moveSuggest(delta) {
   input.setAttribute("aria-activedescendant", "sug-" + suggestIndex);
 }
 
+function pickSuggest(i) {
+  const s = suggestions[i];
+  if (s) runSearch(s.query, s.market);
+}
+
 input.addEventListener("input", () => {
   const q = input.value.trim();
-  // A run of bare digits is a postal code being typed — there is nothing in
-  // the dot list to suggest for it, and "12" would match half the streets.
+  // A run of bare digits is a postal code being typed, or a block with no
+  // street yet: there is no one answer to offer for either, and "12" would
+  // match half the streets.
   if (/^\d+$/.test(q)) return hideSuggest();
-  suggestions = matchDevelopments(q);   // empty while the dot list is still loading
+  suggestions = matchSuggestions(q);   // empty while the dot list is still loading
   suggestIndex = -1;
   if (!suggestions.length) return hideSuggest();
-  renderSuggest(q);
+  renderSuggest();
 });
 
 input.addEventListener("keydown", (e) => {
@@ -349,7 +441,7 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") { hideSuggest(); }
   else if (e.key === "Enter" && suggestIndex >= 0) {
     e.preventDefault();                 // the form would otherwise submit the raw text
-    runSearch(suggestions[suggestIndex].project);
+    pickSuggest(suggestIndex);
   }
 });
 
@@ -359,7 +451,7 @@ suggestBox.addEventListener("mousedown", (e) => {
   const row = e.target.closest(".sug");
   if (!row) return;
   e.preventDefault();
-  runSearch(suggestions[Number(row.dataset.i)].project);
+  pickSuggest(Number(row.dataset.i));
 });
 
 input.addEventListener("blur", () => hideSuggest());
@@ -991,6 +1083,14 @@ async function loadAmenities(d) {
             `<div class="popup-line"><span class="muted">Click the dot to toggle its 1 km ring</span></div>`
           );
         }
+        // The honest difference between a centre with 112 cooked-food stalls
+        // and one with 12, which the name never carries.
+        if (key === "hawkers" && item.stalls)
+          lines.push(`<div class="popup-line">🍜 ${item.stalls} cooked-food stalls</div>`);
+        // Where the two food categories come from differs, and a coffee shop's
+        // provenance is the weaker of the two — say so on the pin itself.
+        if (key === "coffeeshops")
+          lines.push(`<div class="popup-line"><span class="muted">Coffee shop · via Google</span></div>`);
         if (item.maps_link)
           lines.push(`<div class="popup-line"><a href="${esc(item.maps_link)}" target="_blank">Directions ↗</a></div>`);
         const marker = L.circleMarker([item.dest_lat, item.dest_lng], {
@@ -1029,12 +1129,18 @@ async function loadAmenities(d) {
   }
 }
 
-// ── Nearby developments ─────────────────────────────────────────────────────
+// ── Nearby developments and HDB blocks ──────────────────────────────────────
 //
-// A second view over the SAME dot payload the explore map uses: /api/nearby
-// returns explore rows (avg PSF, yield, tenure, nearest MRT, last txn) plus
-// distance_m, so a neighbour's popup reads exactly like its explore dot and
-// its "View details →" runs the normal search.
+// A second view over the SAME dot payloads the explore map uses: /api/nearby
+// returns explore rows plus distance_m, so a neighbour's popup reads exactly
+// like its explore dot and its "View details →" runs the normal search.
+//
+// One market at a time, toggled, as on the explore map — and here the reason
+// is measured as well as conceptual: an HDB block typically has 150-270 HDB
+// blocks within 1 km against 3-36 private developments (810A Choa Chu Kang
+// Ave 7: 210 and 5), so one merged list would be 40 rows of the same estate
+// with private buried under it. The default is the origin's own market, since
+// a block's comparables are the blocks around it.
 //
 // Entering the view never destroys the property view behind it: the property
 // and amenity pins stay in `markerLayer` (detached from the map, not cleared)
@@ -1048,10 +1154,46 @@ const NEAR_PIN_NODATA = "#b9b7b0";   // same "no value is structural" grey as ex
 const nearbyBtn = el("nearby-btn");
 const nearbyView = el("nearby-view");
 let nearbyLayer = null;         // origin pin + 1 km ring + neighbour pins
-let nearbyMarkers = new Map();  // PROJECT → marker, so a list row can open its popup
+let nearbyMarkers = new Map();  // row key → marker, so a list row can open its popup
 let nearbyOn = false;
+let nearbyMarket = "private";   // which market the ring is currently listing
+let nearbyOrigin = null;        // the point the ring is centred on, kept across switches
 let currentProperty = null;     // last successful /api/property payload
 let savedCamera = null;         // property-view centre/zoom, restored on back
+
+// Both markets' rows carry `distance_m` and both explore popups already render
+// it, so a neighbour reads the same here as it does on the explore map. What
+// differs is identity (a name against a block on a street), which the server
+// needs in its own terms to keep the origin out of its own results, and how a
+// row is worth summarising in a one-line list.
+const NEARBY_MARKETS = {
+  private: {
+    key: (d) => d.project,
+    originKey: (p) => p.development,
+    noun: (n) => `development${n === 1 ? "" : "s"}`,
+    legend: "Nearby development",
+    title: (d) => d.project,
+    meta: (d) => `D${parseInt(d.district, 10)} · ` + (d.avg_psf
+      ? `${fmtMoney(d.avg_psf)} psf`
+      : "<span class='muted'>no recent txn</span>"),
+    hint: (d) => districtLabel(d.district),
+  },
+  hdb: {
+    key: (d) => `${d.block} ${d.street}`,
+    // Identity in this market's own terms, so the origin is excluded from its
+    // own ring. Crossing markets it falls back to the display name, which by
+    // definition matches nothing here — and nothing needs excluding.
+    originKey: (p) => (p.market === "hdb" && p.block
+      ? `${p.block} ${p.street}` : p.development),
+    noun: (n) => `HDB block${n === 1 ? "" : "s"}`,
+    legend: "Nearby HDB block",
+    title: (d) => `${d.block} ${titleCase(d.street)}`,
+    meta: (d) => `${titleCase(d.town)} · ` + (d.avg_psf
+      ? `${fmtMoney(d.avg_psf)} psf`
+      : "<span class='muted'>no recent txn</span>"),
+    hint: (d) => (d.lease_years != null ? `${Math.round(d.lease_years)} yrs lease left` : ""),
+  },
+};
 
 // Teardrop pins (not dots) so neighbouring *developments* never read as
 // amenities: same silhouette as the property marker, different fill.
@@ -1077,22 +1219,50 @@ function clearNearbyLayer() {
   nearbyMarkers.clear();
 }
 
-nearbyBtn.addEventListener("click", enterNearby);
+nearbyBtn.addEventListener("click", () => enterNearby());
 el("nearby-back").addEventListener("click", () => exitNearby());
 
-async function enterNearby() {
+// Switching market re-runs the same ring on the other layer. The camera is
+// already where it should be and the origin has not moved, so only the pins
+// and the list are replaced — mirroring the explore map, which also keeps the
+// camera across a market switch.
+el("nearby-market").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-market]");
+  if (!b || b.dataset.market === nearbyMarket) return;
+  enterNearby(b.dataset.market);
+});
+
+function setNearbyMarketButtons(market) {
+  for (const b of el("nearby-market").querySelectorAll("button")) {
+    const on = b.dataset.market === market;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  }
+}
+
+async function enterNearby(market) {
   if (!currentProperty) return;
   const d = currentProperty;
+  // The origin's own market is the useful default — an HDB block's comparables
+  // are the blocks around it — and it is what makes the toggle a second view
+  // rather than the only way to see anything.
+  market = market || d.market || "private";
+  const spec = NEARBY_MARKETS[market];
+
   // Centre on the pin the user is actually looking at — for the street-geocode
-  // fallback that is the Google-snapped position, not the payload's guess.
-  const p = propertyMarker ? propertyMarker.getLatLng() : L.latLng(d.lat, d.lng);
+  // fallback that is the Google-snapped position, not the payload's guess. On
+  // a market switch the property marker is already detached, so the point the
+  // first entry settled on is reused rather than re-derived.
+  const p = nearbyOn && nearbyOrigin
+    ? nearbyOrigin
+    : propertyMarker ? propertyMarker.getLatLng() : L.latLng(d.lat, d.lng);
   if (p.lat == null) return;
 
   nearbyBtn.disabled = true;
-  setStatus("Finding developments within 1 km…");
+  setStatus(`Finding ${market === "hdb" ? "HDB blocks" : "developments"} within 1 km…`);
   try {
     const r = await fetch(
-      `/api/nearby?q=${encodeURIComponent(d.development)}` +
+      `/api/nearby?q=${encodeURIComponent(spec.originKey(d))}&market=${market}` +
       `&lat=${p.lat}&lng=${p.lng}&radius_m=${NEARBY_RADIUS_M}`
     );
     const data = await r.json();
@@ -1100,11 +1270,24 @@ async function enterNearby() {
       setStatus(data.error, true);
       return;
     }
+    // Everything below mutates the view, so a malformed response has to turn
+    // back here — a half-switched panel (new market on the toggle, old rows in
+    // the list) is worse than a plain error.
+    if (!r.ok || !Array.isArray(data.results)) {
+      setStatus("Nearby search failed — unexpected response from the server.", true);
+      return;
+    }
 
-    savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
-    clearSchoolRing();
-    map.removeLayer(markerLayer);      // property view kept intact, just detached
-    el("legend").hidden = true;
+    if (!nearbyOn) {
+      savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
+      clearSchoolRing();
+      map.removeLayer(markerLayer);    // property view kept intact, just detached
+      el("legend").hidden = true;
+    }
+    clearNearbyLayer();                // a switch replaces the pins, not the view
+    nearbyMarket = market;
+    nearbyOrigin = p;
+    setNearbyMarketButtons(market);
 
     nearbyLayer = L.layerGroup().addTo(map);
     // The ring makes "within 1 km" legible instead of implied, and its bounds
@@ -1130,24 +1313,30 @@ async function enterNearby() {
     for (const dev of data.results) {
       // No 12-month transaction → no PSF and no yield to show: greyed, the same
       // way explore treats a dot with no value (never a ramp colour).
-      const marker = L.marker([dev.lat, dev.lng], {
-        icon: teardrop(dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN),
-      })
+      // `limit` caps the pins at 40 on either market — an HDB ring holds
+      // 150-270 blocks where a private one holds 3-36, but only the listed
+      // rows are ever drawn, so the map carries the same weight either way.
+      const fill = dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN;
+      const marker = L.marker([dev.lat, dev.lng], { icon: teardrop(fill) })
         .addTo(nearbyLayer)
-        // Nearby rows are private developments whatever the origin was (an
-        // HDB block included), so they wear the private market's popup.
-        .bindPopup(MARKETS.private.popup(dev));
-      nearbyMarkers.set(dev.project, marker);
+        .bindPopup(MARKETS[market].popup(dev));
+      nearbyMarkers.set(spec.key(dev), marker);
     }
-    renderNearbyList(d, data);
+    renderNearbyList(d, data, spec);
+    el("nearby-legend-what").textContent = spec.legend;
     resultsBox.hidden = true;
     nearbyView.hidden = false;
     nearbyBtn.hidden = true;
     el("nearby-legend").hidden = false;
+    const entering = !nearbyOn;
     nearbyOn = true;
     setStatus("");
-    map.invalidateSize();   // the sidebar just changed height (mobile column)
-    map.fitBounds(ring.getBounds(), { padding: [30, 30] });
+    // Only the first entry reframes: a market switch happens under a camera
+    // the user has already placed, and yanking it back would undo their pan.
+    if (entering) {
+      map.invalidateSize();   // the sidebar just changed height (mobile column)
+      map.fitBounds(ring.getBounds(), { padding: [30, 30] });
+    }
   } catch (err) {
     setStatus("Nearby search failed: " + err.message, true);
   } finally {
@@ -1155,38 +1344,33 @@ async function enterNearby() {
   }
 }
 
-function renderNearbyList(d, data) {
+function renderNearbyList(d, data, spec) {
   const shown = data.results.length;
   el("nearby-back-name").textContent = d.development;
   el("nearby-title").textContent = "Within 1 km";
   el("nearby-sub").textContent = !shown
-    ? "No other developments within 1 km."
+    ? `No ${spec.noun(0)} within 1 km.`
     : shown < data.total
-      ? `${shown} nearest of ${data.total} developments within 1 km`
-      : `${shown} development${shown === 1 ? "" : "s"} within 1 km`;
+      ? `${shown} nearest of ${data.total} ${spec.noun(data.total)} within 1 km`
+      : `${shown} ${spec.noun(shown)} within 1 km`;
 
   el("nearby-list").innerHTML = data.results
-    .map((dev) => {
-      const psf = dev.avg_psf
-        ? `${fmtMoney(dev.avg_psf)} psf`
-        : "<span class='muted'>no recent txn</span>";
-      return (
-        `<button type="button" class="near-row" data-name="${esc(dev.project)}">` +
-        `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
-        `<span class="near-body"><span class="near-name">${esc(dev.project)}</span>` +
-        `<span class="near-meta" title="${esc(districtLabel(dev.district))}">` +
-        `D${parseInt(dev.district, 10)} · ${psf}</span></span></button>`
-      );
-    })
+    .map((dev) => (
+      `<button type="button" class="near-row" data-key="${esc(spec.key(dev))}">` +
+      `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
+      `<span class="near-body"><span class="near-name">${esc(spec.title(dev))}</span>` +
+      `<span class="near-meta" title="${esc(spec.hint(dev))}">${spec.meta(dev)}</span>` +
+      `</span></button>`
+    ))
     .join("");
 }
 
 // A row is a shortcut to its pin, not a new search — the popup it opens is the
-// same one the teardrop carries, "View details →" included.
+// same one the marker carries, "View details →" included.
 el("nearby-list").addEventListener("click", (e) => {
   const row = e.target.closest(".near-row");
   if (!row) return;
-  const marker = nearbyMarkers.get(row.dataset.name);
+  const marker = nearbyMarkers.get(row.dataset.key);
   if (!marker) return;
   map.panTo(marker.getLatLng());
   marker.openPopup();
@@ -1199,6 +1383,7 @@ function exitNearby(restore = true) {
   nearbyView.hidden = true;
   el("nearby-legend").hidden = true;
   nearbyOn = false;
+  nearbyOrigin = null;
   if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);
   if (!restore) return;
   resultsBox.hidden = false;
@@ -1272,8 +1457,12 @@ const psfLine = (d) =>
     ? `${fmtMoney(d.avg_psf)} psf · ${d.txns_12mo} txn${d.txns_12mo === 1 ? "" : "s"}`
     : "<span class='muted'>none in last 12 mo</span>";
 const mrtLine = (d) => (d.mrt_m != null ? `${d.mrt_m.toLocaleString("en-SG")} m` : "–");
-const viewLink = (q) =>
-  `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(q)}">View details →</a></div>`;
+// The popup knows which market drew it, so the search it starts is routed
+// rather than re-guessed by looksLikeHdb — the same reason a picked
+// type-ahead row carries its market.
+const viewLink = (q, market) =>
+  `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(q)}" ` +
+  `data-market="${market}">View details →</a></div>`;
 
 const MARKETS = {
   private: {
@@ -1317,7 +1506,7 @@ const MARKETS = {
         line("Tenure", TENURE_LABELS[d.tenure] || "–") +
         line("Nearest MRT", mrtLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
-        viewLink(d.project)
+        viewLink(d.project, "private")
       );
     },
     matches(d) {
@@ -1368,7 +1557,7 @@ const MARKETS = {
         line("Flat types", (d.flat_types || []).map(flatLabel).join(", ") || "–") +
         line("Nearest MRT", mrtLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
-        viewLink(`${d.block} ${d.street}`)
+        viewLink(`${d.block} ${d.street}`, "hdb")
       );
     },
     matches(d) {
@@ -1711,7 +1900,7 @@ document.addEventListener("click", (e) => {
   const link = e.target.closest(".popup-view");
   if (!link) return;
   e.preventDefault();
-  runSearch(link.dataset.name);
+  runSearch(link.dataset.name, link.dataset.market);
 });
 
 el("access-date").textContent = new Date().toLocaleDateString("en-SG", {

@@ -3,6 +3,7 @@ Property Bot Test Suite
 Run with: python -m Test.test_suite or python Test/test_suite.py
 Tests all critical functions without hitting live APIs where possible.
 """
+import contextlib
 import os
 import sys
 import json
@@ -2085,6 +2086,7 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(cbs, [
             "amenity:mrt:tok123", "amenity:schools:tok123",
             "amenity:malls:tok123", "amenity:supermarkets:tok123",
+            "amenity:hawkers:tok123", "amenity:coffeeshops:tok123",
             "hdbtrend:tok123",
             "new_search",
         ])
@@ -2097,6 +2099,431 @@ class TestHDB(unittest.TestCase):
 # ══════════════════════════════════════════════════════
 # HDB CACHE COMPLETENESS (a partial fetch must not win)
 # ══════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════
+# HAWKER CENTRES (NEA register, not Google Places)
+# ══════════════════════════════════════════════════════
+
+class TestHawkerCentres(unittest.TestCase):
+    """NEA's hawker-centre register: parsing, nearest-N, and how it joins the
+    amenity bundle."""
+
+    GEOJSON = {"features": [
+        {"properties": {"NAME": "Tiong Bahru Market", "STATUS": "Existing",
+                        "ADDRESS_MYENV": "30, Seng Poh Road, Singapore 168898",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 83},
+         "geometry": {"coordinates": [103.8325, 1.2848]}},
+        {"properties": {"NAME": "Yew Tee Hawker Centre", "STATUS": "Under Construction",
+                        "ADDRESS_MYENV": "", "NUMBER_OF_COOKED_FOOD_STALLS": 40},
+         "geometry": {"coordinates": [103.7470, 1.3970]}},
+        # Open under every other status the dataset uses — "(new)",
+        # "(replacement)" and "Interim Centre" are all serving food.
+        {"properties": {"NAME": "Ci Yuan Hawker Centre", "STATUS": "Existing (new)",
+                        "ADDRESS_MYENV": "51 Hougang Avenue 9",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 40},
+         "geometry": {"coordinates": [103.8760, 1.3760]}},
+        {"properties": {"NAME": "", "STATUS": "Existing",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": 10},
+         "geometry": {"coordinates": [103.8, 1.3]}},
+        {"properties": {"NAME": "No Geometry", "STATUS": "Existing",
+                        "NUMBER_OF_COOKED_FOOD_STALLS": None},
+         "geometry": {"coordinates": []}},
+    ]}
+
+    def test_coordinates_are_read_lng_first(self):
+        """GeoJSON is lng-first, and reading it the other way round is the one
+        mistake here that still computes: Singapore's coordinates swapped land
+        in the Indian Ocean and every distance would look plausible."""
+        from cache.hawker_cache import parse_hawker_geojson
+        row = parse_hawker_geojson(self.GEOJSON)[0]
+        self.assertAlmostEqual(row["lat"], 1.2848)
+        self.assertAlmostEqual(row["lng"], 103.8325)
+
+    def test_only_under_construction_is_dropped(self):
+        from cache.hawker_cache import parse_hawker_geojson
+        names = [h["name"] for h in parse_hawker_geojson(self.GEOJSON)]
+        self.assertEqual(names, ["Tiong Bahru Market", "Ci Yuan Hawker Centre"])
+
+    def test_unusable_rows_are_skipped_not_crashed_on(self):
+        """A nameless row and one with no geometry are dropped rather than
+        raising — a single bad record must never cost the whole amenity."""
+        from cache.hawker_cache import parse_hawker_geojson
+        self.assertEqual(len(parse_hawker_geojson(self.GEOJSON)), 2)
+        self.assertEqual(parse_hawker_geojson({}), [])
+
+    def test_stall_count_survives(self):
+        from cache.hawker_cache import parse_hawker_geojson
+        self.assertEqual(parse_hawker_geojson(self.GEOJSON)[0]["stalls"], 83)
+
+    # ── nearest-N ────────────────────────────────────────────────────────────
+
+    CACHE = [
+        {"name": "Near", "lat": 1.3000, "lng": 103.8000, "address": "", "stalls": 20},
+        {"name": "Mid", "lat": 1.3050, "lng": 103.8000, "address": "", "stalls": 30},
+        {"name": "Edge", "lat": 1.3170, "lng": 103.8000, "address": "", "stalls": 40},
+        # ~3.3 km — beyond the radius even though it is only the fourth nearest.
+        {"name": "Far", "lat": 1.3300, "lng": 103.8000, "address": "", "stalls": 50},
+    ]
+
+    def nearest(self, top_n=3):
+        with patch("cache.hawker_cache.get_hawker_cache", return_value=self.CACHE):
+            from cache.hawker_cache import find_nearest_hawkers
+            return find_nearest_hawkers(1.3000, 103.8000, top_n=top_n)
+
+    def test_nearest_first_within_the_radius(self):
+        self.assertEqual([h["name"] for h in self.nearest()], ["Near", "Mid", "Edge"])
+
+    def test_beyond_the_radius_is_excluded_even_when_short_of_top_n(self):
+        """2km is the cap, not a suggestion: a centre 3.3km away is not a
+        useful answer to "what can I walk to"."""
+        self.assertNotIn("Far", [h["name"] for h in self.nearest(top_n=4)])
+
+    def test_radius_covers_the_map(self):
+        """Why 2km and not the supermarkets' 1km: measured against the map's
+        own dots, 1km leaves ~30% of HDB blocks with no answer at all."""
+        from cache.hawker_cache import MAX_RADIUS_M
+        self.assertEqual(MAX_RADIUS_M, 2000)
+
+    # ── the in-process memo ──────────────────────────────────────────────────
+
+    def setUp(self):
+        import cache.hawker_cache as hc
+        hc._memo.update(at=0.0, hawkers=[])
+
+    def test_one_fetch_serves_the_whole_hour(self):
+        """Every amenity lookup used to re-run the freshness check and, with no
+        Mongo, re-fetch — which data.gov.sg rate-limits, so the second lookup
+        in a row came back empty and the amenity silently vanished."""
+        import cache.hawker_cache as hc
+        with patch.object(hc, "_is_cache_fresh", return_value=False), \
+             patch.object(hc, "_save_cache"), \
+             patch.object(hc, "_fetch_hawkers", return_value=self.CACHE) as fetch:
+            hc.get_hawker_cache(now=1000.0)
+            hc.get_hawker_cache(now=1000.0 + hc.MEMO_TTL_S - 1)
+            fetch.assert_called_once()
+            hc.get_hawker_cache(now=1000.0 + hc.MEMO_TTL_S + 1)
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_an_empty_answer_is_never_memoized(self):
+        """A failed fetch is not an empty Singapore. Holding [] for an hour
+        would drop the amenity from every result in that window."""
+        import cache.hawker_cache as hc
+        with patch.object(hc, "_is_cache_fresh", return_value=False), \
+             patch.object(hc, "_load_cache", return_value=[]), \
+             patch.object(hc, "_fetch_hawkers", return_value=[]) as fetch:
+            self.assertEqual(hc.get_hawker_cache(now=1000.0), [])
+            hc.get_hawker_cache(now=1001.0)
+            self.assertEqual(fetch.call_count, 2)
+
+    # ── the amenity bundle ───────────────────────────────────────────────────
+
+    def test_get_nearby_info_returns_hawkers_without_a_transit_leg(self):
+        """A hawker centre is somewhere you walk to, so it skips
+        _enrich_with_transit — that pass is a second Distance Matrix round
+        trip on the slowest endpoint in the app."""
+        import maps
+        walk = [{"distance_text": "450 m", "duration_text": "6 mins", "distance_m": 450}]
+        with patch("maps.onemap_find_nearest_mrts", return_value=[]), \
+             patch("maps.find_nearest_mall", return_value=[]), \
+             patch("maps.find_nearest_primary_schools", return_value=[]), \
+             patch("maps.find_nearest_supermarkets", return_value=[]), \
+             patch("maps.get_walking_distances_bulk", return_value=walk), \
+             patch("maps._enrich_with_transit") as transit, \
+             patch("maps.find_nearest_hawkers", return_value=[
+                 {"name": "Tiong Bahru Market", "lat": 1.2848, "lng": 103.8325,
+                  "address": "30 Seng Poh Road", "stalls": 83, "dist": 430.0}]):
+            out = maps.get_nearby_info("SOMEWHERE", lat=1.2860, lng=103.8300)
+
+        self.assertEqual(len(out["hawkers"]), 1)
+        row = out["hawkers"][0]
+        self.assertEqual(row["name"], "Tiong Bahru Market")
+        self.assertEqual(row["stalls"], 83)
+        self.assertEqual((row["dest_lat"], row["dest_lng"]), (1.2848, 103.8325))
+        self.assertNotIn("transit_duration", row)
+        transit.assert_not_called()
+
+    def test_the_bot_message_carries_the_stall_count(self):
+        from bot import format_amenity_list
+        text = format_amenity_list(
+            [{"name": "Tiong Bahru Market", "distance": "450 m", "duration": "6 mins",
+              "maps_link": "https://maps.example/x", "stalls": 83}],
+            "title", "empty",
+            detail=lambda h: f" _({h['stalls']} stalls)_" if h.get("stalls") else "",
+        )
+        self.assertIn("Tiong Bahru Market _(83 stalls)_", text)
+
+    def test_detail_is_optional_for_every_other_amenity(self):
+        from bot import format_amenity_list
+        text = format_amenity_list(
+            [{"name": "Somewhere", "distance": "1 km", "duration": "12 mins",
+              "maps_link": "https://maps.example/y"}],
+            "title", "empty")
+        self.assertIn("1. Somewhere\n", text)
+
+    def test_the_hawker_button_is_on_both_keyboards(self):
+        from bot import build_amenity_keyboard, build_hdb_amenity_keyboard
+        for keyboard in (build_amenity_keyboard("tok"), build_hdb_amenity_keyboard("tok")):
+            data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+            self.assertIn("amenity:hawkers:tok", data)
+
+
+# ══════════════════════════════════════════════════════
+# COFFEE SHOPS / KOPITIAMS (Places + a name filter)
+# ══════════════════════════════════════════════════════
+
+class TestCoffeeShops(unittest.TestCase):
+    """The one food amenity with no register behind it, so the name filter is
+    the whole product. Every string below was returned by a real Places call
+    against a real origin."""
+
+    def test_genuine_coffee_shops_are_kept(self):
+        from maps import is_coffeeshop
+        for name in ["GHK 407 Food House", "332 Coffee House", "Yak Hong Kopitiam",
+                     "Chang Cheng Mee Wah Coffeeshop (520802)", "CCK 302 FoodHouse",
+                     "Kimly Coffee Shop (429A Choa Chu Kang)", "Soon Seng Coffee Shop",
+                     "Kopi House 1990 @ 820 Tampines", "D'coffeeshop",
+                     "Telok Ayer Coffee Shop"]:
+            with self.subTest(name=name):
+                self.assertTrue(is_coffeeshop(name))
+
+    def test_stalls_inside_a_coffee_shop_are_dropped(self):
+        """Places returns the tenants as well as the venue, which would list
+        one coffee shop five times under five dishes."""
+        from maps import is_coffeeshop
+        for name in ["Hao Yun Lai Fried Hokkien Prawn Mee", "Bangkok Street Mookata",
+                     "Tham's Roasted Delights 谭氏•港式烧腊", "Crazy Western Noodle House",
+                     "Johnson Eatery 332 Ang Mo Kio", "蒸之家"]:
+            with self.subTest(name=name):
+                self.assertFalse(is_coffeeshop(name))
+
+    def test_speciality_cafes_are_dropped(self):
+        """Nobody asking about the coffee shop downstairs means Starbucks."""
+        from maps import is_coffeeshop
+        for name in ["Starbucks Reserve @ PLQ Paya Lebar Quarter",
+                     "Tiong Hoe Specialty Coffee (SingPost Centre)",
+                     "144 Brew Kopi", "Dutch Colony Coffee Co.",
+                     "Han's craft coffee", "The Coffee Bean & Tea Leaf",
+                     "Kings Cart Coffee Bishan"]:
+            with self.subTest(name=name):
+                self.assertFalse(is_coffeeshop(name))
+
+    def test_exclusions_run_before_the_keyword_check(self):
+        """A name can hold both — "Starbucks ... Coffee House" must still be
+        rejected, so the order of the two checks is the behaviour."""
+        from maps import is_coffeeshop
+        self.assertFalse(is_coffeeshop("Starbucks Coffee House"))
+        self.assertTrue(is_coffeeshop("Kimly Coffeeshop (Blk 555 Ang Mo Kio Ave 10)"))
+
+    def test_results_are_capped_by_distance_not_by_count(self):
+        """rankby=distance forbids `radius` (it is what stops a Hougang coffee
+        shop answering an Ang Mo Kio origin), so the 1km cap is applied here —
+        and the list is sorted, so the first one over the line ends it."""
+        import maps
+        payload = {"status": "OK", "results": [
+            {"name": "Near Coffee Shop", "geometry": {"location": {"lat": 1.3000, "lng": 103.8000}}},
+            {"name": "Mid Kopitiam",     "geometry": {"location": {"lat": 1.3040, "lng": 103.8000}}},
+            {"name": "Far Coffee House", "geometry": {"location": {"lat": 1.3200, "lng": 103.8000}}},
+        ]}
+        with patch("maps.requests.get", return_value=MagicMock(json=lambda: payload)):
+            out = maps.find_nearest_coffeeshops(1.3000, 103.8000)
+        self.assertEqual([c["name"] for c in out], ["Near Coffee Shop", "Mid Kopitiam"])
+
+    def test_get_nearby_info_returns_coffeeshops_without_a_transit_leg(self):
+        """Walk-downstairs amenity, so it skips _enrich_with_transit for the
+        same reason hawker centres do."""
+        import maps
+        walk = [{"distance_text": "180 m", "duration_text": "3 mins", "distance_m": 180}]
+        with patch("maps.onemap_find_nearest_mrts", return_value=[]), \
+             patch("maps.find_nearest_mall", return_value=[]), \
+             patch("maps.find_nearest_primary_schools", return_value=[]), \
+             patch("maps.find_nearest_supermarkets", return_value=[]), \
+             patch("maps.find_nearest_hawkers", return_value=[]), \
+             patch("maps.get_walking_distances_bulk", return_value=walk), \
+             patch("maps._enrich_with_transit") as transit, \
+             patch("maps.find_nearest_coffeeshops", return_value=[
+                 {"name": "GHK 407 Food House", "lat": 1.3625, "lng": 103.8540,
+                  "dist": 181.0}]):
+            out = maps.get_nearby_info("SOMEWHERE", lat=1.3620, lng=103.8538)
+
+        self.assertEqual(len(out["coffeeshops"]), 1)
+        row = out["coffeeshops"][0]
+        self.assertEqual(row["name"], "GHK 407 Food House")
+        self.assertNotIn("transit_duration", row)
+        transit.assert_not_called()
+
+    def test_the_button_is_on_both_keyboards(self):
+        from bot import build_amenity_keyboard, build_hdb_amenity_keyboard
+        for keyboard in (build_amenity_keyboard("tok"), build_hdb_amenity_keyboard("tok")):
+            data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+            self.assertIn("amenity:coffeeshops:tok", data)
+
+
+# ══════════════════════════════════════════════════════
+# AMENITY BUNDLE: CONCURRENCY AND CALL COUNT
+# ══════════════════════════════════════════════════════
+
+class TestAmenityConcurrency(unittest.TestCase):
+    """get_nearby_info runs its six lookups at once. The endpoint was 17
+    sequential round trips to Google (~3.5s warm); the categories share
+    nothing but the origin, so the cost should be the longest chain, not the
+    sum of six."""
+
+    def _patches(self, **overrides):
+        walk = [{"distance_text": "100 m", "duration_text": "2 mins", "distance_m": 100}] * 5
+        defaults = {
+            "onemap_find_nearest_mrts": [],
+            "find_nearest_mall": [],
+            "find_nearest_primary_schools": [],
+            "find_nearest_supermarkets": [],
+            "find_nearest_hawkers": [],
+            "find_nearest_coffeeshops": [],
+            "get_walking_distances_bulk": walk,
+        }
+        defaults.update(overrides)
+        return [patch(f"maps.{name}", return_value=value)
+                if not isinstance(value, Exception)
+                else patch(f"maps.{name}", side_effect=value)
+                for name, value in defaults.items()]
+
+    def test_one_category_failing_does_not_lose_the_others(self):
+        """A raising lookup costs its own list and nothing else — the bundle
+        comes back short rather than the whole request failing."""
+        import maps
+        stack = self._patches(
+            find_nearest_mall=RuntimeError("Places exploded"),
+            find_nearest_hawkers=[{"name": "Tiong Bahru Market", "lat": 1.28,
+                                   "lng": 103.83, "stalls": 83, "dist": 200.0}],
+        )
+        with contextlib.ExitStack() as es:
+            for p in stack:
+                es.enter_context(p)
+            out = maps.get_nearby_info("X", lat=1.28, lng=103.83)
+
+        self.assertEqual(out["malls"], [])                  # the one that blew up
+        self.assertEqual(len(out["hawkers"]), 1)            # its neighbour survived
+        for key in ("mrts", "malls", "schools", "supermarkets", "hawkers", "coffeeshops"):
+            self.assertIn(key, out)
+
+    def test_the_lookups_actually_overlap(self):
+        """Six lookups that each block for 100ms must finish in well under the
+        600ms they would take in sequence."""
+        import maps, time
+
+        def slow(*_a, **_kw):
+            time.sleep(0.1)
+            return []
+
+        names = ["onemap_find_nearest_mrts", "find_nearest_mall",
+                 "find_nearest_primary_schools", "find_nearest_supermarkets",
+                 "find_nearest_hawkers", "find_nearest_coffeeshops"]
+        with contextlib.ExitStack() as es:
+            for n in names:
+                es.enter_context(patch(f"maps.{n}", side_effect=slow))
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=[]))
+            t = time.perf_counter()
+            maps.get_nearby_info("X", lat=1.28, lng=103.83)
+            elapsed = time.perf_counter() - t
+
+        self.assertLess(elapsed, 0.35, "the six lookups are running in sequence")
+
+
+class TestMRTExitLookups(unittest.TestCase):
+    """Picking the best exit costs one Distance Matrix call per station, so the
+    number of stations it is done for is a latency decision."""
+
+    def test_exits_are_looked_up_only_for_the_stations_returned(self):
+        """It used to do max(top_n * 2, 6) — six stations for a top_n of three
+        — and discard half. The results are sorted by `straight_dist`, which is
+        known before any network call, so the surplus lookups never changed an
+        answer; they just cost ~350ms."""
+        from cache import onemap_mrt
+
+        stations = {
+            f"S{i}": {"name": f"STATION {i}", "lat": 1.30 + i / 1000, "lng": 103.80,
+                      "exits": [{"letter": "A", "lat": 1.30 + i / 1000, "lng": 103.80}]}
+            for i in range(8)
+        }
+        picked = []
+
+        def spy(olat, olng, exits):
+            picked.append(exits[0]["lat"])
+            return exits[0]
+
+        with patch.object(onemap_mrt, "build_mrt_cache", return_value=stations), \
+             patch.object(onemap_mrt, "get_best_exit_by_walking", side_effect=spy):
+            out = onemap_mrt.find_nearest_mrts(1.30, 103.80, top_n=3)
+
+        self.assertEqual(len(out), 3)
+        self.assertEqual(len(picked), 3)   # not 6
+
+
+# ══════════════════════════════════════════════════════
+# SHOPPING MALLS (the tenants Places returns alongside them)
+# ══════════════════════════════════════════════════════
+
+class TestShoppingMalls(unittest.TestCase):
+    """A keyword search for "shopping mall" returns the mall and everything
+    trading inside it. Every place below came back from a real Places call at
+    Paya Lebar Quarter."""
+
+    PLQ = [
+        {"name": "PLQ Mall", "types": ["shopping_mall", "point_of_interest", "establishment"],
+         "geometry": {"location": {"lat": 1.31789, "lng": 103.89330}}},
+        {"name": "HYSSES PLQ Mall", "types": ["health", "store", "establishment"],
+         "geometry": {"location": {"lat": 1.31790, "lng": 103.89331}}},
+        {"name": "2nd STREET PLQ Mall", "types": ["clothing_store", "store", "establishment"],
+         "geometry": {"location": {"lat": 1.31763, "lng": 103.89283}}},
+        {"name": "SKP @ Paya Lebar Quarter Mall", "types": ["home_goods_store", "store"],
+         "geometry": {"location": {"lat": 1.31773, "lng": 103.89268}}},
+        {"name": "Starbucks Reserve @ PLQ Paya Lebar Quarter", "types": ["cafe", "food", "store"],
+         "geometry": {"location": {"lat": 1.31754, "lng": 103.89299}}},
+        {"name": "FairPrice Finest", "types": ["supermarket", "grocery_or_supermarket", "store"],
+         "geometry": {"location": {"lat": 1.31740, "lng": 103.89300}}},
+        {"name": "Paya Lebar Square", "types": ["shopping_mall", "establishment"],
+         "geometry": {"location": {"lat": 1.31850, "lng": 103.89250}}},
+    ]
+
+    def _search(self, results):
+        import maps
+        payload = {"status": "OK", "results": results}
+        with patch("maps.requests.get", return_value=MagicMock(json=lambda: payload)):
+            return maps.find_nearest_mall(1.3180, 103.8930)
+
+    def test_tenants_are_dropped_and_the_mall_survives(self):
+        """The reported bug: shops whose names contain "Mall" outranked the
+        mall itself, so the amenity list read OWNDAYS, SKP, Starbucks."""
+        self.assertEqual([m["name"] for m in self._search(self.PLQ)],
+                         ["PLQ Mall", "Paya Lebar Square"])
+
+    def test_a_supermarket_is_not_a_mall(self):
+        """It has its own category, and listing it in both says the property
+        has more amenities than it does."""
+        self.assertNotIn("FairPrice Finest", [m["name"] for m in self._search(self.PLQ)])
+
+    def test_the_type_is_read_off_the_response_not_the_request(self):
+        """`type=shopping_mall` as a REQUEST parameter is a different thing and
+        still avoided — it changes what Google searches for and drags in
+        mis-tagged warehouses. This reads what came back."""
+        from maps import is_shopping_mall
+        self.assertTrue(is_shopping_mall({"types": ["shopping_mall"]}))
+        self.assertFalse(is_shopping_mall({"types": ["store", "clothing_store"]}))
+        self.assertFalse(is_shopping_mall({}))          # no types at all
+        self.assertFalse(is_shopping_mall({"types": None}))
+
+    def test_candidates_stop_at_eight(self):
+        """rankby=distance means the first eight survivors are the nearest
+        eight, so the walking-distance call stays one batched request."""
+        many = [{"name": f"Mall {i}", "types": ["shopping_mall"],
+                 "geometry": {"location": {"lat": 1.318 + i / 1000, "lng": 103.893}}}
+                for i in range(20)]
+        self.assertEqual(len(self._search(many)), 8)
+
+    def test_nothing_taggable_yields_nothing(self):
+        """Measured across 11 spread origins the filter never left fewer than
+        8 malls, so an empty list means Places found no mall — better than
+        falling back and calling a stationery shop one."""
+        self.assertEqual(self._search([self.PLQ[1], self.PLQ[2]]), [])
+
 
 class TestHDBCacheCompleteness(unittest.TestCase):
     """The refresh asks for 60 months. A run that comes back with a handful of
@@ -2263,6 +2690,11 @@ def run_tests():
         TestUnitCountsHarvest,
         TestHDB,
         TestHDBCacheCompleteness,
+        TestHawkerCentres,
+        TestCoffeeShops,
+        TestAmenityConcurrency,
+        TestMRTExitLookups,
+        TestShoppingMalls,
     ]
 
     for cls in test_classes:
