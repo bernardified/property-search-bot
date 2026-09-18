@@ -382,7 +382,8 @@ body {
 .dot.school { background: #2563eb; }
 .dot.mall { background: #9333ea; }
 .dot.mart { background: #16a34a; }
-.dot.hawker { background: #b45309; }
+.dot.hawker { background: #f97316; }
+.dot.kopi { background: #78350f; }
 /* Ring swatch mirrors the school-catchment circle drawn on the map. */
 .ring {
   width: 10px;

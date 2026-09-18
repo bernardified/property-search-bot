@@ -28,16 +28,23 @@ L.tileLayer("https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 // The amenity render loop is driven entirely by this table, so a category is
-// its colour, its label and nothing else. Hawker centres take the warm dark
-// that sits in the widest gap left in the palette — five categorical hues on a
-// light tile surface is already crowded, which is why the popup names the
-// place and the legend labels every swatch rather than leaning on hue alone.
+// its colour, its label and nothing else.
+//
+// Hawker centres are BRIGHT orange, not the darker amber tried first: at
+// #b45309 the luminance ratio against MRT red was 1.04:1 — the same
+// brightness — which left hue as the only thing separating two warm dots, and
+// on the map they read as one category. #f97316 is 1.72:1 against that red, so
+// lightness separates them before hue has to.
 const AMENITY_STYLES = {
   mrts: { color: "#dc2626", label: "MRT" },
   schools: { color: "#2563eb", label: "School" },
   malls: { color: "#9333ea", label: "Mall" },
   supermarkets: { color: "#16a34a", label: "Supermarket" },
-  hawkers: { color: "#b45309", label: "Hawker centre" },
+  hawkers: { color: "#f97316", label: "Hawker centre" },
+  // Dark brown against the hawker orange: same family, because both are
+  // food, but separated by lightness rather than hue alone (7.7:1 against
+  // the tile, and its nearest neighbour in the palette is 1.7:1).
+  coffeeshops: { color: "#78350f", label: "Coffee shop" },
 };
 
 // Primary-school admission priority is drawn at 1 km straight-line, which is
@@ -1080,6 +1087,10 @@ async function loadAmenities(d) {
         // and one with 12, which the name never carries.
         if (key === "hawkers" && item.stalls)
           lines.push(`<div class="popup-line">🍜 ${item.stalls} cooked-food stalls</div>`);
+        // Where the two food categories come from differs, and a coffee shop's
+        // provenance is the weaker of the two — say so on the pin itself.
+        if (key === "coffeeshops")
+          lines.push(`<div class="popup-line"><span class="muted">Coffee shop · via Google</span></div>`);
         if (item.maps_link)
           lines.push(`<div class="popup-line"><a href="${esc(item.maps_link)}" target="_blank">Directions ↗</a></div>`);
         const marker = L.circleMarker([item.dest_lat, item.dest_lng], {

@@ -216,6 +216,7 @@ def build_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🍜 Hawker Centres", callback_data=f"amenity:hawkers:{token}"),
+            InlineKeyboardButton("☕ Coffee Shops", callback_data=f"amenity:coffeeshops:{token}"),
         ],
         [
             InlineKeyboardButton("🏠 Rental & Yield", callback_data=f"amenity:rental:{token}"),
@@ -252,6 +253,7 @@ def build_hdb_amenity_keyboard(token: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🍜 Hawker Centres", callback_data=f"amenity:hawkers:{token}"),
+            InlineKeyboardButton("☕ Coffee Shops", callback_data=f"amenity:coffeeshops:{token}"),
         ],
         [
             InlineKeyboardButton("📈 Price Trend (5yr)", callback_data=f"hdbtrend:{token}"),
@@ -991,7 +993,7 @@ async def district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all amenity button taps: MRT, schools, malls, supermarkets,
-    hawker centres, rental."""
+    hawker centres, coffee shops, rental."""
     query = update.callback_query
     await query.answer()
 
@@ -1131,6 +1133,18 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     note="_Government hawker centres only (NEA). Private food "
                          "courts and coffee shops are not listed._",
                     detail=lambda h: f" _({h['stalls']} stalls)_" if h.get("stalls") else "",
+                )
+            elif amenity == "coffeeshops":
+                # Google, not a register — the note says so, because the
+                # hawker list beside it IS authoritative and the two should
+                # not be read as carrying the same weight.
+                text = format_amenity_list(
+                    maps_result.get("coffeeshops", []),
+                    f"☕ *Nearest Coffee Shops — {display_name}* _(within 1km)_",
+                    "☕ No coffee shops found within 1km",
+                    note="_Coffee shops are matched by name from Google Places — "
+                         "there is no official register of them, so treat this as "
+                         "indicative._",
                 )
             else:
                 text = "Unknown amenity type."

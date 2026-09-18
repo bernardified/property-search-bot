@@ -2085,7 +2085,7 @@ class TestHDB(unittest.TestCase):
         self.assertEqual(cbs, [
             "amenity:mrt:tok123", "amenity:schools:tok123",
             "amenity:malls:tok123", "amenity:supermarkets:tok123",
-            "amenity:hawkers:tok123",
+            "amenity:hawkers:tok123", "amenity:coffeeshops:tok123",
             "hdbtrend:tok123",
             "new_search",
         ])
@@ -2266,6 +2266,97 @@ class TestHawkerCentres(unittest.TestCase):
             self.assertIn("amenity:hawkers:tok", data)
 
 
+# ══════════════════════════════════════════════════════
+# COFFEE SHOPS / KOPITIAMS (Places + a name filter)
+# ══════════════════════════════════════════════════════
+
+class TestCoffeeShops(unittest.TestCase):
+    """The one food amenity with no register behind it, so the name filter is
+    the whole product. Every string below was returned by a real Places call
+    against a real origin."""
+
+    def test_genuine_coffee_shops_are_kept(self):
+        from maps import is_coffeeshop
+        for name in ["GHK 407 Food House", "332 Coffee House", "Yak Hong Kopitiam",
+                     "Chang Cheng Mee Wah Coffeeshop (520802)", "CCK 302 FoodHouse",
+                     "Kimly Coffee Shop (429A Choa Chu Kang)", "Soon Seng Coffee Shop",
+                     "Kopi House 1990 @ 820 Tampines", "D'coffeeshop",
+                     "Telok Ayer Coffee Shop"]:
+            with self.subTest(name=name):
+                self.assertTrue(is_coffeeshop(name))
+
+    def test_stalls_inside_a_coffee_shop_are_dropped(self):
+        """Places returns the tenants as well as the venue, which would list
+        one coffee shop five times under five dishes."""
+        from maps import is_coffeeshop
+        for name in ["Hao Yun Lai Fried Hokkien Prawn Mee", "Bangkok Street Mookata",
+                     "Tham's Roasted Delights 谭氏•港式烧腊", "Crazy Western Noodle House",
+                     "Johnson Eatery 332 Ang Mo Kio", "蒸之家"]:
+            with self.subTest(name=name):
+                self.assertFalse(is_coffeeshop(name))
+
+    def test_speciality_cafes_are_dropped(self):
+        """Nobody asking about the coffee shop downstairs means Starbucks."""
+        from maps import is_coffeeshop
+        for name in ["Starbucks Reserve @ PLQ Paya Lebar Quarter",
+                     "Tiong Hoe Specialty Coffee (SingPost Centre)",
+                     "144 Brew Kopi", "Dutch Colony Coffee Co.",
+                     "Han's craft coffee", "The Coffee Bean & Tea Leaf",
+                     "Kings Cart Coffee Bishan"]:
+            with self.subTest(name=name):
+                self.assertFalse(is_coffeeshop(name))
+
+    def test_exclusions_run_before_the_keyword_check(self):
+        """A name can hold both — "Starbucks ... Coffee House" must still be
+        rejected, so the order of the two checks is the behaviour."""
+        from maps import is_coffeeshop
+        self.assertFalse(is_coffeeshop("Starbucks Coffee House"))
+        self.assertTrue(is_coffeeshop("Kimly Coffeeshop (Blk 555 Ang Mo Kio Ave 10)"))
+
+    def test_results_are_capped_by_distance_not_by_count(self):
+        """rankby=distance forbids `radius` (it is what stops a Hougang coffee
+        shop answering an Ang Mo Kio origin), so the 1km cap is applied here —
+        and the list is sorted, so the first one over the line ends it."""
+        import maps
+        payload = {"status": "OK", "results": [
+            {"name": "Near Coffee Shop", "geometry": {"location": {"lat": 1.3000, "lng": 103.8000}}},
+            {"name": "Mid Kopitiam",     "geometry": {"location": {"lat": 1.3040, "lng": 103.8000}}},
+            {"name": "Far Coffee House", "geometry": {"location": {"lat": 1.3200, "lng": 103.8000}}},
+        ]}
+        with patch("maps.requests.get", return_value=MagicMock(json=lambda: payload)):
+            out = maps.find_nearest_coffeeshops(1.3000, 103.8000)
+        self.assertEqual([c["name"] for c in out], ["Near Coffee Shop", "Mid Kopitiam"])
+
+    def test_get_nearby_info_returns_coffeeshops_without_a_transit_leg(self):
+        """Walk-downstairs amenity, so it skips _enrich_with_transit for the
+        same reason hawker centres do."""
+        import maps
+        walk = [{"distance_text": "180 m", "duration_text": "3 mins", "distance_m": 180}]
+        with patch("maps.onemap_find_nearest_mrts", return_value=[]), \
+             patch("maps.find_nearest_mall", return_value=[]), \
+             patch("maps.find_nearest_primary_schools", return_value=[]), \
+             patch("maps.find_nearest_supermarkets", return_value=[]), \
+             patch("maps.find_nearest_hawkers", return_value=[]), \
+             patch("maps.get_walking_distances_bulk", return_value=walk), \
+             patch("maps._enrich_with_transit") as transit, \
+             patch("maps.find_nearest_coffeeshops", return_value=[
+                 {"name": "GHK 407 Food House", "lat": 1.3625, "lng": 103.8540,
+                  "dist": 181.0}]):
+            out = maps.get_nearby_info("SOMEWHERE", lat=1.3620, lng=103.8538)
+
+        self.assertEqual(len(out["coffeeshops"]), 1)
+        row = out["coffeeshops"][0]
+        self.assertEqual(row["name"], "GHK 407 Food House")
+        self.assertNotIn("transit_duration", row)
+        transit.assert_not_called()
+
+    def test_the_button_is_on_both_keyboards(self):
+        from bot import build_amenity_keyboard, build_hdb_amenity_keyboard
+        for keyboard in (build_amenity_keyboard("tok"), build_hdb_amenity_keyboard("tok")):
+            data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+            self.assertIn("amenity:coffeeshops:tok", data)
+
+
 class TestHDBCacheCompleteness(unittest.TestCase):
     """The refresh asks for 60 months. A run that comes back with a handful of
     them is a failed fetch, not a small market — it must never replace a good
@@ -2432,6 +2523,7 @@ def run_tests():
         TestHDB,
         TestHDBCacheCompleteness,
         TestHawkerCentres,
+        TestCoffeeShops,
     ]
 
     for cls in test_classes:

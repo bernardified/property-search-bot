@@ -404,6 +404,82 @@ def find_nearest_primary_schools(lat: float, lng: float) -> list:
     return cached_schools(lat, lng, top_n=5)
 
 
+# ── Coffee shops / kopitiams via Google Places ───────────────────────────────
+#
+# The one food amenity with no register behind it. A kopitiam is a private
+# tenancy in an HDB commercial block, so nothing authoritative lists them:
+# HDB's own Property Information dataset flags 2,526 blocks as `commercial`,
+# but that is every block with a minimart, clinic or hairdresser, and its
+# `market_hawker` flag (107 blocks) means a market, not a coffee shop. So this
+# one does go through Places — and needs a name filter to be worth anything.
+#
+# Two kinds of noise come back consistently, both verified against real
+# origins: individual STALLS inside a coffee shop ("Hao Yun Lai Fried Hokkien
+# Prawn Mee", "Tham's Roasted Delights"), which would list one venue five
+# times, and SPECIALITY CAFES ("Starbucks Reserve @ PLQ", "Tiong Hoe Specialty
+# Coffee", "144 Brew Kopi"), which are not what anyone means by the coffee shop
+# downstairs. The filter is deliberately conservative: it keeps only names that
+# say what they are, so it misses the occasional genuine one ("Johnson Eatery")
+# rather than promising a Starbucks is your kopitiam.
+
+COFFEESHOP_WORDS = [
+    "coffee shop", "coffeeshop", "coffee house", "kopitiam",
+    "food house", "foodhouse", "eating house", "kopi house",
+    "food centre", "food court",
+]
+
+NOT_A_COFFEESHOP = [
+    "starbucks", "specialty", "speciality", "roaster", "brew",
+    "cafe bar", "% arabica", "coffee bean", "toast box", "ya kun",
+    "coffee co", "craft coffee", "cart coffee",
+]
+
+# rankby=distance (as with malls) rather than a radius: prominence ranking
+# answered an Ang Mo Kio origin with a Hougang coffee shop 4km away. rankby
+# forbids `radius`, so the cap is applied here instead — 1km, the supermarket
+# radius, because a coffee shop is a downstairs amenity and one 2km away is
+# not the question being asked.
+COFFEESHOP_MAX_M = 1000
+
+
+def is_coffeeshop(name: str) -> bool:
+    """True only for names that say they are a coffee shop. Exclusions run
+    FIRST — "Kimly Coffeeshop" must pass while "144 Brew Kopi" does not."""
+    n = (name or "").lower()
+    if any(w in n for w in NOT_A_COFFEESHOP):
+        return False
+    return any(w in n for w in COFFEESHOP_WORDS)
+
+
+def find_nearest_coffeeshops(lat: float, lng: float) -> list:
+    """Nearest HDB-style coffee shops / kopitiams, filtered by name."""
+    params = {
+        "location": f"{lat},{lng}",
+        "rankby": "distance",
+        "keyword": "coffeeshop",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    try:
+        r = requests.get(PLACES_URL, params=params, timeout=10)
+        data = r.json()
+        if data.get("status") != "OK" or not data.get("results"):
+            return []
+        out = []
+        for p in data["results"]:
+            if not is_coffeeshop(p["name"]):
+                continue
+            loc = p["geometry"]["location"]
+            dist = haversine_m(lat, lng, loc["lat"], loc["lng"])
+            if dist > COFFEESHOP_MAX_M:
+                break            # rankby=distance, so everything after is further
+            out.append({"name": p["name"], "lat": loc["lat"], "lng": loc["lng"],
+                        "dist": dist})
+        return out[:3]
+    except Exception as e:
+        print(f"[Maps] Coffee shop search failed: {e}")
+        return []
+
+
 def find_nearest_hawkers(lat: float, lng: float) -> list:
     """Nearest government hawker centres, from NEA's own register.
 
@@ -549,4 +625,27 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
                     "dist": hawker["dist"],
                 })
 
-    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results, "hawkers": hawker_results}
+    # ── Coffee shops / kopitiams via Google Places ──────────────────────────
+    #
+    # No transit leg, for the same reason hawker centres have none: this is a
+    # walk-downstairs amenity, and the pass is a second Distance Matrix round
+    # trip on the slowest endpoint in the app.
+    coffeeshop_results = []
+    coffeeshops = find_nearest_coffeeshops(lat, lng)
+    if coffeeshops:
+        dest_list = [{"lat": c["lat"], "lng": c["lng"]} for c in coffeeshops]
+        distances = get_walking_distances_bulk(lat, lng, dest_list)
+        for shop, dist in zip(coffeeshops, distances):
+            if dist:
+                coffeeshop_results.append({
+                    "name": shop["name"],
+                    "distance": dist["distance_text"],
+                    "duration": dist["duration_text"],
+                    "distance_m": dist["distance_m"],
+                    "dest_lat": shop["lat"],
+                    "dest_lng": shop["lng"],
+                    "maps_link": build_google_maps_link(origin, shop["lat"], shop["lng"]),
+                    "dist": shop["dist"],
+                })
+
+    return {"address": address, "lat": lat, "lng": lng, "mrts": mrt_results, "malls": mall_results, "schools": school_results, "supermarkets": supermarket_results, "hawkers": hawker_results, "coffeeshops": coffeeshop_results}
