@@ -193,6 +193,26 @@ def get_exit_letter(name: str) -> str:
 
 # ── Google Places — mall only ─────────────────────────────────────────────────
 
+def is_shopping_mall(place: dict) -> bool:
+    """True only for places Google itself classifies as a shopping mall.
+
+    The keyword search returns the mall AND everything trading inside it, so
+    Paya Lebar Quarter answered with "SKP @ Paya Lebar Quarter Mall", "OWNDAYS
+    PLQ Mall", "2nd STREET PLQ Mall" and "Starbucks Reserve @ PLQ" — shops
+    whose names contain "Mall", ahead of PLQ Mall itself. Their `types` say
+    what they are (`store`, `clothing_store`, `cafe`), and the mall's says
+    `shopping_mall`, so the RESPONSE's types are the filter.
+
+    Note this is not the `type=shopping_mall` REQUEST parameter, which is a
+    different thing and is still avoided (see find_nearest_mall): that changes
+    what Google searches for and drags in mis-tagged warehouses.
+
+    Measured across 11 spread-out origins — CBD, heartland, Sentosa, Lim Chu
+    Kang — the filter never left fewer than 8 malls, so it needs no fallback.
+    """
+    return "shopping_mall" in (place.get("types") or [])
+
+
 def find_nearest_mall(lat: float, lng: float) -> dict | None:
     """Use Google Places to find nearest shopping mall.
 
@@ -200,8 +220,15 @@ def find_nearest_mall(lat: float, lng: float) -> dict | None:
     A radius+keyword search ranks by Google's "prominence" instead, which
     drops small neighbourhood malls — e.g. Hougang 1 (388m) was being hidden
     behind prominent malls 1.6km+ away. rankby=distance forbids `radius` and
-    needs a keyword/type; "shopping mall" keeps the list to real malls
-    (type=shopping_mall alone pulls in mis-tagged shops/warehouses).
+    needs a keyword/type; "shopping mall" keeps the search broad, and
+    is_shopping_mall then drops the tenants it also returns.
+
+    A handful of Google mis-tags survive (a craft shop inside PLQ carries
+    `shopping_mall`). Both discriminators tried against them cost more than
+    they saved: a `user_ratings_total` floor drops real malls at about 1:1
+    (Marina Bay Link Mall has 12 ratings; a mis-tagged salon has 146), and
+    collapsing near-neighbours to the best-rated one picks the loudest tenant
+    over the quiet mall it sits in. So the mis-tags stay.
     """
     params = {
         "location": f"{lat},{lng}",
@@ -214,12 +241,16 @@ def find_nearest_mall(lat: float, lng: float) -> dict | None:
         data = r.json()
         if data["status"] == "OK" and data["results"]:
             candidates = []
-            for p in data["results"][:8]:
+            for p in data["results"]:
+                if not is_shopping_mall(p):
+                    continue
                 candidates.append({
                     "name": p["name"],
                     "lat": p["geometry"]["location"]["lat"],
                     "lng": p["geometry"]["location"]["lng"],
                 })
+                if len(candidates) >= 8:
+                    break      # rankby=distance, so these are already the nearest
             return candidates
         return []
     except Exception as e:

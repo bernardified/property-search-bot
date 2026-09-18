@@ -2457,6 +2457,74 @@ class TestMRTExitLookups(unittest.TestCase):
         self.assertEqual(len(picked), 3)   # not 6
 
 
+# ══════════════════════════════════════════════════════
+# SHOPPING MALLS (the tenants Places returns alongside them)
+# ══════════════════════════════════════════════════════
+
+class TestShoppingMalls(unittest.TestCase):
+    """A keyword search for "shopping mall" returns the mall and everything
+    trading inside it. Every place below came back from a real Places call at
+    Paya Lebar Quarter."""
+
+    PLQ = [
+        {"name": "PLQ Mall", "types": ["shopping_mall", "point_of_interest", "establishment"],
+         "geometry": {"location": {"lat": 1.31789, "lng": 103.89330}}},
+        {"name": "HYSSES PLQ Mall", "types": ["health", "store", "establishment"],
+         "geometry": {"location": {"lat": 1.31790, "lng": 103.89331}}},
+        {"name": "2nd STREET PLQ Mall", "types": ["clothing_store", "store", "establishment"],
+         "geometry": {"location": {"lat": 1.31763, "lng": 103.89283}}},
+        {"name": "SKP @ Paya Lebar Quarter Mall", "types": ["home_goods_store", "store"],
+         "geometry": {"location": {"lat": 1.31773, "lng": 103.89268}}},
+        {"name": "Starbucks Reserve @ PLQ Paya Lebar Quarter", "types": ["cafe", "food", "store"],
+         "geometry": {"location": {"lat": 1.31754, "lng": 103.89299}}},
+        {"name": "FairPrice Finest", "types": ["supermarket", "grocery_or_supermarket", "store"],
+         "geometry": {"location": {"lat": 1.31740, "lng": 103.89300}}},
+        {"name": "Paya Lebar Square", "types": ["shopping_mall", "establishment"],
+         "geometry": {"location": {"lat": 1.31850, "lng": 103.89250}}},
+    ]
+
+    def _search(self, results):
+        import maps
+        payload = {"status": "OK", "results": results}
+        with patch("maps.requests.get", return_value=MagicMock(json=lambda: payload)):
+            return maps.find_nearest_mall(1.3180, 103.8930)
+
+    def test_tenants_are_dropped_and_the_mall_survives(self):
+        """The reported bug: shops whose names contain "Mall" outranked the
+        mall itself, so the amenity list read OWNDAYS, SKP, Starbucks."""
+        self.assertEqual([m["name"] for m in self._search(self.PLQ)],
+                         ["PLQ Mall", "Paya Lebar Square"])
+
+    def test_a_supermarket_is_not_a_mall(self):
+        """It has its own category, and listing it in both says the property
+        has more amenities than it does."""
+        self.assertNotIn("FairPrice Finest", [m["name"] for m in self._search(self.PLQ)])
+
+    def test_the_type_is_read_off_the_response_not_the_request(self):
+        """`type=shopping_mall` as a REQUEST parameter is a different thing and
+        still avoided — it changes what Google searches for and drags in
+        mis-tagged warehouses. This reads what came back."""
+        from maps import is_shopping_mall
+        self.assertTrue(is_shopping_mall({"types": ["shopping_mall"]}))
+        self.assertFalse(is_shopping_mall({"types": ["store", "clothing_store"]}))
+        self.assertFalse(is_shopping_mall({}))          # no types at all
+        self.assertFalse(is_shopping_mall({"types": None}))
+
+    def test_candidates_stop_at_eight(self):
+        """rankby=distance means the first eight survivors are the nearest
+        eight, so the walking-distance call stays one batched request."""
+        many = [{"name": f"Mall {i}", "types": ["shopping_mall"],
+                 "geometry": {"location": {"lat": 1.318 + i / 1000, "lng": 103.893}}}
+                for i in range(20)]
+        self.assertEqual(len(self._search(many)), 8)
+
+    def test_nothing_taggable_yields_nothing(self):
+        """Measured across 11 spread origins the filter never left fewer than
+        8 malls, so an empty list means Places found no mall — better than
+        falling back and calling a stationery shop one."""
+        self.assertEqual(self._search([self.PLQ[1], self.PLQ[2]]), [])
+
+
 class TestHDBCacheCompleteness(unittest.TestCase):
     """The refresh asks for 60 months. A run that comes back with a handful of
     them is a failed fetch, not a small market — it must never replace a good
@@ -2626,6 +2694,7 @@ def run_tests():
         TestCoffeeShops,
         TestAmenityConcurrency,
         TestMRTExitLookups,
+        TestShoppingMalls,
     ]
 
     for cls in test_classes:
