@@ -3,6 +3,7 @@ Property Bot Test Suite
 Run with: python -m Test.test_suite or python Test/test_suite.py
 Tests all critical functions without hitting live APIs where possible.
 """
+import contextlib
 import os
 import sys
 import json
@@ -2357,6 +2358,105 @@ class TestCoffeeShops(unittest.TestCase):
             self.assertIn("amenity:coffeeshops:tok", data)
 
 
+# ══════════════════════════════════════════════════════
+# AMENITY BUNDLE: CONCURRENCY AND CALL COUNT
+# ══════════════════════════════════════════════════════
+
+class TestAmenityConcurrency(unittest.TestCase):
+    """get_nearby_info runs its six lookups at once. The endpoint was 17
+    sequential round trips to Google (~3.5s warm); the categories share
+    nothing but the origin, so the cost should be the longest chain, not the
+    sum of six."""
+
+    def _patches(self, **overrides):
+        walk = [{"distance_text": "100 m", "duration_text": "2 mins", "distance_m": 100}] * 5
+        defaults = {
+            "onemap_find_nearest_mrts": [],
+            "find_nearest_mall": [],
+            "find_nearest_primary_schools": [],
+            "find_nearest_supermarkets": [],
+            "find_nearest_hawkers": [],
+            "find_nearest_coffeeshops": [],
+            "get_walking_distances_bulk": walk,
+        }
+        defaults.update(overrides)
+        return [patch(f"maps.{name}", return_value=value)
+                if not isinstance(value, Exception)
+                else patch(f"maps.{name}", side_effect=value)
+                for name, value in defaults.items()]
+
+    def test_one_category_failing_does_not_lose_the_others(self):
+        """A raising lookup costs its own list and nothing else — the bundle
+        comes back short rather than the whole request failing."""
+        import maps
+        stack = self._patches(
+            find_nearest_mall=RuntimeError("Places exploded"),
+            find_nearest_hawkers=[{"name": "Tiong Bahru Market", "lat": 1.28,
+                                   "lng": 103.83, "stalls": 83, "dist": 200.0}],
+        )
+        with contextlib.ExitStack() as es:
+            for p in stack:
+                es.enter_context(p)
+            out = maps.get_nearby_info("X", lat=1.28, lng=103.83)
+
+        self.assertEqual(out["malls"], [])                  # the one that blew up
+        self.assertEqual(len(out["hawkers"]), 1)            # its neighbour survived
+        for key in ("mrts", "malls", "schools", "supermarkets", "hawkers", "coffeeshops"):
+            self.assertIn(key, out)
+
+    def test_the_lookups_actually_overlap(self):
+        """Six lookups that each block for 100ms must finish in well under the
+        600ms they would take in sequence."""
+        import maps, time
+
+        def slow(*_a, **_kw):
+            time.sleep(0.1)
+            return []
+
+        names = ["onemap_find_nearest_mrts", "find_nearest_mall",
+                 "find_nearest_primary_schools", "find_nearest_supermarkets",
+                 "find_nearest_hawkers", "find_nearest_coffeeshops"]
+        with contextlib.ExitStack() as es:
+            for n in names:
+                es.enter_context(patch(f"maps.{n}", side_effect=slow))
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=[]))
+            t = time.perf_counter()
+            maps.get_nearby_info("X", lat=1.28, lng=103.83)
+            elapsed = time.perf_counter() - t
+
+        self.assertLess(elapsed, 0.35, "the six lookups are running in sequence")
+
+
+class TestMRTExitLookups(unittest.TestCase):
+    """Picking the best exit costs one Distance Matrix call per station, so the
+    number of stations it is done for is a latency decision."""
+
+    def test_exits_are_looked_up_only_for_the_stations_returned(self):
+        """It used to do max(top_n * 2, 6) — six stations for a top_n of three
+        — and discard half. The results are sorted by `straight_dist`, which is
+        known before any network call, so the surplus lookups never changed an
+        answer; they just cost ~350ms."""
+        from cache import onemap_mrt
+
+        stations = {
+            f"S{i}": {"name": f"STATION {i}", "lat": 1.30 + i / 1000, "lng": 103.80,
+                      "exits": [{"letter": "A", "lat": 1.30 + i / 1000, "lng": 103.80}]}
+            for i in range(8)
+        }
+        picked = []
+
+        def spy(olat, olng, exits):
+            picked.append(exits[0]["lat"])
+            return exits[0]
+
+        with patch.object(onemap_mrt, "build_mrt_cache", return_value=stations), \
+             patch.object(onemap_mrt, "get_best_exit_by_walking", side_effect=spy):
+            out = onemap_mrt.find_nearest_mrts(1.30, 103.80, top_n=3)
+
+        self.assertEqual(len(out), 3)
+        self.assertEqual(len(picked), 3)   # not 6
+
+
 class TestHDBCacheCompleteness(unittest.TestCase):
     """The refresh asks for 60 months. A run that comes back with a handful of
     them is a failed fetch, not a small market — it must never replace a good
@@ -2524,6 +2624,8 @@ def run_tests():
         TestHDBCacheCompleteness,
         TestHawkerCentres,
         TestCoffeeShops,
+        TestAmenityConcurrency,
+        TestMRTExitLookups,
     ]
 
     for cls in test_classes:
