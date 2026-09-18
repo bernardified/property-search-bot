@@ -6,12 +6,14 @@ All external calls (URA cache, rental, geocode, Mongo) are mocked — no network
 import contextlib
 import os
 import sys
+import threading
 import unittest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import api
 import hdb
 from api import (
     app,
@@ -29,6 +31,36 @@ from api import (
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
+
+
+@contextlib.contextmanager
+def captured_rebuilds():
+    """Capture the background rebuilds an explore layer starts — and nothing else.
+
+    `patch("api.threading.Thread")` reaches the real threading module (api
+    imports it, it does not hold a copy), so a naive patch captures every
+    thread ANY code starts inside the block and hands it a MagicMock. pymongo
+    brings its monitors up lazily, so a connection made during the block both
+    put `pymongo_server_rtt_thread` into the captured list — failing the
+    assertion about one run in eight — and quietly replaced pymongo's own
+    monitor with a mock that never runs.
+
+    So this intercepts only `_DerivedLayer.rebuild_bg` and lets every other
+    thread through to the real constructor. What the tests claim is unchanged:
+    a rebuild was started, and exactly one.
+    """
+    real_thread = threading.Thread
+    started = []
+
+    def spy(**kwargs):
+        target = kwargs.get("target")
+        if getattr(target, "__func__", None) is api._DerivedLayer.rebuild_bg:
+            started.append(kwargs)
+            return MagicMock()
+        return real_thread(**kwargs)
+
+    with patch("api.threading.Thread", side_effect=spy):
+        yield started
 
 URA_RESULT = {
     "development": "PARC ESTA",
@@ -439,10 +471,8 @@ class TestDevelopments(unittest.TestCase):
         in the background rather than under the visitor."""
         import api
         stored = {"developments": [], "count": 0, "districts": {}}
-        started = []
         with self._store(key=(9.0, 9.0), stored=stored, stored_key=(1.0, 2.0)), \
-             patch("api.threading.Thread") as thread:
-            thread.side_effect = lambda **kw: started.append(kw) or MagicMock()
+             captured_rebuilds() as started:
             body = client.get("/api/developments").json()
         self.assertEqual(body, stored)
         self.assertEqual([kw["target"] for kw in started],
@@ -1140,10 +1170,8 @@ class TestHDBExploreLayer(unittest.TestCase):
     def test_a_refreshed_cache_serves_the_old_layer_and_rebuilds_behind(self):
         import api
         stored = {"blocks": [], "count": 1, "flat_types": []}
-        started = []
         with self._store(key=(9.0,), stored=stored, stored_key=(5.0,)), \
-             patch("api.threading.Thread") as thread:
-            thread.side_effect = lambda **kw: started.append(kw) or MagicMock()
+             captured_rebuilds() as started:
             self.assertEqual(client.get("/api/hdb/blocks").json(), stored)
         self.assertEqual([kw["target"] for kw in started],
                          [api.hdb_blocks_layer.rebuild_bg])
