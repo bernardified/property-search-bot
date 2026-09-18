@@ -131,6 +131,13 @@
       <section id="nearby-view" hidden>
         <button id="nearby-back" type="button">←&nbsp;<span id="nearby-back-name">Back</span></button>
         <h2 id="nearby-title"></h2>
+        <!-- One market at a time, as on the explore map: a block has 150-270
+             HDB neighbours within 1 km against 3-36 private ones, so a merged
+             list would bury private entirely. -->
+        <div id="nearby-market" class="segmented" role="radiogroup" aria-label="Nearby market">
+          <button type="button" role="radio" data-market="private" aria-checked="true" class="on">🏢 Private</button>
+          <button type="button" role="radio" data-market="hdb" aria-checked="false">🏠 HDB</button>
+        </div>
         <p class="meta" id="nearby-sub"></p>
         <div id="nearby-list"></div>
       </section>
@@ -164,7 +171,7 @@
       </div>
       <div id="nearby-legend" hidden>
         <span><i class="pin origin"></i>This property</span>
-        <span><i class="pin near"></i>Nearby development</span>
+        <span><i class="pin near"></i><span id="nearby-legend-what">Nearby development</span></span>
         <span><i class="pin nodata"></i>No transactions in 12 mo</span>
       </div>
     </main>
@@ -172,6 +179,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-  <script src="map.js?v=3"></script>
+  <script src="map.js?v=4"></script>
 </body>
 </html>

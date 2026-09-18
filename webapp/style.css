@@ -428,6 +428,9 @@ body {
 #nearby-back:hover { background: #f0f4fb; }
 
 #nearby-view h2 { font-size: 1.05rem; margin: 10px 0 2px; }
+/* The market toggle sits between the heading and the count it changes, so
+   switching reads as "these are the ones now listed". */
+#nearby-market { margin: 8px 0 6px; }
 #nearby-view .meta { color: #5b6472; font-size: 0.82rem; margin: 0 0 8px; }
 
 .near-row {

@@ -597,18 +597,18 @@ class TestNearby(unittest.TestCase):
     ]
 
     def test_radius_filter_is_nearest_first_and_excludes_the_origin(self):
-        from api import nearby_developments
-        out = nearby_developments(self.DEVS, "origin", radius_m=1000)
+        from api import nearby_dots
+        out = nearby_dots(self.DEVS, "origin", radius_m=1000)
         names = [r["project"] for r in out["results"]]
         self.assertEqual(names, ["CLOSE", "MID"])       # FAR is beyond 1 km
         self.assertEqual(out["total"], 2)
-        self.assertEqual(out["origin"]["project"], "ORIGIN")
+        self.assertEqual(out["origin"]["name"], "ORIGIN")
         self.assertLess(out["results"][0]["distance_m"], out["results"][1]["distance_m"])
 
     def test_results_keep_the_full_dot_payload(self):
         """The popups are the explore popups — every field they read survives."""
-        from api import nearby_developments
-        row = nearby_developments(self.DEVS, "ORIGIN")["results"][0]
+        from api import nearby_dots
+        row = nearby_dots(self.DEVS, "ORIGIN")["results"][0]
         for key in ("street", "district", "avg_psf", "txns_12mo", "yield_pct",
                     "tenure", "mrt_m", "last_txn", "lat", "lng"):
             self.assertIn(key, row)
@@ -618,37 +618,121 @@ class TestNearby(unittest.TestCase):
         """nearby.nearby_for_project bounds candidates to the origin's own
         district; on a map that reads as a straight-line edge of missing dots
         (SANDY EIGHT: 171 developments within 1 km, only 86 in its district)."""
-        from api import nearby_developments
-        names = [r["project"] for r in nearby_developments(self.DEVS, "ORIGIN")["results"]]
+        from api import nearby_dots
+        names = [r["project"] for r in nearby_dots(self.DEVS, "ORIGIN")["results"]]
         self.assertIn("MID", names)   # D20 neighbour of a D19 origin
 
     def test_limit_caps_results_but_not_the_total(self):
-        from api import nearby_developments
-        out = nearby_developments(self.DEVS, "ORIGIN", limit=1)
+        from api import nearby_dots
+        out = nearby_dots(self.DEVS, "ORIGIN", limit=1)
         self.assertEqual(len(out["results"]), 1)
         self.assertEqual(out["total"], 2)
 
     def test_explicit_origin_coordinate_wins(self):
         """The frontend passes the pin it is showing (URA x/y, or an exact
         postal coordinate) so the ring is centred on what the user sees."""
-        from api import nearby_developments
-        out = nearby_developments(self.DEVS, "NOT IN THE LIST",
+        from api import nearby_dots
+        out = nearby_dots(self.DEVS, "NOT IN THE LIST",
                                   origin=(1.3600, 103.8700))
-        self.assertEqual(out["origin"]["project"], "NOT IN THE LIST")
+        self.assertEqual(out["origin"]["name"], "NOT IN THE LIST")
         # Exclusion is by name, so a dot at that exact spot under another name
         # is a genuine neighbour, not the origin repeated.
         self.assertEqual([r["project"] for r in out["results"]],
                          ["ORIGIN", "CLOSE", "MID"])
 
     def test_unknown_origin_without_coords_errors(self):
-        from api import nearby_developments
-        self.assertIn("error", nearby_developments(self.DEVS, "NOWHERE"))
+        from api import nearby_dots
+        self.assertIn("error", nearby_dots(self.DEVS, "NOWHERE"))
 
     def test_nearby_endpoint(self):
         with patch("api.developments_payload", return_value={"developments": self.DEVS}):
             data = client.get("/api/nearby", params={"q": "ORIGIN", "radius_m": 1000}).json()
         self.assertEqual([r["project"] for r in data["results"]], ["CLOSE", "MID"])
         self.assertEqual(data["radius_m"], 1000)
+
+
+class TestNearbyHDB(unittest.TestCase):
+    """The same radius filter over the HDB block layer.
+
+    One market per call — measured, not just tidy: an HDB block has 150-270
+    HDB blocks within 1 km against 3-36 private developments, so a merged
+    list would be 40 rows of one estate with private buried under it.
+    """
+
+    BLOCKS = [
+        {"block": "406", "street": "ANG MO KIO AVE 10", "town": "ANG MO KIO",
+         "lat": 1.3600, "lng": 103.8700, "avg_psf": 620, "med_price": 400000,
+         "txns_12mo": 5, "lease_years": 55.0, "flat_types": ["3 ROOM"],
+         "mrt_m": 300, "last_txn": "Jul 2026"},
+        {"block": "409", "street": "ANG MO KIO AVE 10", "town": "ANG MO KIO",
+         "lat": 1.3609, "lng": 103.8700, "avg_psf": 640, "med_price": 420000,
+         "txns_12mo": 2, "lease_years": 55.0, "flat_types": ["4 ROOM"],
+         "mrt_m": 400, "last_txn": "Jun 2026"},
+        # Same block number on a different street — identity is the pair, so
+        # this is a neighbour and not the origin repeated.
+        {"block": "406", "street": "BISHAN ST 22", "town": "BISHAN",
+         "lat": 1.3605, "lng": 103.8700, "avg_psf": None, "med_price": None,
+         "txns_12mo": 0, "lease_years": 60.0, "flat_types": ["5 ROOM"],
+         "mrt_m": None, "last_txn": None},
+        {"block": "999", "street": "FAR ST 1", "town": "FAR",
+         "lat": 1.3720, "lng": 103.8700, "avg_psf": 500, "med_price": 300000,
+         "txns_12mo": 1, "lease_years": 70.0, "flat_types": ["3 ROOM"],
+         "mrt_m": 800, "last_txn": "Jan 2026"},
+    ]
+
+    def test_a_block_is_identified_by_block_and_street(self):
+        from api import block_key, nearby_dots
+        out = nearby_dots(self.BLOCKS, "406 ANG MO KIO AVE 10", key_of=block_key)
+        got = [(r["block"], r["street"]) for r in out["results"]]
+        # 406 BISHAN ST 22 shares the block number and is still a neighbour;
+        # 999 FAR ST 1 is beyond 1 km.
+        self.assertEqual(got, [("406", "BISHAN ST 22"), ("409", "ANG MO KIO AVE 10")])
+
+    def test_results_keep_the_full_block_payload(self):
+        """The popups are the HDB explore popups — every field they read
+        survives, `distance_m` included."""
+        from api import block_key, nearby_dots
+        row = nearby_dots(self.BLOCKS, "406 ANG MO KIO AVE 10",
+                          key_of=block_key)["results"][0]
+        for key in ("block", "street", "town", "avg_psf", "med_price", "txns_12mo",
+                    "lease_years", "flat_types", "mrt_m", "last_txn", "lat", "lng"):
+            self.assertIn(key, row)
+        self.assertIn("distance_m", row)
+
+    def test_endpoint_serves_the_hdb_layer(self):
+        with patch("api.hdb_blocks_payload", return_value={"blocks": self.BLOCKS}):
+            data = client.get("/api/nearby", params={
+                "q": "406 ANG MO KIO AVE 10", "market": "hdb",
+                "lat": 1.3600, "lng": 103.8700}).json()
+        self.assertEqual(data["market"], "hdb")
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["results"][0]["block"], "406")
+
+    def test_endpoint_does_not_touch_the_other_market(self):
+        """Each call loads one layer. The private payload is a separate
+        multi-second build on a cold process; asking for HDB must not drag it
+        in, and vice versa."""
+        with patch("api.hdb_blocks_payload", return_value={"blocks": self.BLOCKS}) as hdb_p, \
+             patch("api.developments_payload") as priv_p:
+            client.get("/api/nearby", params={"q": "406 ANG MO KIO AVE 10",
+                                              "market": "hdb", "lat": 1.36, "lng": 103.87})
+            priv_p.assert_not_called()
+            hdb_p.assert_called_once()
+
+    def test_a_private_origin_can_search_hdb(self):
+        """Crossing markets: the origin is not in the list to be looked up, so
+        the coordinate has to carry the search — and nothing is excluded."""
+        with patch("api.hdb_blocks_payload", return_value={"blocks": self.BLOCKS}):
+            data = client.get("/api/nearby", params={
+                "q": "SOME CONDO", "market": "hdb",
+                "lat": 1.3600, "lng": 103.8700}).json()
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(data["results"][0]["distance_m"], 0)
+
+    def test_an_unknown_market_is_rejected(self):
+        self.assertEqual(
+            client.get("/api/nearby", params={"q": "X", "market": "landed"}).status_code,
+            422)
 
 
 class TestHDBPayloads(unittest.TestCase):

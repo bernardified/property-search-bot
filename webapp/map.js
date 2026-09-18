@@ -1108,12 +1108,18 @@ async function loadAmenities(d) {
   }
 }
 
-// ── Nearby developments ─────────────────────────────────────────────────────
+// ── Nearby developments and HDB blocks ──────────────────────────────────────
 //
-// A second view over the SAME dot payload the explore map uses: /api/nearby
-// returns explore rows (avg PSF, yield, tenure, nearest MRT, last txn) plus
-// distance_m, so a neighbour's popup reads exactly like its explore dot and
-// its "View details →" runs the normal search.
+// A second view over the SAME dot payloads the explore map uses: /api/nearby
+// returns explore rows plus distance_m, so a neighbour's popup reads exactly
+// like its explore dot and its "View details →" runs the normal search.
+//
+// One market at a time, toggled, as on the explore map — and here the reason
+// is measured as well as conceptual: an HDB block typically has 150-270 HDB
+// blocks within 1 km against 3-36 private developments (810A Choa Chu Kang
+// Ave 7: 210 and 5), so one merged list would be 40 rows of the same estate
+// with private buried under it. The default is the origin's own market, since
+// a block's comparables are the blocks around it.
 //
 // Entering the view never destroys the property view behind it: the property
 // and amenity pins stay in `markerLayer` (detached from the map, not cleared)
@@ -1127,10 +1133,46 @@ const NEAR_PIN_NODATA = "#b9b7b0";   // same "no value is structural" grey as ex
 const nearbyBtn = el("nearby-btn");
 const nearbyView = el("nearby-view");
 let nearbyLayer = null;         // origin pin + 1 km ring + neighbour pins
-let nearbyMarkers = new Map();  // PROJECT → marker, so a list row can open its popup
+let nearbyMarkers = new Map();  // row key → marker, so a list row can open its popup
 let nearbyOn = false;
+let nearbyMarket = "private";   // which market the ring is currently listing
+let nearbyOrigin = null;        // the point the ring is centred on, kept across switches
 let currentProperty = null;     // last successful /api/property payload
 let savedCamera = null;         // property-view centre/zoom, restored on back
+
+// Both markets' rows carry `distance_m` and both explore popups already render
+// it, so a neighbour reads the same here as it does on the explore map. What
+// differs is identity (a name against a block on a street), which the server
+// needs in its own terms to keep the origin out of its own results, and how a
+// row is worth summarising in a one-line list.
+const NEARBY_MARKETS = {
+  private: {
+    key: (d) => d.project,
+    originKey: (p) => p.development,
+    noun: (n) => `development${n === 1 ? "" : "s"}`,
+    legend: "Nearby development",
+    title: (d) => d.project,
+    meta: (d) => `D${parseInt(d.district, 10)} · ` + (d.avg_psf
+      ? `${fmtMoney(d.avg_psf)} psf`
+      : "<span class='muted'>no recent txn</span>"),
+    hint: (d) => districtLabel(d.district),
+  },
+  hdb: {
+    key: (d) => `${d.block} ${d.street}`,
+    // Identity in this market's own terms, so the origin is excluded from its
+    // own ring. Crossing markets it falls back to the display name, which by
+    // definition matches nothing here — and nothing needs excluding.
+    originKey: (p) => (p.market === "hdb" && p.block
+      ? `${p.block} ${p.street}` : p.development),
+    noun: (n) => `HDB block${n === 1 ? "" : "s"}`,
+    legend: "Nearby HDB block",
+    title: (d) => `${d.block} ${titleCase(d.street)}`,
+    meta: (d) => `${titleCase(d.town)} · ` + (d.avg_psf
+      ? `${fmtMoney(d.avg_psf)} psf`
+      : "<span class='muted'>no recent txn</span>"),
+    hint: (d) => (d.lease_years != null ? `${Math.round(d.lease_years)} yrs lease left` : ""),
+  },
+};
 
 // Teardrop pins (not dots) so neighbouring *developments* never read as
 // amenities: same silhouette as the property marker, different fill.
@@ -1156,22 +1198,50 @@ function clearNearbyLayer() {
   nearbyMarkers.clear();
 }
 
-nearbyBtn.addEventListener("click", enterNearby);
+nearbyBtn.addEventListener("click", () => enterNearby());
 el("nearby-back").addEventListener("click", () => exitNearby());
 
-async function enterNearby() {
+// Switching market re-runs the same ring on the other layer. The camera is
+// already where it should be and the origin has not moved, so only the pins
+// and the list are replaced — mirroring the explore map, which also keeps the
+// camera across a market switch.
+el("nearby-market").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-market]");
+  if (!b || b.dataset.market === nearbyMarket) return;
+  enterNearby(b.dataset.market);
+});
+
+function setNearbyMarketButtons(market) {
+  for (const b of el("nearby-market").querySelectorAll("button")) {
+    const on = b.dataset.market === market;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  }
+}
+
+async function enterNearby(market) {
   if (!currentProperty) return;
   const d = currentProperty;
+  // The origin's own market is the useful default — an HDB block's comparables
+  // are the blocks around it — and it is what makes the toggle a second view
+  // rather than the only way to see anything.
+  market = market || d.market || "private";
+  const spec = NEARBY_MARKETS[market];
+
   // Centre on the pin the user is actually looking at — for the street-geocode
-  // fallback that is the Google-snapped position, not the payload's guess.
-  const p = propertyMarker ? propertyMarker.getLatLng() : L.latLng(d.lat, d.lng);
+  // fallback that is the Google-snapped position, not the payload's guess. On
+  // a market switch the property marker is already detached, so the point the
+  // first entry settled on is reused rather than re-derived.
+  const p = nearbyOn && nearbyOrigin
+    ? nearbyOrigin
+    : propertyMarker ? propertyMarker.getLatLng() : L.latLng(d.lat, d.lng);
   if (p.lat == null) return;
 
   nearbyBtn.disabled = true;
-  setStatus("Finding developments within 1 km…");
+  setStatus(`Finding ${market === "hdb" ? "HDB blocks" : "developments"} within 1 km…`);
   try {
     const r = await fetch(
-      `/api/nearby?q=${encodeURIComponent(d.development)}` +
+      `/api/nearby?q=${encodeURIComponent(spec.originKey(d))}&market=${market}` +
       `&lat=${p.lat}&lng=${p.lng}&radius_m=${NEARBY_RADIUS_M}`
     );
     const data = await r.json();
@@ -1179,11 +1249,24 @@ async function enterNearby() {
       setStatus(data.error, true);
       return;
     }
+    // Everything below mutates the view, so a malformed response has to turn
+    // back here — a half-switched panel (new market on the toggle, old rows in
+    // the list) is worse than a plain error.
+    if (!r.ok || !Array.isArray(data.results)) {
+      setStatus("Nearby search failed — unexpected response from the server.", true);
+      return;
+    }
 
-    savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
-    clearSchoolRing();
-    map.removeLayer(markerLayer);      // property view kept intact, just detached
-    el("legend").hidden = true;
+    if (!nearbyOn) {
+      savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
+      clearSchoolRing();
+      map.removeLayer(markerLayer);    // property view kept intact, just detached
+      el("legend").hidden = true;
+    }
+    clearNearbyLayer();                // a switch replaces the pins, not the view
+    nearbyMarket = market;
+    nearbyOrigin = p;
+    setNearbyMarketButtons(market);
 
     nearbyLayer = L.layerGroup().addTo(map);
     // The ring makes "within 1 km" legible instead of implied, and its bounds
@@ -1209,24 +1292,30 @@ async function enterNearby() {
     for (const dev of data.results) {
       // No 12-month transaction → no PSF and no yield to show: greyed, the same
       // way explore treats a dot with no value (never a ramp colour).
-      const marker = L.marker([dev.lat, dev.lng], {
-        icon: teardrop(dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN),
-      })
+      // `limit` caps the pins at 40 on either market — an HDB ring holds
+      // 150-270 blocks where a private one holds 3-36, but only the listed
+      // rows are ever drawn, so the map carries the same weight either way.
+      const fill = dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN;
+      const marker = L.marker([dev.lat, dev.lng], { icon: teardrop(fill) })
         .addTo(nearbyLayer)
-        // Nearby rows are private developments whatever the origin was (an
-        // HDB block included), so they wear the private market's popup.
-        .bindPopup(MARKETS.private.popup(dev));
-      nearbyMarkers.set(dev.project, marker);
+        .bindPopup(MARKETS[market].popup(dev));
+      nearbyMarkers.set(spec.key(dev), marker);
     }
-    renderNearbyList(d, data);
+    renderNearbyList(d, data, spec);
+    el("nearby-legend-what").textContent = spec.legend;
     resultsBox.hidden = true;
     nearbyView.hidden = false;
     nearbyBtn.hidden = true;
     el("nearby-legend").hidden = false;
+    const entering = !nearbyOn;
     nearbyOn = true;
     setStatus("");
-    map.invalidateSize();   // the sidebar just changed height (mobile column)
-    map.fitBounds(ring.getBounds(), { padding: [30, 30] });
+    // Only the first entry reframes: a market switch happens under a camera
+    // the user has already placed, and yanking it back would undo their pan.
+    if (entering) {
+      map.invalidateSize();   // the sidebar just changed height (mobile column)
+      map.fitBounds(ring.getBounds(), { padding: [30, 30] });
+    }
   } catch (err) {
     setStatus("Nearby search failed: " + err.message, true);
   } finally {
@@ -1234,38 +1323,33 @@ async function enterNearby() {
   }
 }
 
-function renderNearbyList(d, data) {
+function renderNearbyList(d, data, spec) {
   const shown = data.results.length;
   el("nearby-back-name").textContent = d.development;
   el("nearby-title").textContent = "Within 1 km";
   el("nearby-sub").textContent = !shown
-    ? "No other developments within 1 km."
+    ? `No ${spec.noun(0)} within 1 km.`
     : shown < data.total
-      ? `${shown} nearest of ${data.total} developments within 1 km`
-      : `${shown} development${shown === 1 ? "" : "s"} within 1 km`;
+      ? `${shown} nearest of ${data.total} ${spec.noun(data.total)} within 1 km`
+      : `${shown} ${spec.noun(shown)} within 1 km`;
 
   el("nearby-list").innerHTML = data.results
-    .map((dev) => {
-      const psf = dev.avg_psf
-        ? `${fmtMoney(dev.avg_psf)} psf`
-        : "<span class='muted'>no recent txn</span>";
-      return (
-        `<button type="button" class="near-row" data-name="${esc(dev.project)}">` +
-        `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
-        `<span class="near-body"><span class="near-name">${esc(dev.project)}</span>` +
-        `<span class="near-meta" title="${esc(districtLabel(dev.district))}">` +
-        `D${parseInt(dev.district, 10)} · ${psf}</span></span></button>`
-      );
-    })
+    .map((dev) => (
+      `<button type="button" class="near-row" data-key="${esc(spec.key(dev))}">` +
+      `<span class="near-dist">${dev.distance_m.toLocaleString("en-SG")} m</span>` +
+      `<span class="near-body"><span class="near-name">${esc(spec.title(dev))}</span>` +
+      `<span class="near-meta" title="${esc(spec.hint(dev))}">${spec.meta(dev)}</span>` +
+      `</span></button>`
+    ))
     .join("");
 }
 
 // A row is a shortcut to its pin, not a new search — the popup it opens is the
-// same one the teardrop carries, "View details →" included.
+// same one the marker carries, "View details →" included.
 el("nearby-list").addEventListener("click", (e) => {
   const row = e.target.closest(".near-row");
   if (!row) return;
-  const marker = nearbyMarkers.get(row.dataset.name);
+  const marker = nearbyMarkers.get(row.dataset.key);
   if (!marker) return;
   map.panTo(marker.getLatLng());
   marker.openPopup();
@@ -1278,6 +1362,7 @@ function exitNearby(restore = true) {
   nearbyView.hidden = true;
   el("nearby-legend").hidden = true;
   nearbyOn = false;
+  nearbyOrigin = null;
   if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);
   if (!restore) return;
   resultsBox.hidden = false;
@@ -1351,8 +1436,12 @@ const psfLine = (d) =>
     ? `${fmtMoney(d.avg_psf)} psf · ${d.txns_12mo} txn${d.txns_12mo === 1 ? "" : "s"}`
     : "<span class='muted'>none in last 12 mo</span>";
 const mrtLine = (d) => (d.mrt_m != null ? `${d.mrt_m.toLocaleString("en-SG")} m` : "–");
-const viewLink = (q) =>
-  `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(q)}">View details →</a></div>`;
+// The popup knows which market drew it, so the search it starts is routed
+// rather than re-guessed by looksLikeHdb — the same reason a picked
+// type-ahead row carries its market.
+const viewLink = (q, market) =>
+  `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(q)}" ` +
+  `data-market="${market}">View details →</a></div>`;
 
 const MARKETS = {
   private: {
@@ -1396,7 +1485,7 @@ const MARKETS = {
         line("Tenure", TENURE_LABELS[d.tenure] || "–") +
         line("Nearest MRT", mrtLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
-        viewLink(d.project)
+        viewLink(d.project, "private")
       );
     },
     matches(d) {
@@ -1447,7 +1536,7 @@ const MARKETS = {
         line("Flat types", (d.flat_types || []).map(flatLabel).join(", ") || "–") +
         line("Nearest MRT", mrtLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
-        viewLink(`${d.block} ${d.street}`)
+        viewLink(`${d.block} ${d.street}`, "hdb")
       );
     },
     matches(d) {
@@ -1790,7 +1879,7 @@ document.addEventListener("click", (e) => {
   const link = e.target.closest(".popup-view");
   if (!link) return;
   e.preventDefault();
-  runSearch(link.dataset.name);
+  runSearch(link.dataset.name, link.dataset.market);
 });
 
 el("access-date").textContent = new Date().toLocaleDateString("en-SG", {
