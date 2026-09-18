@@ -494,6 +494,12 @@ body {
 .check { display: flex !important; align-items: center; gap: 6px; cursor: pointer; }
 .check input { margin: 0; }
 
+/* The market switch is the panel's top-level control — everything below it
+   (metrics, filters, legend) is scoped to whichever side is showing — so it
+   carries more weight than the metric toggle and sits apart from it. */
+#market-toggle button { padding: 8px 4px; font-size: 0.82rem; }
+#market-toggle button.on { background: #1e2430; }
+
 .segmented { display: flex; border: 1px solid #d7dbe0; border-radius: 6px; overflow: hidden; }
 .segmented button {
   flex: 1;

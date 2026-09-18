@@ -1,14 +1,23 @@
-"""Persisted explore-map payload — the webapp's entire landing render.
+"""Persisted explore-map payloads — the webapp's map layers, pre-derived.
 
 `/api/developments` is *derived* data: ~31 MB of BSON pulled out of the URA
 transaction cache and decoded, to produce 550 KB of dots (80 KB deflated).
 Measured cold, that load is ~9 s — and since the explore map *is* the landing
 state, that 9 s was the landing page.
 
-So the derived payload is stored as one small document, keyed by the meta
-timestamps of the two caches it comes from. A hit is a single small read and
-the landing page never touches the transaction cache at all; the key changes
-only when a cache actually refreshes, which is exactly when the dots change.
+So each derived payload is stored as one small document, keyed by the meta
+timestamps of the caches it comes from. A hit is a single small read and the
+landing page never touches the transaction cache at all; the key changes only
+when a cache actually refreshes, which is exactly when the dots change.
+
+Two layers live here, one document each, because they are derived from
+different caches and refresh on different schedules:
+
+  developments  private dots, keyed (ura_ts, rental_ts)   — Tue/Fri + the 15th
+  hdb_blocks    HDB block dots, keyed (hdb_ts,)           — roughly monthly
+
+Keying them separately is the point: a URA refresh must not invalidate a
+payload built from HDB resale data, and vice versa.
 
 This store is a pure optimisation and never a source of truth: a miss, or a
 key that no longer matches, just means the caller rebuilds from the caches and
@@ -24,12 +33,14 @@ from bson.binary import Binary
 
 from cache.cache_ura import meta_timestamp as ura_meta_timestamp
 from cache.cache_rental import meta_timestamp as rental_meta_timestamp
+from cache.cache_hdb import meta_timestamp as hdb_meta_timestamp, is_cache_fresh as hdb_is_fresh
 from utils import get_mongo_db, is_ura_transactions_stale, is_rental_stale
 
 logger = logging.getLogger(__name__)
 
 COLLECTION = "explore_cache"
 DOC_ID = "developments"
+HDB_DOC_ID = "hdb_blocks"
 
 
 def source_key() -> tuple[float, float] | None:
@@ -48,46 +59,70 @@ def source_key() -> tuple[float, float] | None:
     return (ura, rental)
 
 
-def load() -> tuple[dict | None, tuple | None]:
+def hdb_source_key() -> tuple[float] | None:
+    """`(hdb_ts,)` for the HDB block layer, or None to force the slow path.
+
+    Same contract as `source_key()`, against the one cache that layer comes
+    from. `is_cache_fresh()` rather than a staleness check on the timestamp
+    alone, because a *partial* window carries a perfectly recent timestamp and
+    must not key a payload — the cache module already refuses to treat one as
+    fresh, and dots derived from it would inherit the same half-window.
+    """
+    ts = hdb_meta_timestamp()
+    if ts is None or not hdb_is_fresh():
+        return None
+    return (ts,)
+
+
+def load(doc_id: str = DOC_ID) -> tuple[dict | None, tuple | None]:
     """The stored payload and the key it was built for — `(None, None)` on a
-    miss. The caller compares that key against `source_key()`: equal means
-    current, different means a cache has refreshed underneath it."""
+    miss. The caller compares that key against the matching `*_source_key()`:
+    equal means current, different means a cache has refreshed underneath it.
+
+    A document written before keys were stored as a list reads back with key
+    None, which is a mismatch, not a miss: the payload is still served while
+    the caller rebuilds behind it.
+    """
     db = get_mongo_db()
     if db is None:
         return None, None
     try:
-        doc = db[COLLECTION].find_one({"_id": DOC_ID})
+        doc = db[COLLECTION].find_one({"_id": doc_id})
         if not doc or "blob" not in doc:
             return None, None
         payload = json.loads(zlib.decompress(bytes(doc["blob"])))
-        return payload, (doc.get("ura_ts"), doc.get("rental_ts"))
+        key = doc.get("key")
+        return payload, (tuple(key) if key else None)
     except Exception as e:
-        logger.error(f"[Explore Cache] Load failed: {e}")
+        logger.error(f"[Explore Cache] Load failed for {doc_id}: {e}")
         return None, None
 
 
-def save(payload: dict, key: tuple[float, float]) -> None:
+def save(payload: dict, key: tuple, doc_id: str = DOC_ID) -> None:
     """Store `payload` under `key`. Deflated because 550 KB of JSON is 80 KB
     of blob and the read is on the landing page's critical path; a failure
-    here only costs the next process a rebuild, so it never propagates."""
+    here only costs the next process a rebuild, so it never propagates.
+
+    The key is stored as a plain list so one shape serves both layers — the
+    private one is two timestamps and the HDB one is a single timestamp.
+    """
     db = get_mongo_db()
     if db is None:
         return
     try:
         blob = zlib.compress(json.dumps(payload, separators=(",", ":")).encode(), 6)
         db[COLLECTION].replace_one(
-            {"_id": DOC_ID},
+            {"_id": doc_id},
             {
-                "_id": DOC_ID,
-                "ura_ts": key[0],
-                "rental_ts": key[1],
+                "_id": doc_id,
+                "key": list(key),
                 "count": payload.get("count", 0),
                 "built_at": time.time(),
                 "blob": Binary(blob),
             },
             upsert=True,
         )
-        logger.info(f"[Explore Cache] Saved {payload.get('count', 0)} dots "
+        logger.info(f"[Explore Cache] Saved {payload.get('count', 0)} {doc_id} "
                     f"({len(blob) // 1024} KB)")
     except Exception as e:
-        logger.error(f"[Explore Cache] Save failed: {e}")
+        logger.error(f"[Explore Cache] Save failed for {doc_id}: {e}")

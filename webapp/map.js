@@ -120,8 +120,9 @@ form.addEventListener("submit", (e) => {
 
 // ── Market routing ───────────────────────────────────────────────────────────
 //
-// One search box serves both markets — there is no market toggle. A 6-digit
-// postal code is decided server-side (/api/property owns that call, against the
+// One search box serves both markets — the explore map's Private/HDB toggle
+// does not steer it, and typing a block while the private layer is up still
+// finds the block. A 6-digit postal code is decided server-side (/api/property owns that call, against the
 // authoritative HDB block dataset). Free text is decided here, against the list
 // of real HDB street names from /api/hdb/streets.
 //
@@ -255,8 +256,11 @@ function renderCandidates(candidates) {
 // ── Type-ahead suggestions ───────────────────────────────────────────────────
 //
 // Purely client-side: /api/developments has already put every dot's project +
-// street in `allDots` (explore is the landing state), so matching is a scan
-// over ~2.4k short strings — no endpoint, no request, no debounce. It follows
+// street in the private market's dot list (explore is the landing state), so
+// matching is a scan over ~2.4k short strings — no endpoint, no request, no
+// debounce. Private only, on purpose: it is loaded whichever market is on the
+// map, while the 9.6k HDB blocks are not, and a block number is not a name to
+// complete. It follows
 // that suggestions cover exactly the *mappable* developments: a project URA
 // can search but has no coordinate never got a dot, so it never appears here.
 // Typing its name in full still works, and the server's fuzzy "Did you mean"
@@ -275,7 +279,7 @@ function matchDevelopments(q) {
   const needle = q.trim().toUpperCase();
   if (needle.length < SUGGEST_MIN_CHARS) return [];
   const starts = [], contains = [], streets = [];
-  for (const { dev } of allDots) {
+  for (const { dev } of MARKETS.private.dots) {
     const i = dev.project.toUpperCase().indexOf(needle);
     if (i === 0) starts.push(dev);
     else if (i > 0) contains.push(dev);
@@ -1130,7 +1134,9 @@ async function enterNearby() {
         icon: teardrop(dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN),
       })
         .addTo(nearbyLayer)
-        .bindPopup(popupHtml(dev));
+        // Nearby rows are private developments whatever the origin was (an
+        // HDB block included), so they wear the private market's popup.
+        .bindPopup(MARKETS.private.popup(dev));
       nearbyMarkers.set(dev.project, marker);
     }
     renderNearbyList(d, data);
@@ -1204,50 +1210,52 @@ function exitNearby(restore = true) {
 
 // ── Explore mode: every development, clustered, coloured + filtered ────────
 //
+// TWO markets, one at a time. Private developments and HDB blocks are never
+// plotted together: a cluster bubble averaging a condo's PSF with a flat's
+// says nothing about either, and the two have almost no attributes in common
+// (tenure and yield against lease decay and flat type). So each market owns
+// its dots, its cluster layer, its colour metrics and its filters, and the
+// toggle swaps which one is on the map.
+//
 // Colour is a SEQUENTIAL encoding: one hue per metric, light→dark, binned into
-// quintiles. Steps are re-stepped off the reference blue/orange ramps for the
-// OneMap tile surface (#eeece6) rather than a near-white chart surface — the
-// lightest reference steps sat under the 2:1 floor against real tiles.
-// Bin edges are computed ONCE from the full dataset, so filtering never
-// repaints the dots that survive.
+// quintiles. Steps are re-stepped off the reference ramps for the OneMap tile
+// surface (#eeece6) rather than a near-white chart surface — the lightest
+// reference steps sat under the 2:1 floor against real tiles.
+// Bin edges are computed ONCE per market from its full dataset, so filtering
+// never repaints the dots that survive. They are per market as well as per
+// metric because the same metric spans different worlds: private PSF runs to
+// S$4k and HDB PSF tops out near S$1.4k, so one shared scale would paint
+// every flat with the lightest step.
 
-const EXPLORE_METRICS = {
-  psf: {
-    field: "avg_psf",
-    label: "12-mo avg PSF",
-    ramp: ["#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"],
-    fmt: (v) => "S$" + Math.round(v).toLocaleString("en-SG"),
-    empty: "no transactions in the last 12 months",
-    bins: null,
-  },
-  yield: {
-    field: "yield_pct",
-    label: "Gross yield",
-    ramp: ["#ee7d45", "#e35f26", "#c44e1f", "#a03f14", "#7a2f0c"],
-    fmt: (v) => v.toFixed(2) + "%",
-    empty: "not enough recent leases to compute a yield",
-    bins: null,
-  },
-};
+const RAMP_BLUE = ["#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+const RAMP_ORANGE = ["#ee7d45", "#e35f26", "#c44e1f", "#a03f14", "#7a2f0c"];
+const RAMP_TEAL = ["#5cb3a6", "#2f9d8d", "#1f7d70", "#165d54", "#0d3d38"];
 const NO_DATA = "#b9b7b0";          // dots with no value for the active metric
 const CLUSTER_INK = ["#0b0b0b", "#0b0b0b", "#fff", "#fff", "#fff"];  // >=4.18:1 on every step
 
-const backBtn = el("back-to-explore");
-const panel = el("explore-panel");
-let clusterLayer = null;      // rebuilt on filter change
-let allDots = [];             // {dev, marker} built once from /api/developments
-let metric = EXPLORE_METRICS.psf;
-let exploreOn = false;
-let districtSel = new Set();
-let tenureSel = new Set();
+const psfFmt = (v) => "S$" + Math.round(v).toLocaleString("en-SG");
+
+// A metric is created per market, never shared, because `bins` belongs to a
+// dataset rather than to a metric.
+const metricDef = (field, label, ramp, fmt, empty) =>
+  ({ field, label, ramp, fmt, empty, bins: null });
+
+const FLAT_SHORT = {
+  "1 ROOM": "1-rm", "2 ROOM": "2-rm", "3 ROOM": "3-rm", "4 ROOM": "4-rm",
+  "5 ROOM": "5-rm", "EXECUTIVE": "Exec", "MULTI-GENERATION": "Multi-gen",
+};
+const flatLabel = (t) => FLAT_SHORT[t] || t;
+
+const TENURE_LABELS = {
+  freehold: "Freehold",
+  999: "999-year lease",
+  99: "99-year lease",
+  other: "Other lease term",
+};
+
 // District -> estate names, from /api/developments (district_search.py is the
 // single source of truth; the dots only ever carry the number).
 let districtNames = {};
-// The dot list loads unprompted at boot and the search box is live throughout,
-// so a search can land mid-flight. This says who owns the screen when it does.
-let searchActive = false;
-
-const dotValue = (dev) => dev[metric.field];
 
 // A district number tells a local nothing on its own, so every place one is
 // shown gets its estate names: "D19 · Hougang / Serangoon / Punggol".
@@ -1258,12 +1266,139 @@ const districtLabel = (code) => {
   return towns ? `D${n} · ${towns}` : `D${n}`;
 };
 
-const TENURE_LABELS = {
-  freehold: "Freehold",
-  999: "999-year lease",
-  99: "99-year lease",
-  other: "Other lease term",
+const line = (label, val) => `<div class="popup-line">${label}: ${val}</div>`;
+const psfLine = (d) =>
+  d.avg_psf
+    ? `${fmtMoney(d.avg_psf)} psf · ${d.txns_12mo} txn${d.txns_12mo === 1 ? "" : "s"}`
+    : "<span class='muted'>none in last 12 mo</span>";
+const mrtLine = (d) => (d.mrt_m != null ? `${d.mrt_m.toLocaleString("en-SG")} m` : "–");
+const viewLink = (q) =>
+  `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(q)}">View details →</a></div>`;
+
+const MARKETS = {
+  private: {
+    id: "private",
+    endpoint: "/api/developments",
+    rowsKey: "developments",
+    backLabel: "← All developments",
+    hint: "Click a dot (or cluster) for details.",
+    loadingHint: "Loading all developments…",
+    panelIds: ["f-private"],
+    metrics: {
+      psf: metricDef("avg_psf", "12-mo avg PSF", RAMP_BLUE, psfFmt,
+                     "no transactions in the last 12 months"),
+      yield: metricDef("yield_pct", "Gross yield", RAMP_ORANGE,
+                       (v) => v.toFixed(2) + "%",
+                       "not enough recent leases to compute a yield"),
+    },
+    metricLabels: { psf: "Avg PSF", yield: "Gross yield" },
+    sel: { district: new Set(), tenure: new Set() },
+    dots: [],
+    layer: null,
+    metric: null,
+    onLoad(payload) {
+      districtNames = payload.districts || {};
+      buildChips("f-districts", [...new Set(this.dots.map((d) => d.dev.district).filter(Boolean))]
+        .sort((a, b) => parseInt(a, 10) - parseInt(b, 10)), (d) => ({
+          key: d,
+          html: `<span class="chip-code">D${parseInt(d, 10)}</span>` +
+                (districtNames[d] ? ` · ${esc(districtNames[d])}` : ""),
+        }), "district");
+    },
+    popup(d) {
+      return (
+        `<div class="popup-name">${esc(d.project)}</div>` +
+        `<div class="popup-line">${esc(d.street)}</div>` +
+        `<div class="popup-line">${esc(districtLabel(d.district))}</div>` +
+        (d.distance_m != null
+          ? line("Distance", `${d.distance_m.toLocaleString("en-SG")} m away`) : "") +
+        line("12-mo avg", psfLine(d)) +
+        line("Gross yield", d.yield_pct ? d.yield_pct.toFixed(2) + "%" : "<span class='muted'>–</span>") +
+        line("Tenure", TENURE_LABELS[d.tenure] || "–") +
+        line("Nearest MRT", mrtLine(d)) +
+        line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
+        viewLink(d.project)
+      );
+    },
+    matches(d) {
+      if (this.sel.tenure.size && !this.sel.tenure.has(d.tenure)) return false;
+      if (this.sel.district.size && !this.sel.district.has(d.district)) return false;
+      return true;
+    },
+  },
+
+  hdb: {
+    id: "hdb",
+    endpoint: "/api/hdb/blocks",
+    rowsKey: "blocks",
+    backLabel: "← All HDB blocks",
+    hint: "Click a block (or cluster) for details.",
+    loadingHint: "Loading every HDB block…",
+    panelIds: ["f-hdb"],
+    metrics: {
+      psf: metricDef("avg_psf", "12-mo avg PSF", RAMP_BLUE, psfFmt,
+                     "no resale transactions in the last 12 months"),
+      // The signal private has no analogue for. 100% coverage — every block
+      // in the window carries a lease reading — so this metric never greys
+      // a dot out, which is also why it is worth offering.
+      lease: metricDef("lease_years", "Remaining lease", RAMP_TEAL,
+                       (v) => Math.round(v) + " yrs", "lease unknown"),
+    },
+    metricLabels: { psf: "Avg PSF", lease: "Remaining lease" },
+    sel: { town: new Set(), flat: new Set() },
+    dots: [],
+    layer: null,
+    metric: null,
+    onLoad(payload) {
+      buildChips("f-towns", [...new Set(this.dots.map((d) => d.dev.town).filter(Boolean))].sort(),
+                 (t) => ({ key: t, html: esc(titleCase(t)) }), "town");
+      const present = new Set(this.dots.flatMap((d) => d.dev.flat_types || []));
+      buildChips("f-flats", (payload.flat_types || []).filter((t) => present.has(t)),
+                 (t) => ({ key: t, html: esc(flatLabel(t)) }), "flat");
+    },
+    popup(d) {
+      return (
+        `<div class="popup-name">${esc(d.block)} ${esc(titleCase(d.street))}</div>` +
+        `<div class="popup-line">${esc(titleCase(d.town))}</div>` +
+        (d.distance_m != null
+          ? line("Distance", `${d.distance_m.toLocaleString("en-SG")} m away`) : "") +
+        line("12-mo avg", psfLine(d)) +
+        line("12-mo median", d.med_price ? fmtMoney(d.med_price) : "<span class='muted'>–</span>") +
+        line("Remaining lease", d.lease_years != null ? `${Math.round(d.lease_years)} yrs` : "–") +
+        line("Flat types", (d.flat_types || []).map(flatLabel).join(", ") || "–") +
+        line("Nearest MRT", mrtLine(d)) +
+        line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
+        viewLink(`${d.block} ${d.street}`)
+      );
+    },
+    matches(d) {
+      if (this.sel.town.size && !this.sel.town.has(d.town)) return false;
+      if (this.sel.flat.size && !(d.flat_types || []).some((t) => this.sel.flat.has(t)))
+        return false;
+      const minLease = parseInt(el("f-lease").value, 10);
+      if (minLease && (d.lease_years == null || d.lease_years < minLease)) return false;
+      return true;
+    },
+  },
 };
+
+for (const m of Object.values(MARKETS)) m.metric = m.metrics.psf;
+
+let market = MARKETS.private;   // the landing market
+let exploreOn = false;
+// The dot list loads unprompted at boot and the search box is live throughout,
+// so a search can land mid-flight. This says who owns the screen when it does.
+let searchActive = false;
+
+const backBtn = el("back-to-explore");
+const panel = el("explore-panel");
+
+// HDB streets are stored shouting ("BISHAN ST 22"); a map full of capitals is
+// a wall, so they are cased for display only — never for matching.
+const titleCase = (s) =>
+  String(s || "").toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+
+const dotValue = (dev) => dev[market.metric.field];
 
 function computeBins(devs, m) {
   const vals = devs.map((d) => d[m.field]).filter((v) => v != null).sort((a, b) => a - b);
@@ -1280,34 +1415,13 @@ function binOf(v, m) {
 const colorOf = (v, m) => (v == null ? NO_DATA : m.ramp[binOf(v, m)]);
 
 // Dots with no value are structurally different, not just another ramp step:
-// smaller, grey, semi-transparent. 35% of developments have no recent
+// smaller, grey, semi-transparent. A third of developments have no recent
 // transaction, and colouring them like a real value would invent one.
 function dotStyle(dev) {
   const v = dotValue(dev);
   return v == null
     ? { radius: 4, color: "#fff", weight: 1, fillColor: NO_DATA, fillOpacity: 0.55 }
-    : { radius: 6.5, color: "#fff", weight: 2, fillColor: colorOf(v, metric), fillOpacity: 0.95 };
-}
-
-function popupHtml(dev) {
-  const line = (label, val) => `<div class="popup-line">${label}: ${val}</div>`;
-  const psf = dev.avg_psf
-    ? `${fmtMoney(dev.avg_psf)} psf · ${dev.txns_12mo} txn${dev.txns_12mo === 1 ? "" : "s"}`
-    : "<span class='muted'>none in last 12 mo</span>";
-  const yld = dev.yield_pct ? dev.yield_pct.toFixed(2) + "%" : "<span class='muted'>–</span>";
-  return (
-    `<div class="popup-name">${esc(dev.project)}</div>` +
-    `<div class="popup-line">${esc(dev.street)}</div>` +
-    `<div class="popup-line">${esc(districtLabel(dev.district))}</div>` +
-    (dev.distance_m != null
-      ? line("Distance", `${dev.distance_m.toLocaleString("en-SG")} m away`) : "") +
-    line("12-mo avg", psf) +
-    line("Gross yield", yld) +
-    line("Tenure", TENURE_LABELS[dev.tenure] || "–") +
-    line("Nearest MRT", dev.mrt_m != null ? `${dev.mrt_m.toLocaleString("en-SG")} m` : "–") +
-    line("Last transaction", dev.last_txn ? esc(dev.last_txn) : "–") +
-    `<div class="popup-line"><a href="#" class="popup-view" data-name="${esc(dev.project)}">View details →</a></div>`
-  );
+    : { radius: 6.5, color: "#fff", weight: 2, fillColor: colorOf(v, market.metric), fillOpacity: 0.95 };
 }
 
 // Clusters carry the mean of their children — without this the colour encoding
@@ -1318,12 +1432,12 @@ function clusterIcon(cluster) {
   const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
   const n = cluster.getChildCount();
   const size = n < 20 ? 32 : n < 100 ? 40 : 48;
-  const ink = mean == null ? "#0b0b0b" : CLUSTER_INK[binOf(mean, metric)];
+  const ink = mean == null ? "#0b0b0b" : CLUSTER_INK[binOf(mean, market.metric)];
   return L.divIcon({
     className: "cluster-wrap",
     iconSize: [size, size],
     html:
-      `<div class="cluster" style="background:${colorOf(mean, metric)};color:${ink};` +
+      `<div class="cluster" style="background:${colorOf(mean, market.metric)};color:${ink};` +
       `width:${size}px;height:${size}px;line-height:${size}px">${n}</div>`,
   });
 }
@@ -1338,6 +1452,10 @@ function newClusterLayer() {
 }
 
 // ── Filters (all client-side — the full list is already in the browser) ──────
+//
+// Three of them mean the same thing in both markets (a recent transaction, a
+// walk to the MRT, a price per square foot) and are read here; everything else
+// is market-specific and lives in that market's own `matches`.
 
 function readFilters() {
   const num = (id) => {
@@ -1347,33 +1465,29 @@ function readFilters() {
   return {
     activeOnly: el("f-active").checked,
     mrt: parseInt(el("f-mrt").value, 10) || null,
-    tenure: tenureSel,
     psfMin: num("f-psf-min"),
     psfMax: num("f-psf-max"),
-    districts: districtSel,
   };
 }
 
 function matches(dev, f) {
   if (f.activeOnly && !dev.txns_12mo) return false;
   if (f.mrt && (dev.mrt_m == null || dev.mrt_m > f.mrt)) return false;
-  if (f.tenure.size && !f.tenure.has(dev.tenure)) return false;
   if (f.psfMin != null && (dev.avg_psf == null || dev.avg_psf < f.psfMin)) return false;
   if (f.psfMax != null && (dev.avg_psf == null || dev.avg_psf > f.psfMax)) return false;
-  if (f.districts.size && !f.districts.has(dev.district)) return false;
-  return true;
+  return market.matches(dev);
 }
 
 function applyFilters() {
-  if (!clusterLayer) return;
+  if (!market.layer) return;
   const f = readFilters();
-  const keep = allDots.filter((d) => matches(d.dev, f));
-  clusterLayer.clearLayers();
-  clusterLayer.addLayers(keep.map((d) => d.marker));   // bulk add: one reflow
+  const keep = market.dots.filter((d) => matches(d.dev, f));
+  market.layer.clearLayers();
+  market.layer.addLayers(keep.map((d) => d.marker));   // bulk add: one reflow
   // A blank map is never left unexplained — without this, over-narrow filters
   // look identical to a broken layer. The message sits on the filter row
   // itself, beside the Reset button: the status box is below the fold here.
-  const total = allDots.length.toLocaleString("en-SG");
+  const total = market.dots.length.toLocaleString("en-SG");
   el("filter-count").textContent = keep.length
     ? `${keep.length.toLocaleString("en-SG")} of ${total} shown`
     : `No matches — widen filters, or tap`;
@@ -1381,31 +1495,44 @@ function applyFilters() {
 }
 
 function renderLegend() {
-  const edges = metric.bins;
+  const m = market.metric;
+  const edges = m.bins;
   const swatch = (c, text) => `<span class="lg"><i style="background:${c}"></i>${text}</span>`;
-  const cells = metric.ramp.map((c, i) => {
+  const cells = m.ramp.map((c, i) => {
     const lo = i === 0 ? null : edges[i - 1];
-    const hi = i === metric.ramp.length - 1 ? null : edges[i];
+    const hi = i === m.ramp.length - 1 ? null : edges[i];
     const text =
-      lo == null ? `< ${metric.fmt(hi)}`
-      : hi == null ? `${metric.fmt(lo)} +`
-      : `${metric.fmt(lo)}–${metric.fmt(hi)}`;
+      lo == null ? `< ${m.fmt(hi)}`
+      : hi == null ? `${m.fmt(lo)} +`
+      : `${m.fmt(lo)}–${m.fmt(hi)}`;
     return swatch(c, text);
   });
+  const anyMissing = market.dots.some(({ dev }) => dev[m.field] == null);
   el("ramp-legend").innerHTML =
-    `<div class="lg-title">${metric.label}</div>` +
-    cells.join("") + swatch(NO_DATA, "no data");
+    `<div class="lg-title">${m.label}</div>` +
+    cells.join("") + (anyMissing ? swatch(NO_DATA, "no data") : "");
+}
+
+// The metric buttons are built from the active market's own metrics: the two
+// markets answer different questions (yield against lease decay), so the
+// toggle is not a fixed pair of buttons.
+function renderMetricToggle() {
+  el("metric-toggle").innerHTML = Object.keys(market.metrics)
+    .map((name) => {
+      const on = market.metric === market.metrics[name];
+      return `<button type="button" role="radio" data-metric="${name}" ` +
+             `aria-checked="${on}" class="${on ? "on" : ""}">` +
+             `${esc(market.metricLabels[name])}</button>`;
+    })
+    .join("");
 }
 
 function setMetric(name) {
-  metric = EXPLORE_METRICS[name];
-  for (const b of el("metric-toggle").querySelectorAll("button")) {
-    const on = b.dataset.metric === name;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-checked", String(on));
-  }
-  for (const { dev, marker } of allDots) marker.setStyle(dotStyle(dev));
-  if (clusterLayer) clusterLayer.refreshClusters();   // recolour cluster icons
+  if (!market.metrics[name]) return;
+  market.metric = market.metrics[name];
+  renderMetricToggle();
+  for (const { dev, marker } of market.dots) marker.setStyle(dotStyle(dev));
+  if (market.layer) market.layer.refreshClusters();   // recolour cluster icons
   renderLegend();
 }
 
@@ -1414,7 +1541,7 @@ function setMetric(name) {
 // match nothing — blanking the map. Offer the filter only when it can work.
 function syncMrtAvailability() {
   const sel = el("f-mrt");
-  const usable = allDots.some((d) => d.dev.mrt_m != null);
+  const usable = market.dots.some((d) => d.dev.mrt_m != null);
   sel.disabled = !usable;
   if (!usable) {
     sel.value = "";
@@ -1423,16 +1550,14 @@ function syncMrtAvailability() {
   el("mrt-label").classList.toggle("disabled", !usable);
 }
 
-function buildDistrictChips() {
-  const seen = [...new Set(allDots.map((d) => d.dev.district).filter(Boolean))]
-    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
-  el("f-districts").innerHTML = seen
-    .map((d) => {
-      const towns = districtNames[d] || "";
-      return `<button type="button" class="chip" data-district="${esc(d)}">` +
-        `<span class="chip-code">D${parseInt(d, 10)}</span>` +
-        (towns ? ` · ${esc(towns)}` : "") +
-        `</button>`;
+// One chip cloud builder for districts, towns and flat types: same markup,
+// same click handling, different keys.
+function buildChips(containerId, values, render, group) {
+  el(containerId).innerHTML = values
+    .map((v) => {
+      const { key, html } = render(v);
+      return `<button type="button" class="chip" data-group="${group}" ` +
+             `data-key="${esc(key)}">${html}</button>`;
     })
     .join("");
 }
@@ -1441,40 +1566,44 @@ function buildDistrictChips() {
 
 backBtn.addEventListener("click", () => enterExplore());
 
-// Build the dot layer once. Split out from enterExplore so the boot load and a
-// later return from a search share it — the second one has nothing to fetch.
-async function loadDevelopments() {
-  if (allDots.length) return;
-  const r = await fetch("/api/developments");
-  const payload = await r.json();
-  const devs = payload.developments || [];
-  districtNames = payload.districts || {};
-  for (const m of Object.values(EXPLORE_METRICS)) m.bins = computeBins(devs, m);
-  allDots = devs.map((dev) => {
-    const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev)).bindPopup(popupHtml(dev));
+// Build a market's dot layer once. Split out from enterExplore so the boot
+// load, a market switch and a later return from a search all share it — only
+// the first of those has anything to fetch.
+async function loadMarket(mk) {
+  if (mk.dots.length) return;
+  const payload = await (await fetch(mk.endpoint)).json();
+  const rows = payload[mk.rowsKey] || [];
+  for (const m of Object.values(mk.metrics)) m.bins = computeBins(rows, m);
+  mk.dots = rows.map((dev) => {
+    const marker = L.circleMarker([dev.lat, dev.lng], dotStyle(dev));
     marker.dev = dev;          // clusters read this to average their children
+    marker.bindPopup(() => mk.popup(dev));   // lazily: 9.6k popups is a lot of HTML
     return { dev, marker };
   });
-  buildDistrictChips();
-  syncMrtAvailability();
-  renderLegend();
+  mk.onLoad(payload);
 }
 
-async function enterExplore() {
+async function enterExplore(target = market) {
   searchActive = false;
+  const switching = target !== market;
+  market = target;
   backBtn.hidden = true;
-  setStatus("Loading all developments…");
+  syncMarketToggle();
+  setStatus(market.loadingHint);
   try {
-    await loadDevelopments();
-    // ~2.4k developments take a moment and the search box works the whole
-    // time, so a result can already be on screen by now. It wins: the dots
-    // are built and waiting, but showing them here would wipe the panel and
-    // yank the camera back to the middle of Singapore under the user.
+    await loadMarket(market);
+    // The dot lists take a moment and the search box works the whole time, so
+    // a result can already be on screen by now. It wins: the dots are built
+    // and waiting, but showing them here would wipe the panel and yank the
+    // camera back to the middle of Singapore under the user.
     if (searchActive) {
       setStatus("");
       return;
     }
-    if (!clusterLayer) clusterLayer = newClusterLayer();
+    if (!market.layer) market.layer = newClusterLayer();
+    for (const other of Object.values(MARKETS)) {
+      if (other !== market && other.layer) map.removeLayer(other.layer);
+    }
     if (nearbyOn) exitNearby(false);
     closeBandDetail();
     destroyCharts();
@@ -1485,65 +1614,94 @@ async function enterExplore() {
     currentProperty = null;
     nearbyBtn.hidden = true;
     panel.hidden = false;
-    map.addLayer(clusterLayer);
+    syncFilterPanels();
+    renderMetricToggle();
+    renderLegend();
+    syncMrtAvailability();
+    map.addLayer(market.layer);
     applyFilters();
-    map.setView(SG_CENTER, 12);
+    // A market switch keeps the camera: the user has usually zoomed somewhere
+    // they care about, and both layers cover the same island.
+    if (!switching || !exploreOn) map.setView(SG_CENTER, 12);
     exploreOn = true;
-    setStatus("Click a dot (or cluster) for details.");
+    setStatus(market.hint);
   } catch (err) {
     // Search still works without the dot layer, so say what broke and stop
     // short of implying the whole app is down.
-    setStatus("The development map failed to load: " + err.message +
+    setStatus("The map failed to load: " + err.message +
               "\nSearch by name or postal code still works.", true);
   }
 }
 
 function exitExplore(clearStatus = false) {
-  if (clusterLayer) map.removeLayer(clusterLayer);
+  if (market.layer) map.removeLayer(market.layer);
   panel.hidden = true;
   exploreOn = false;
   if (clearStatus) setStatus("");
 }
 
+function syncMarketToggle() {
+  for (const b of el("market-toggle").querySelectorAll("button")) {
+    const on = b.dataset.market === market.id;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  }
+  backBtn.textContent = market.backLabel;
+}
+
+// Show the active market's own filters and hide the other's. The shared ones
+// (recent transaction, MRT, PSF) are outside both groups and keep their
+// values across a switch — they mean the same thing on either side.
+function syncFilterPanels() {
+  for (const mk of Object.values(MARKETS)) {
+    for (const id of mk.panelIds) el(id).hidden = mk !== market;
+  }
+}
+
 // ── Control wiring ──────────────────────────────────────────────────────────
+
+el("market-toggle").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-market]");
+  if (b && MARKETS[b.dataset.market] !== market) enterExplore(MARKETS[b.dataset.market]);
+});
 
 el("metric-toggle").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-metric]");
   if (b) setMetric(b.dataset.metric);
 });
 
-for (const id of ["f-active", "f-mrt", "f-psf-min", "f-psf-max"]) {
+for (const id of ["f-active", "f-mrt", "f-psf-min", "f-psf-max", "f-lease"]) {
   el(id).addEventListener("input", applyFilters);
 }
 
-// Tenure is multi-select for the same reason the buckets are split at all:
-// freehold and 999-year are separate categories, and wanting both is normal.
-el("f-tenure").addEventListener("click", (e) => {
+// Every chip cloud is multi-select for the same reason the buckets are split
+// at all: freehold and 999-year are separate categories, "4-room or 5-room" is
+// one normal thought, and wanting two towns is not two searches.
+panel.addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
   if (!chip) return;
-  const t = chip.dataset.tenure;
-  tenureSel.has(t) ? tenureSel.delete(t) : tenureSel.add(t);
-  chip.classList.toggle("on", tenureSel.has(t));
+  const set = market.sel[chip.dataset.group];
+  if (!set) return;
+  const key = chip.dataset.key;
+  set.has(key) ? set.delete(key) : set.add(key);
+  chip.classList.toggle("on", set.has(key));
   applyFilters();
 });
 
-el("f-districts").addEventListener("click", (e) => {
-  const chip = e.target.closest(".chip");
-  if (!chip) return;
-  const d = chip.dataset.district;
-  districtSel.has(d) ? districtSel.delete(d) : districtSel.add(d);
-  chip.classList.toggle("on", districtSel.has(d));
-  applyFilters();
-});
-
+// Reset clears the shared controls and the market on screen — never the one
+// behind it. Declassing every .chip in the panel also stripped the hidden
+// market's chips, whose Sets still held them, so its filter count and its
+// chips disagreed the next time it was shown.
 el("reset-filters").addEventListener("click", () => {
   el("f-active").checked = false;
   el("f-mrt").value = "";
   el("f-psf-min").value = "";
   el("f-psf-max").value = "";
-  districtSel = new Set();
-  tenureSel = new Set();
-  for (const c of panel.querySelectorAll(".chip")) c.classList.remove("on");
+  for (const set of Object.values(market.sel)) set.clear();
+  for (const id of market.panelIds) {
+    for (const c of el(id).querySelectorAll(".chip")) c.classList.remove("on");
+    for (const f of el(id).querySelectorAll("select, input")) f.value = "";
+  }
   applyFilters();
 });
 
@@ -1567,4 +1725,3 @@ loadHdbStreets();
 // Explore is the landing state — the map opens full of developments rather
 // than empty behind a button.
 enterExplore();
-
