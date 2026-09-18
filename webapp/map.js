@@ -139,7 +139,7 @@ form.addEventListener("submit", (e) => {
 // to be typed early.
 const HDB_BLOCK_RE = /^(\d+[a-z]?)\s+(\S.*)$/i;
 
-let hdbStreets = null;   // [{s: as stored, c: spelled out}] — see /api/hdb/streets
+let hdbStreets = null;   // [{s: as stored, c: spelled out, b: [blocks]}] — /api/hdb/streets
 let streetsReady = null; // the in-flight fetch, so a search can wait for it
 
 function loadHdbStreets() {
@@ -169,7 +169,10 @@ function looksLikeHdb(q) {
   });
 }
 
-async function runSearch(q) {
+// `market` is set only when the caller already knows it — a picked type-ahead
+// row, which was matched against one market's own list. Everything else is
+// routed below.
+async function runSearch(q, market) {
   if (!q) return;
   searchActive = true;
   backBtn.hidden = false;
@@ -194,10 +197,13 @@ async function runSearch(q) {
     if (streetsReady) await streetsReady;
 
     // Postal codes are market-agnostic and decided server-side; everything
-    // else is routed by the street list above.
-    const url = /^\d{6}$/.test(q) || !looksLikeHdb(q)
-      ? "/api/property?q=" + encodeURIComponent(q)
-      : "/api/hdb?q=" + encodeURIComponent(q);
+    // else is routed by the street list above, unless the caller already knew.
+    const hdb = /^\d{6}$/.test(q) ? false
+              : market ? market === "hdb"
+              : looksLikeHdb(q);
+    const url = hdb
+      ? "/api/hdb?q=" + encodeURIComponent(q)
+      : "/api/property?q=" + encodeURIComponent(q);
     const data = await (await fetch(url)).json();
 
     if (data.ambiguous) {
@@ -255,42 +261,109 @@ function renderCandidates(candidates) {
 
 // ── Type-ahead suggestions ───────────────────────────────────────────────────
 //
-// Purely client-side: /api/developments has already put every dot's project +
-// street in the private market's dot list (explore is the landing state), so
-// matching is a scan over ~2.4k short strings — no endpoint, no request, no
-// debounce. Private only, on purpose: it is loaded whichever market is on the
-// map, while the 9.6k HDB blocks are not, and a block number is not a name to
-// complete. It follows
-// that suggestions cover exactly the *mappable* developments: a project URA
-// can search but has no coordinate never got a dot, so it never appears here.
-// Typing its name in full still works, and the server's fuzzy "Did you mean"
-// still catches typos on submit — the dropdown is a shortcut, not the search.
+// Purely client-side, over two lists the browser already holds: the private
+// dot list from /api/developments (explore is the landing state) and the HDB
+// street+block table from /api/hdb/streets (fetched at boot for market
+// routing). So matching is a scan over short strings — no endpoint, no
+// request, no debounce.
+//
+// It follows that private suggestions cover exactly the *mappable*
+// developments: a project URA can search but has no coordinate never got a
+// dot, so it never appears here. Typing its name in full still works, and the
+// server's fuzzy "Did you mean" still catches typos on submit — the dropdown
+// is a shortcut, not the search.
+//
+// An HDB address is a block on a street, so completing only the street stops
+// one token short of the answer. Blocks are therefore listed once the query
+// names one ("406 ang mo"); a query with no block token suggests streets
+// alone, because "ANG MO KIO AVE 10" would otherwise unfold into its hundred
+// blocks. Picking either passes the market to runSearch, so a picked row is
+// never re-guessed by looksLikeHdb.
 
 const suggestBox = el("suggest");
 const SUGGEST_MAX = 8;
 const SUGGEST_MIN_CHARS = 2;
 
-let suggestions = [];    // the devs currently listed
+let suggestions = [];    // the rows currently listed
 let suggestIndex = -1;   // keyboard highlight; -1 = none, Enter submits the raw text
 
 // Name matches rank above street matches, and prefix above mid-word, so
 // "the s" leads with THE SAIL rather than a street three screens down.
-function matchDevelopments(q) {
-  const needle = q.trim().toUpperCase();
-  if (needle.length < SUGGEST_MIN_CHARS) return [];
+function matchDevelopments(needle) {
   const starts = [], contains = [], streets = [];
   for (const { dev } of MARKETS.private.dots) {
     const i = dev.project.toUpperCase().indexOf(needle);
-    if (i === 0) starts.push(dev);
-    else if (i > 0) contains.push(dev);
-    else if (String(dev.street || "").toUpperCase().includes(needle)) streets.push(dev);
+    const row = {
+      market: "private", query: dev.project,
+      title: dev.project, sub: dev.street, hl: needle, hlSub: needle,
+    };
+    if (i === 0) starts.push(row);
+    else if (i > 0) contains.push(row);
+    else if (String(dev.street || "").toUpperCase().includes(needle)) streets.push(row);
     if (starts.length >= SUGGEST_MAX) break;   // nothing later can outrank a full page of prefixes
   }
-  return starts.concat(contains, streets).slice(0, SUGGEST_MAX);
+  return { starts, contains, streets };
+}
+
+// A street matches when every token of the query appears in it — the same
+// rule looksLikeHdb routes by, so what the dropdown offers and what the box
+// would have routed to can never disagree.
+function streetMatches(tokens) {
+  if (!hdbStreets || !tokens.length) return [];
+  return hdbStreets.filter(({ s, c }) => {
+    const hay = s + " " + c;
+    return tokens.every((t) => hay.includes(t));
+  });
+}
+
+function hdbRow(street, block) {
+  const name = titleCase(street.s);
+  // The expanded spelling is worth a second line only where it differs —
+  // "ADMIRALTY LINK" expands to itself, and repeating it says nothing.
+  const expanded = street.c !== street.s ? titleCase(street.c) : "";
+  return block
+    ? { market: "hdb", query: `${block} ${street.s}`, title: `${block} ${name}`,
+        sub: expanded || "HDB block", hl: block }
+    : { market: "hdb", query: street.s, title: name,
+        sub: expanded || "HDB street", hl: "" };
+}
+
+function matchHdb(needle) {
+  const blockMatch = needle.match(HDB_BLOCK_RE);
+  const streetPart = (blockMatch ? blockMatch[2] : needle).trim();
+  const matched = streetMatches(streetPart.split(/\s+/).filter(Boolean));
+
+  if (!blockMatch) return { blocks: [], streets: matched.map((s) => hdbRow(s, null)) };
+
+  // A typed block number is a prefix over that street's blocks, so "40" finds
+  // 406 and 40 alike, and "406a" finds only 406A.
+  const blocks = [];
+  for (const street of matched) {
+    for (const b of street.b) {
+      if (b.startsWith(blockMatch[1])) blocks.push(hdbRow(street, b));
+      if (blocks.length >= SUGGEST_MAX) return { blocks, streets: [] };
+    }
+  }
+  // The streets themselves stay out: the query named a block, and a street
+  // that has no such block is not what was asked for.
+  return { blocks, streets: [] };
+}
+
+// A name match ranks above anything matched only by a street, and among the
+// street-matched rows a block is more specific than the street it sits on.
+function matchSuggestions(q) {
+  const needle = q.trim().toUpperCase();
+  if (needle.length < SUGGEST_MIN_CHARS) return [];
+  const p = matchDevelopments(needle);
+  const h = matchHdb(needle);
+  return p.starts
+    .concat(p.contains, h.blocks, h.streets, p.streets)
+    .slice(0, SUGGEST_MAX);
 }
 
 function highlight(text, needle) {
   const s = String(text ?? "");
+  if (!needle) return esc(s);
   const i = s.toUpperCase().indexOf(needle);
   if (i < 0) return esc(s);
   return esc(s.slice(0, i)) + "<b>" + esc(s.slice(i, i + needle.length)) + "</b>" +
@@ -306,13 +379,13 @@ function hideSuggest() {
   input.removeAttribute("aria-activedescendant");
 }
 
-function renderSuggest(q) {
-  const needle = q.trim().toUpperCase();
+function renderSuggest() {
   suggestBox.innerHTML = suggestions
     .map((d, i) =>
       `<div class="sug" role="option" id="sug-${i}" aria-selected="false" data-i="${i}">` +
-      `<div>${highlight(d.project, needle)}</div>` +
-      `<div class="sug-street">${highlight(d.street, needle)}</div></div>`
+      `<div><span class="sug-badge" aria-hidden="true">${d.market === "hdb" ? "🏠" : "🏢"}</span>` +
+      `${highlight(d.title, d.hl)}</div>` +
+      `<div class="sug-street">${highlight(d.sub, d.hlSub || "")}</div></div>`
     )
     .join("");
   suggestBox.hidden = false;
@@ -331,15 +404,21 @@ function moveSuggest(delta) {
   input.setAttribute("aria-activedescendant", "sug-" + suggestIndex);
 }
 
+function pickSuggest(i) {
+  const s = suggestions[i];
+  if (s) runSearch(s.query, s.market);
+}
+
 input.addEventListener("input", () => {
   const q = input.value.trim();
-  // A run of bare digits is a postal code being typed — there is nothing in
-  // the dot list to suggest for it, and "12" would match half the streets.
+  // A run of bare digits is a postal code being typed, or a block with no
+  // street yet: there is no one answer to offer for either, and "12" would
+  // match half the streets.
   if (/^\d+$/.test(q)) return hideSuggest();
-  suggestions = matchDevelopments(q);   // empty while the dot list is still loading
+  suggestions = matchSuggestions(q);   // empty while the dot list is still loading
   suggestIndex = -1;
   if (!suggestions.length) return hideSuggest();
-  renderSuggest(q);
+  renderSuggest();
 });
 
 input.addEventListener("keydown", (e) => {
@@ -349,7 +428,7 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") { hideSuggest(); }
   else if (e.key === "Enter" && suggestIndex >= 0) {
     e.preventDefault();                 // the form would otherwise submit the raw text
-    runSearch(suggestions[suggestIndex].project);
+    pickSuggest(suggestIndex);
   }
 });
 
@@ -359,7 +438,7 @@ suggestBox.addEventListener("mousedown", (e) => {
   const row = e.target.closest(".sug");
   if (!row) return;
   e.preventDefault();
-  runSearch(suggestions[Number(row.dataset.i)].project);
+  pickSuggest(Number(row.dataset.i));
 });
 
 input.addEventListener("blur", () => hideSuggest());

@@ -1111,38 +1111,62 @@ def _hdb_meta_ts():
         return None
 
 
+def build_hdb_street_index(records: list) -> dict:
+    """The search box's HDB table: every street, both spellings, its blocks.
+
+    Pure, so the endpoint below is only memoization around it.
+
+    Two jobs ride on one payload. *Routing* needs the street names: the box
+    has to pick a market before asking, which a heuristic cannot do ("8 SAINT
+    THOMAS" is a condo opening with a number; "BISHAN ST 22" is an HDB street
+    that does not), and asking private first does not work either, because a
+    fuzzy private search answers an HDB street with condos that merely share a
+    word ("BISHAN ST 22" -> BISHAN LOFT) so the fallback never fires.
+    *Type-ahead* needs the blocks, since an HDB address is a block on a street
+    and completing only the street stops one token short of the answer.
+
+    The blocks are worth shipping because they are small: 9.6k of them across
+    579 streets take the whole table to ~87KB of JSON, ~18KB once
+    GZipMiddleware has it — under a quarter of the private dot layer, on a
+    response the frontend already fetches once at boot. That keeps type-ahead what it is on the private
+    side: a scan over strings already in the browser, with no endpoint, no
+    request and no debounce behind each keystroke.
+
+    Both spellings ride along because the data abbreviates ("ANG MO KIO AVE
+    6") while users type either that or the full form; matching one string
+    against both covers it without the frontend re-implementing STREET_ABBREV.
+    """
+    blocks: dict = {}
+    for r in hdb._normalise_all(records):
+        if r["street"]:
+            blocks.setdefault(r["street"], set()).add(r["block"])
+
+    streets = [
+        {"s": s, "c": hdb.expand_street(s), "b": sorted(blocks[s] - {""})}
+        for s in sorted(blocks)
+    ]
+    return {
+        "streets": streets,
+        "count": len(streets),
+        "blocks": sum(len(s["b"]) for s in streets),
+    }
+
+
 @app.get("/api/hdb/streets")
 def api_hdb_streets():
-    """Every distinct HDB street, as stored and as spelled out.
-
-    This exists so the single search box can route free text to the right
-    market *before* asking, which a heuristic cannot do: "8 SAINT THOMAS" is a
-    condo that opens with a number and "BISHAN ST 22" is an HDB street that
-    does not. Routing private-first-and-fall-back-on-error does not work
-    either — a fuzzy private search answers an HDB street name with condos
-    that merely share a word ("BISHAN ST 22" -> BISHAN LOFT), so the fallback
-    never fires.
-
-    Both spellings ride along because the data abbreviates ("ANG MO KIO AVE 6")
-    while users type either that or the full form; matching one string against
-    both covers it without the frontend re-implementing STREET_ABBREV.
-    """
+    """The HDB street + block index — see build_hdb_street_index."""
     ts = _hdb_meta_ts()
     if _hdb_streets_memo["payload"] is not None and _hdb_streets_memo["ts"] == ts:
         return _hdb_streets_memo["payload"]
 
     # Derived from the index set, not the window: it already holds every
-    # distinct street, at a fraction of the rows.
-    streets = sorted({r["street"] for r in hdb._normalise_all(_hdb_index_records())})
-    payload = {
-        "streets": [{"s": s, "c": hdb.expand_street(s)} for s in streets],
-        "count": len(streets),
-    }
+    # distinct (block, street) pair, at a fraction of the rows.
+    payload = build_hdb_street_index(_hdb_index_records())
     # Only a real answer is worth keeping. An empty list here means the read
     # failed, not that Singapore has no HDB streets, and memoizing it would
     # poison routing for the life of the process — every HDB query would then
     # fall back to the shape heuristic and quietly land in the private market.
-    if streets:
+    if payload["streets"]:
         _hdb_streets_memo.update(ts=ts, payload=payload)
     return payload
 

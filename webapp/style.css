@@ -103,7 +103,19 @@ body {
 #suggest .sug:hover,
 #suggest .sug.active { background: #f0f4fb; }
 #suggest .sug b { font-weight: 700; }
-#suggest .sug-street { color: #5b6472; font-size: 0.75rem; }
+/* The badge says which market a row belongs to. Fixed-width, and the second
+   line is indented by the same amount, so every name in the list starts on
+   one edge whichever glyph its row wears. */
+#suggest .sug-badge {
+  display: inline-block;
+  width: 1.35em;
+  opacity: 0.75;
+}
+#suggest .sug-street {
+  color: #5b6472;
+  font-size: 0.75rem;
+  padding-left: 1.35em;
+}
 
 /* The two buttons under the search bar, both shown only inside a search
    result: nearby developments, and the way back to the dot map. */

@@ -12,9 +12,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import hdb
 from api import (
     app,
     build_hdb_block_payload,
+    build_hdb_street_index,
     build_hdb_street_payload,
     build_property_payload,
     order_by_band,
@@ -798,9 +800,11 @@ class TestHDBEndpoints(unittest.TestCase):
     @patch("api._hdb_meta_ts", return_value=1.0)
     @patch("api._hdb_street_records", return_value=[])
     @patch("api._hdb_index_records", return_value=[])
-    @patch("api.hdb._normalise_all", return_value=[{"street": "ANG MO KIO AVE 6"},
-                                                   {"street": "BISHAN ST 22"},
-                                                   {"street": "ANG MO KIO AVE 6"}])
+    @patch("api.hdb._normalise_all", return_value=[
+        {"street": "ANG MO KIO AVE 6", "block": "406"},
+        {"street": "BISHAN ST 22", "block": "257"},
+        {"street": "ANG MO KIO AVE 6", "block": "406"},
+    ])
     def test_street_list_is_distinct_and_carries_both_spellings(self, *_):
         api_mod = sys.modules["api"]
         api_mod._hdb_streets_memo.update(ts=None, payload=None)   # cold
@@ -820,6 +824,64 @@ class TestHDBEndpoints(unittest.TestCase):
         api_mod._hdb_streets_memo.update(ts=7.0, payload={"streets": [], "count": 0})
         client.get("/api/hdb/streets")
         mock_idx.assert_not_called()
+
+
+class TestHDBStreetIndex(unittest.TestCase):
+    """The search box's HDB table — pure, so it is tested without the endpoint.
+
+    It feeds both market routing and type-ahead, and the two must agree: a row
+    the dropdown offers has to be one the box would have routed the same way.
+    """
+
+    ROWS = [
+        {"street": "ANG MO KIO AVE 10", "block": "406"},
+        {"street": "ANG MO KIO AVE 10", "block": "409"},
+        {"street": "ANG MO KIO AVE 10", "block": "406"},   # a street's rows repeat
+        {"street": "ADMIRALTY DR", "block": "353A"},
+        {"street": "", "block": "1"},                      # never a street
+    ]
+
+    def index(self, rows=None):
+        with patch("api.hdb._normalise_all", return_value=rows or self.ROWS):
+            return build_hdb_street_index([])
+
+    def test_blocks_are_distinct_and_sorted_per_street(self):
+        amk = next(s for s in self.index()["streets"] if s["s"] == "ANG MO KIO AVE 10")
+        self.assertEqual(amk["b"], ["406", "409"])
+
+    def test_streets_are_sorted_and_blanks_dropped(self):
+        payload = self.index()
+        self.assertEqual([s["s"] for s in payload["streets"]],
+                         ["ADMIRALTY DR", "ANG MO KIO AVE 10"])
+        self.assertEqual(payload["count"], 2)
+
+    def test_counts_cover_every_block(self):
+        self.assertEqual(self.index()["blocks"], 3)
+
+    def test_a_street_with_no_blocks_still_ships(self):
+        """Routing needs the name whether or not any block came with it, so an
+        empty block list is a street that suggests nothing, not a street that
+        is missing from the table."""
+        payload = self.index([{"street": "ADMIRALTY DR", "block": ""}])
+        self.assertEqual(payload["streets"], [
+            {"s": "ADMIRALTY DR", "c": "ADMIRALTY DRIVE", "b": []},
+        ])
+        self.assertEqual(payload["blocks"], 0)
+
+    def test_every_suggestable_block_resolves_to_itself(self):
+        """The contract between the dropdown and the search: picking a row
+        sends "<block> <street>", and hdb.resolve_query must answer with that
+        same block and street rather than an ambiguity."""
+        for street in self.index()["streets"]:
+            for block in street["b"]:
+                with self.subTest(block=block, street=street["s"]):
+                    raw = [{"block": block, "street_name": street["s"],
+                            "resale_price": "500000", "floor_area_sqm": "90",
+                            "month": "2026-01"}]
+                    resolved = hdb.resolve_query(f"{block} {street['s']}", raw)
+                    self.assertEqual(resolved["kind"], "block")
+                    self.assertEqual(resolved["block"], block)
+                    self.assertEqual(resolved["street"], street["s"])
 
 
 class TestHDBStorageLayout(unittest.TestCase):
