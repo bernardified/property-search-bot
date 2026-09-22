@@ -51,6 +51,11 @@ const AMENITY_STYLES = {
 // the question a school pin actually raises: is this property inside it?
 const SCHOOL_RADIUS_M = 1000;
 
+// How long a search may sit on a bare "Searching…" before it explains itself.
+// Warm, a search answers in ~0.1s; the slow case is a cold transaction cache,
+// which is seconds, so anything past this is the slow case and not a blip.
+const SLOW_SEARCH_MS = 2500;
+
 const el = (id) => document.getElementById(id);
 const form = el("search-form");
 const input = el("search-input");
@@ -196,13 +201,29 @@ async function runSearch(q, market) {
   input.value = q;
   hideSuggest();          // a picked suggestion never leaves its list open behind the result
   searchBtn.disabled = true;
-  setStatus(/^\d{6}$/.test(q) ? "Looking up postal code…" : "Searching…");
+  const postal = /^\d{6}$/.test(q);
+  setStatus(postal ? "Looking up postal code…" : "Searching…");
   resultsBox.hidden = true;
-  closeBandDetail();
-  destroyCharts();
-  resetMap();
-
+  // Everything from here on is inside the try: teardown touches Leaflet and
+  // Chart.js, and a throw out here left the panel hidden behind a permanent
+  // "Searching…" — the one state in this flow that never recovers.
+  let slowTimer = null;
   try {
+    closeBandDetail();
+    destroyCharts();
+    resetMap();
+
+    // The map can be up and inviting clicks while a search still has to wait
+    // seconds for the transaction cache: the dots come from a persisted
+    // payload that needs none of it, but matching a name needs all ~31MB, and
+    // that load is redone on a cold process and after every URA refresh
+    // (twice a week) — including behind the background rebuild the refresh
+    // itself kicks off. A bare "Searching…" for that long reads as a hang,
+    // so name the wait rather than leaving the user to guess.
+    slowTimer = setTimeout(() => setStatus(
+      (postal ? "Looking up postal code" : "Searching") +
+      " — loading the latest transaction data. The first search after a data " +
+      "refresh or a restart takes a few seconds."), SLOW_SEARCH_MS);
     // Wait for the routing table rather than route without it. It is normally
     // long since loaded; the exception is a search in the first seconds after
     // a cold server start, and being briefly slow there beats confidently
@@ -211,7 +232,7 @@ async function runSearch(q, market) {
 
     // Postal codes are market-agnostic and decided server-side; everything
     // else is routed by the street list above, unless the caller already knew.
-    const hdb = /^\d{6}$/.test(q) ? false
+    const hdb = postal ? false
               : market ? market === "hdb"
               : looksLikeHdb(q);
     const url = hdb
@@ -251,6 +272,7 @@ async function runSearch(q, market) {
   } catch (err) {
     setStatus("Search failed — is the API running? " + err.message, true);
   } finally {
+    clearTimeout(slowTimer);
     searchBtn.disabled = false;
   }
 }
@@ -1823,7 +1845,13 @@ async function enterExplore(target = market) {
 }
 
 function exitExplore(clearStatus = false) {
-  if (market.layer) map.removeLayer(market.layer);
+  // Every market's layer, not just the active one: `enterExplore` reassigns
+  // `market` to the target before awaiting its dots, so a search started
+  // during a market switch (the outgoing layer is still on screen and still
+  // clickable) would otherwise leave those dots on top of the property view.
+  for (const mk of Object.values(MARKETS)) {
+    if (mk.layer && map.hasLayer(mk.layer)) map.removeLayer(mk.layer);
+  }
   panel.hidden = true;
   exploreOn = false;
   if (clearStatus) setStatus("");
