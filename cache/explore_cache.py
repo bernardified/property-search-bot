@@ -13,8 +13,11 @@ when a cache actually refreshes, which is exactly when the dots change.
 Two layers live here, one document each, because they are derived from
 different caches and refresh on different schedules:
 
-  developments  private dots, keyed (ura_ts, rental_ts)   — Tue/Fri + the 15th
-  hdb_blocks    HDB block dots, keyed (hdb_ts,)           — roughly monthly
+  developments  private dots, keyed (build, ura_ts, rental_ts)  — Tue/Fri + 15th
+  hdb_blocks    HDB block dots, keyed (build, hdb_ts)            — ~monthly
+
+where `build` is the row schema plus the mall register's fingerprint: what the
+dots were built BY, beside the caches they were built FROM.
 
 Keying them separately is the point: a URA refresh must not invalidate a
 payload built from HDB resale data, and vice versa.
@@ -34,6 +37,7 @@ from bson.binary import Binary
 from cache.cache_ura import meta_timestamp as ura_meta_timestamp
 from cache.cache_rental import meta_timestamp as rental_meta_timestamp
 from cache.cache_hdb import meta_timestamp as hdb_meta_timestamp, is_cache_fresh as hdb_is_fresh
+from cache.mall_cache import register_fingerprint as mall_fingerprint
 from utils import get_mongo_db, is_ura_transactions_stale, is_rental_stale
 
 logger = logging.getLogger(__name__)
@@ -42,9 +46,30 @@ COLLECTION = "explore_cache"
 DOC_ID = "developments"
 HDB_DOC_ID = "hdb_blocks"
 
+# The shape of the rows inside a stored payload. It leads every key because a
+# blob is only current if it was built by code that agrees with this one: the
+# cache timestamps say nothing about a deploy that ADDS a field to the dots
+# (mall_m, lease_years), and without this a new build would keep serving the
+# old rows until URA next refreshed — a filter with no data behind it. Bump it
+# whenever build_developments or build_hdb_blocks changes what a row carries.
+LAYER_SCHEMA = 2
 
-def source_key() -> tuple[float, float] | None:
-    """`(ura_ts, rental_ts)` — what a stored payload is keyed on — or None.
+
+def _build_key() -> tuple:
+    """What both layers are built BY, as opposed to built FROM: the row schema
+    and the mall register's fingerprint.
+
+    The register is a real input to both payloads — every dot carries `mall_m`
+    — but it is a checked-in file, so nothing else in these keys would notice
+    it changing. Adding a mall would then reach the map only on the next URA
+    refresh, or a month later on the HDB layer.
+    """
+    return (LAYER_SCHEMA, mall_fingerprint())
+
+
+def source_key() -> tuple | None:
+    """`(LAYER_SCHEMA, malls_fp, ura_ts, rental_ts)` — what a stored payload is
+    keyed on — or None.
 
     None means "do not use the store": either cache is missing, or one is
     stale and therefore due a refresh, and refreshing is what the full
@@ -56,11 +81,12 @@ def source_key() -> tuple[float, float] | None:
         return None
     if is_ura_transactions_stale(ura) or is_rental_stale(rental):
         return None
-    return (ura, rental)
+    return _build_key() + (ura, rental)
 
 
-def hdb_source_key() -> tuple[float] | None:
-    """`(hdb_ts,)` for the HDB block layer, or None to force the slow path.
+def hdb_source_key() -> tuple | None:
+    """`(LAYER_SCHEMA, malls_fp, hdb_ts)` for the HDB block layer, or None to
+    force the slow path.
 
     Same contract as `source_key()`, against the one cache that layer comes
     from. `is_cache_fresh()` rather than a staleness check on the timestamp
@@ -71,7 +97,7 @@ def hdb_source_key() -> tuple[float] | None:
     ts = hdb_meta_timestamp()
     if ts is None or not hdb_is_fresh():
         return None
-    return (ts,)
+    return _build_key() + (ts,)
 
 
 def load(doc_id: str = DOC_ID) -> tuple[dict | None, tuple | None]:
@@ -104,7 +130,8 @@ def save(payload: dict, key: tuple, doc_id: str = DOC_ID) -> None:
     here only costs the next process a rebuild, so it never propagates.
 
     The key is stored as a plain list so one shape serves both layers — the
-    private one is two timestamps and the HDB one is a single timestamp.
+    build key plus two cache timestamps on the private side, and the build
+    key plus one on the HDB side.
     """
     db = get_mongo_db()
     if db is None:

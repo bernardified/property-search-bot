@@ -69,6 +69,20 @@
           </label>
         </div>
 
+        <!-- Same shape as the MRT filter, and shared by both markets for the
+             same reason: a walk to the shops means the same thing to a flat
+             and to a condo. -->
+        <div class="ctl">
+          <label id="mall-label">Nearest shopping mall
+            <select id="f-mall">
+              <option value="">Any distance</option>
+              <option value="400">Within 400 m</option>
+              <option value="800">Within 800 m</option>
+              <option value="1200">Within 1.2 km</option>
+            </select>
+          </label>
+        </div>
+
         <div class="ctl">
           <span class="ctl-label">Avg PSF range</span>
           <div class="two-up">
@@ -154,7 +168,9 @@
         HDB resale prices and block listings come from HDB, and hawker-centre
         locations from NEA, via
         <a href="https://data.gov.sg/" target="_blank" rel="noopener">data.gov.sg</a>,
-        under the same licence.
+        under the same licence. Shopping-mall and MRT-station coordinates are
+        resolved through <a href="https://www.onemap.gov.sg/" target="_blank" rel="noopener">OneMap</a>
+        (Singapore Land Authority).
         Data is provided “as is” — verify independently before relying on it.
         This site is not affiliated with, or endorsed by, URA or HDB.
       </footer>
@@ -182,6 +198,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-  <script src="map.js?v=9"></script>
+  <script src="map.js?v=10"></script>
 </body>
 </html>
