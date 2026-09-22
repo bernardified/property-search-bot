@@ -386,12 +386,18 @@ def cache_oldest_date(all_results: list) -> datetime | None:
 
 
 def resolve_total_units(development: str, txns: list, pipeline_total,
-                        all_results: list) -> tuple:
+                        oldest_txn_date) -> tuple:
     """Tiered denominator resolution. Returns (total_units, source).
 
     Tiers, best wins: live pipeline feed → harvested pipeline history (Mongo)
     → derived from cached new-sale records → scraped/verified seed (Mongo).
     (None, None) when every tier misses.
+
+    `oldest_txn_date` is the start of the cache's window (what
+    `cache_oldest_date` computes) rather than the cache itself: the only thing
+    this needs from all 3,852 projects is that one date, and a caller that can
+    get it cheaply must not be made to load them all. None simply means the
+    derived tier cannot be trusted, so it is skipped.
     """
     from cache.unit_counts import get_unit_count
 
@@ -403,7 +409,7 @@ def resolve_total_units(development: str, txns: list, pipeline_total,
     if stored and stored["source"] == "pipeline":
         return stored["total_units"], "pipeline_history"
 
-    derived = derive_units_from_new_sales(txns, cache_oldest_date(all_results))
+    derived = derive_units_from_new_sales(txns, oldest_txn_date)
     if derived:
         return derived, "derived"
 
@@ -438,7 +444,8 @@ def liquidity_for_project(project_name: str) -> dict:
     under_construction = pipeline_info.get("expected_top") is not None
 
     total_units, units_source = resolve_total_units(
-        development, txns, pipeline_info.get("total_units"), all_results
+        development, txns, pipeline_info.get("total_units"),
+        cache_oldest_date(all_results)
     )
 
     summary = liquidity_summary(txns, total_units, units_source, under_construction)

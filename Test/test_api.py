@@ -155,12 +155,19 @@ class TestPayloadShaping(unittest.TestCase):
 
 class _NoProjectCoords(unittest.TestCase):
     """URA's project list is the pin's first source; default it to empty so
-    each test drives the street-geocode fallback unless it says otherwise."""
+    each test drives the street-geocode fallback unless it says otherwise.
+
+    Both sources are stubbed: the pin reads the cheap name index first (it
+    carries the same project/x/y the scan needs) and only falls back to the
+    full load, so a test that injects projects through `get_ura_data` needs
+    the index out of the way."""
 
     def setUp(self):
-        p = patch("api.get_ura_data", return_value=([], {}))
-        p.start()
-        self.addCleanup(p.stop)
+        for target, value in (("api.get_project_index", None),
+                              ("api.get_ura_data", ([], {}))):
+            p = patch(target, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
 
 
 class TestEndpoints(_NoProjectCoords):
@@ -227,7 +234,7 @@ class TestEndpoints(_NoProjectCoords):
     def test_trend_passthrough(self, mock_trend):
         data = client.get("/api/trend", params={"q": "PARC ESTA"}).json()
         self.assertEqual(data["pct_change"], 12)
-        mock_trend.assert_called_once_with("PARC ESTA")
+        mock_trend.assert_called_once_with("PARC ESTA", from_index=True)
 
     @patch("api.geocode_building")
     @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
@@ -269,7 +276,7 @@ class TestEndpoints(_NoProjectCoords):
                           params={"q": "PARC ESTA", "band": "<= 600 sqft"}).json()
         self.assertEqual(data["count"], 2)
         self.assertEqual(data["transactions"][0]["price"], 1000000)
-        mock_band.assert_called_once_with("PARC ESTA", "<= 600 sqft")
+        mock_band.assert_called_once_with("PARC ESTA", "<= 600 sqft", from_index=True)
 
     def test_transactions_requires_band(self):
         """Without a band there is nothing to drill into — reject, don't guess."""
@@ -319,7 +326,7 @@ class TestPostalSearch(_NoProjectCoords):
     def test_private_postal_uses_exact_coords(self, mock_resolve, _hdb, mock_search, _r, mock_geo):
         data = client.get("/api/property", params={"q": "408563"}).json()
         mock_resolve.assert_called_once_with("408563")
-        mock_search.assert_called_once_with("PARC ESTA")  # resolved building name
+        mock_search.assert_called_once_with("PARC ESTA", from_index=True)  # resolved building name
         mock_geo.assert_not_called()  # exact postal coordinate, no street geocode
         self.assertTrue(data["exact_coords"])
         self.assertEqual(data["postal"], "408563")
@@ -1038,6 +1045,95 @@ class TestHDBStorageLayout(unittest.TestCase):
         from cache.cache_hdb import group_by_street
         rebuilt = [r for rows in group_by_street(self.RAW).values() for r in rows]
         self.assertEqual(len(rebuilt), len(self.RAW) - 1)   # minus the unusable row
+
+
+class TestLeanURAReads(unittest.TestCase):
+    """The index path must answer exactly as the full load does.
+
+    A one-project search used to pull all 3,852 projects — ~31MB over the wire
+    and ~240MB of Python — which a small container cannot do: /api/property
+    stopped answering entirely on Railway while every small-read endpoint
+    stayed at 0.2s. So scoring reads a name index and only the winner's own
+    document. That is a data-source swap, and the whole point is that nothing
+    about the answer changes, which is what these pin down.
+    """
+
+    PROJECTS = [
+        {"project": "ALPHA COURT", "street": "A ST", "x": "28001.642", "y": "38744.572",
+         "transaction": [{"area": "80", "price": "1600000", "contractDate": "0826",
+                          "typeOfSale": "3", "district": "15", "propertyType":
+                          "Apartment", "floorRange": "06-10", "tenure": "Freehold"}]},
+        {"project": "BRAVO GARDENS", "street": "B RD", "x": "", "y": "",
+         "transaction": [{"area": "90", "price": "1800000", "contractDate": "0726",
+                          "typeOfSale": "3", "district": "19", "propertyType":
+                          "Condominium", "floorRange": "01-05", "tenure": "99 yrs"}]},
+    ]
+
+    def _index(self):
+        """What cache_ura.get_project_index() returns for PROJECTS."""
+        return [{"project": p["project"], "street": p["street"],
+                 "x": p["x"], "y": p["y"], "chunk": 0, "offset": i}
+                for i, p in enumerate(self.PROJECTS)]
+
+    def _lean(self, fn, *args):
+        """Run `fn` with only the lean readers available — get_ura_data raises,
+        so a path that still reaches for the whole cache fails loudly."""
+        import ura
+        with patch("ura.get_project_index", return_value=self._index()), \
+             patch("ura.get_projects_at",
+                   side_effect=lambda refs: [self.PROJECTS[r["offset"]] for r in refs]), \
+             patch("ura.get_pipeline", return_value=[]), \
+             patch("ura.oldest_contract_date", return_value=None), \
+             patch("ura.get_ura_data",
+                   side_effect=AssertionError("loaded the whole cache")):
+            return fn(*args, from_index=True)
+
+    def _full(self, fn, *args):
+        import ura
+        with patch("ura.get_ura_data", return_value=(self.PROJECTS, [])):
+            return fn(*args)
+
+    def test_search_matches_the_full_load(self):
+        from ura import search_property
+        lean, full = self._lean(search_property, "alpha court"), self._full(search_property, "alpha court")
+        self.assertEqual(lean["development"], "ALPHA COURT")
+        self.assertEqual(lean["bands"], full["bands"])
+        self.assertEqual(lean["street"], full["street"])
+
+    def test_trend_and_band_drilldown_match_the_full_load(self):
+        from ura import price_trend, band_transactions
+        self.assertEqual(self._lean(price_trend, "bravo gardens")["periods"],
+                         self._full(price_trend, "bravo gardens")["periods"])
+        band = "801 – 900 sqft"
+        self.assertEqual(self._lean(band_transactions, "bravo gardens", band)["count"],
+                         self._full(band_transactions, "bravo gardens", band)["count"])
+
+    def test_ambiguity_and_misses_still_come_from_the_index(self):
+        """The index carries project and street, which is everything the
+        ambiguity and not-found answers are built from."""
+        from ura import search_property
+        self.assertIn("error", self._lean(search_property, "nothing like this"))
+
+    def test_default_stays_on_the_full_load(self):
+        """The bot passes nothing and must keep loading the whole cache — it
+        needs every project for browse-by-district anyway, and every existing
+        test injects data through that one function."""
+        from ura import search_property
+        with patch("ura.get_project_index",
+                   side_effect=AssertionError("read the index")), \
+             patch("ura.get_ura_data", return_value=(self.PROJECTS, [])):
+            self.assertEqual(search_property("alpha court")["development"], "ALPHA COURT")
+
+    def test_pin_prefers_the_index_over_the_full_load(self):
+        """api._project_dicts scans for project + x/y, which the index rows
+        carry, so the pin lookup never has to load the cache either."""
+        import api
+        with patch("api.get_project_index", return_value=self._index()), \
+             patch("api.get_ura_data",
+                   side_effect=AssertionError("loaded the whole cache")):
+            self.assertEqual(api.project_xy_coords(api._project_dicts(), "ALPHA COURT"),
+                             {"lat": 1.366666, "lng": 103.833333})
+            self.assertIsNone(api.project_xy_coords(api._project_dicts(), "BRAVO GARDENS"))
 
 
 if __name__ == "__main__":
