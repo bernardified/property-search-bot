@@ -1,0 +1,1283 @@
+[
+ {
+  "name": "100 AM",
+  "lat": 1.274588,
+  "lng": 103.843471,
+  "address": "100 TRAS STREET 100 AM",
+  "postal": "NIL"
+ },
+ {
+  "name": "112 KATONG",
+  "lat": 1.305207,
+  "lng": 103.905046,
+  "address": "112 EAST COAST ROAD 112 KATONG SINGAPORE 428802",
+  "postal": "428802"
+ },
+ {
+  "name": "313@SOMERSET",
+  "lat": 1.301014,
+  "lng": 103.838361,
+  "address": "313 ORCHARD ROAD 313 @ SOMERSET SINGAPORE 238895",
+  "postal": "238895"
+ },
+ {
+  "name": "321 CLEMENTI",
+  "lat": 1.312002,
+  "lng": 103.764987,
+  "address": "321 CLEMENTI AVENUE 3 321 CLEMENTI SINGAPORE 129905",
+  "postal": "129905"
+ },
+ {
+  "name": "ALBERT COMPLEX",
+  "lat": 1.302282,
+  "lng": 103.853838,
+  "address": "60 ALBERT STREET OG ALBERT COMPLEX SINGAPORE 189969",
+  "postal": "189969"
+ },
+ {
+  "name": "ALEXANDRA CENTRAL",
+  "lat": 1.287283,
+  "lng": 103.805283,
+  "address": "321 ALEXANDRA ROAD ALEXANDRA CENTRAL SINGAPORE 159971",
+  "postal": "159971"
+ },
+ {
+  "name": "ALEXANDRA RETAIL CENTRE",
+  "lat": 1.274149,
+  "lng": 103.801399,
+  "address": "460 ALEXANDRA ROAD ALEXANDRA RETAIL CENTRE (ARC)",
+  "postal": "NIL"
+ },
+ {
+  "name": "AMK HUB",
+  "lat": 1.369389,
+  "lng": 103.848478,
+  "address": "53 ANG MO KIO AVENUE 3 AMK HUB SINGAPORE 569933",
+  "postal": "569933"
+ },
+ {
+  "name": "ANCHORPOINT",
+  "lat": 1.288615,
+  "lng": 103.80501,
+  "address": "370 ALEXANDRA ROAD ANCHORPOINT SHOPPING CENTRE SINGAPORE 159953",
+  "postal": "159953"
+ },
+ {
+  "name": "APERIA",
+  "lat": 1.310867,
+  "lng": 103.86393,
+  "address": "8 KALLANG AVENUE APERIA SINGAPORE 339509",
+  "postal": "339509"
+ },
+ {
+  "name": "BEAUTY WORLD CENTRE",
+  "lat": 1.342413,
+  "lng": 103.776539,
+  "address": "144 UPPER BUKIT TIMAH ROAD BEAUTY WORLD CENTRE SINGAPORE 588177",
+  "postal": "588177"
+ },
+ {
+  "name": "BEAUTY WORLD PLAZA",
+  "lat": 1.3418,
+  "lng": 103.776259,
+  "address": "140 UPPER BUKIT TIMAH ROAD BEAUTY WORLD PLAZA SINGAPORE 588176",
+  "postal": "588176"
+ },
+ {
+  "name": "BEDOK MALL",
+  "lat": 1.324736,
+  "lng": 103.929256,
+  "address": "311 NEW UPPER CHANGI ROAD BEDOK MALL SINGAPORE 467360",
+  "postal": "467360"
+ },
+ {
+  "name": "BROADWAY PLAZA",
+  "lat": 1.371937,
+  "lng": 103.845949,
+  "address": "4190 ANG MO KIO AVENUE 6 BROADWAY PLAZA SINGAPORE 569841",
+  "postal": "569841"
+ },
+ {
+  "name": "BUANGKOK SQUARE",
+  "lat": 1.384334,
+  "lng": 103.881623,
+  "address": "991 BUANGKOK LINK BUANGKOK SQUARE SINGAPORE 530991",
+  "postal": "530991"
+ },
+ {
+  "name": "BUGIS JUNCTION",
+  "lat": 1.299113,
+  "lng": 103.855411,
+  "address": "200 VICTORIA STREET BUGIS JUNCTION SINGAPORE 188021",
+  "postal": "188021"
+ },
+ {
+  "name": "BUGIS+",
+  "lat": 1.299604,
+  "lng": 103.854242,
+  "address": "201 VICTORIA STREET BUGIS+ SINGAPORE 188067",
+  "postal": "188067"
+ },
+ {
+  "name": "BUKIT PANJANG PLAZA",
+  "lat": 1.37992,
+  "lng": 103.764357,
+  "address": "1 JELEBU ROAD BUKIT PANJANG PLAZA SINGAPORE 677743",
+  "postal": "677743"
+ },
+ {
+  "name": "BUKIT TIMAH PLAZA",
+  "lat": 1.338759,
+  "lng": 103.7786,
+  "address": "1 JALAN ANAK BUKIT BUKIT TIMAH PLAZA SINGAPORE 588996",
+  "postal": "588996"
+ },
+ {
+  "name": "BUKIT TIMAH SHOPPING CENTRE",
+  "lat": 1.343165,
+  "lng": 103.776031,
+  "address": "170 UPPER BUKIT TIMAH ROAD BUKIT TIMAH SHOPPING CENTRE SINGAPORE 588179",
+  "postal": "588179"
+ },
+ {
+  "name": "BURLINGTON SQUARE",
+  "lat": 1.302243,
+  "lng": 103.8527,
+  "address": "175 BENCOOLEN STREET BURLINGTON SQUARE SINGAPORE 189649",
+  "postal": "189649"
+ },
+ {
+  "name": "CANBERRA PLAZA",
+  "lat": 1.443495,
+  "lng": 103.830345,
+  "address": "133 CANBERRA VIEW CANBERRA PLAZA SINGAPORE 750133",
+  "postal": "750133"
+ },
+ {
+  "name": "CANNINGHILL SQUARE",
+  "lat": 1.291553,
+  "lng": 103.844672,
+  "address": "9 CLARKE QUAY CANNINGHILL SQUARE SINGAPORE 179886",
+  "postal": "179886"
+ },
+ {
+  "name": "CAPITOL BUILDING",
+  "lat": 1.293445,
+  "lng": 103.851532,
+  "address": "15 STAMFORD ROAD CAPITOL BUILDING SINGAPORE 178906",
+  "postal": "178906"
+ },
+ {
+  "name": "CAUSEWAY POINT",
+  "lat": 1.43607,
+  "lng": 103.785982,
+  "address": "1 WOODLANDS SQUARE CAUSEWAY POINT SINGAPORE 738099",
+  "postal": "738099"
+ },
+ {
+  "name": "CENTURY SQUARE",
+  "lat": 1.352368,
+  "lng": 103.943812,
+  "address": "2 TAMPINES CENTRAL 5 CENTURY SQUARE SINGAPORE 529509",
+  "postal": "529509"
+ },
+ {
+  "name": "CHANGI CITY POINT",
+  "lat": 1.334036,
+  "lng": 103.962918,
+  "address": "5 CHANGI BUSINESS PARK CENTRAL 1 CHANGI CITY POINT",
+  "postal": "NIL"
+ },
+ {
+  "name": "CHINATOWN POINT",
+  "lat": 1.284999,
+  "lng": 103.844697,
+  "address": "133 NEW BRIDGE ROAD CHINATOWN POINT SINGAPORE 059413",
+  "postal": "059413"
+ },
+ {
+  "name": "CITY PLAZA",
+  "lat": 1.314787,
+  "lng": 103.893472,
+  "address": "810 GEYLANG ROAD CITY PLAZA SINGAPORE 409286",
+  "postal": "409286"
+ },
+ {
+  "name": "CITY SQUARE MALL",
+  "lat": 1.311421,
+  "lng": 103.856624,
+  "address": "180 KITCHENER ROAD CITY SQUARE MALL SINGAPORE 208539",
+  "postal": "208539"
+ },
+ {
+  "name": "CITYLINK MALL",
+  "lat": 1.292778,
+  "lng": 103.854174,
+  "address": "1 RAFFLES LINK CITYLINK MALL SINGAPORE 039393",
+  "postal": "039393"
+ },
+ {
+  "name": "CLARKE QUAY",
+  "lat": 1.290314,
+  "lng": 103.846728,
+  "address": "3E RIVER VALLEY ROAD CLARKE QUAY SINGAPORE 179024",
+  "postal": "179024"
+ },
+ {
+  "name": "CLEMENTI ARCADE",
+  "lat": 1.323553,
+  "lng": 103.767515,
+  "address": "41 SUNSET WAY CLEMENTI ARCADE SINGAPORE 597071",
+  "postal": "597071"
+ },
+ {
+  "name": "COMPASS ONE",
+  "lat": 1.392053,
+  "lng": 103.895071,
+  "address": "1 SENGKANG SQUARE COMPASS ONE SINGAPORE 545078",
+  "postal": "545078"
+ },
+ {
+  "name": "CONCORDE HOTEL AND SHOPPING MALL",
+  "lat": 1.300614,
+  "lng": 103.842228,
+  "address": "100 ORCHARD ROAD CONCORDE HOTEL AND SHOPPING MALL SINGAPORE 238840",
+  "postal": "238840"
+ },
+ {
+  "name": "CORONATION SHOPPING PLAZA",
+  "lat": 1.323835,
+  "lng": 103.81,
+  "address": "587 BUKIT TIMAH ROAD CORONATION SHOPPING PLAZA SINGAPORE 269707",
+  "postal": "269707"
+ },
+ {
+  "name": "DAWSON PLACE",
+  "lat": 1.292703,
+  "lng": 103.810959,
+  "address": "57 DAWSON ROAD DAWSON PLACE SINGAPORE 142057",
+  "postal": "142057"
+ },
+ {
+  "name": "DELFI ORCHARD",
+  "lat": 1.307179,
+  "lng": 103.82847,
+  "address": "402 ORCHARD ROAD DELFI ORCHARD SINGAPORE 238876",
+  "postal": "238876"
+ },
+ {
+  "name": "DJITSUN MALL BEDOK",
+  "lat": 1.32612,
+  "lng": 103.929554,
+  "address": "445 BEDOK NORTH STREET 1 DJITSUN MALL BEDOK SINGAPORE 469661",
+  "postal": "469661"
+ },
+ {
+  "name": "DOWNTOWN EAST",
+  "lat": 1.376914,
+  "lng": 103.955037,
+  "address": "1 PASIR RIS CLOSE DOWNTOWN EAST SINGAPORE 519599",
+  "postal": "519599"
+ },
+ {
+  "name": "DOWNTOWN GALLERY",
+  "lat": 1.277439,
+  "lng": 103.848688,
+  "address": "6A SHENTON WAY DOWNTOWN GALLERY",
+  "postal": "NIL"
+ },
+ {
+  "name": "DUO GALLERIA",
+  "lat": 1.299534,
+  "lng": 103.858402,
+  "address": "7 FRASER STREET DUO GALLERIA",
+  "postal": "NIL"
+ },
+ {
+  "name": "EASTPOINT MALL",
+  "lat": 1.342706,
+  "lng": 103.953025,
+  "address": "3 SIMEI STREET 6 EASTPOINT MALL SINGAPORE 528833",
+  "postal": "528833"
+ },
+ {
+  "name": "ELIAS MALL",
+  "lat": 1.378602,
+  "lng": 103.941978,
+  "address": "625 ELIAS ROAD ELIAS MALL SINGAPORE 510625",
+  "postal": "510625"
+ },
+ {
+  "name": "FAJAR SHOPPING CENTRE",
+  "lat": 1.38358,
+  "lng": 103.770769,
+  "address": "445 FAJAR ROAD FAJAR SHOPPING CENTRE SINGAPORE 670445",
+  "postal": "670445"
+ },
+ {
+  "name": "FAR EAST PLAZA",
+  "lat": 1.307177,
+  "lng": 103.833793,
+  "address": "14 SCOTTS ROAD FAR EAST PLAZA SINGAPORE 228213",
+  "postal": "228213"
+ },
+ {
+  "name": "FAR EAST SQUARE",
+  "lat": 1.283383,
+  "lng": 103.848376,
+  "address": "137 AMOY STREET FAR EAST SQUARE SINGAPORE 049965",
+  "postal": "049965"
+ },
+ {
+  "name": "FORUM THE SHOPPING MALL",
+  "lat": 1.306098,
+  "lng": 103.828679,
+  "address": "583 ORCHARD ROAD FORUM THE SHOPPING MALL SINGAPORE 238884",
+  "postal": "238884"
+ },
+ {
+  "name": "FU LU SHOU COMPLEX",
+  "lat": 1.301513,
+  "lng": 103.854497,
+  "address": "149 ROCHOR ROAD FU LU SHOU COMPLEX SINGAPORE 188425",
+  "postal": "188425"
+ },
+ {
+  "name": "FUNAN",
+  "lat": 1.291348,
+  "lng": 103.84999,
+  "address": "107 NORTH BRIDGE ROAD FUNAN SINGAPORE 179105",
+  "postal": "179105"
+ },
+ {
+  "name": "GEK POH SHOPPING CENTRE",
+  "lat": 1.348744,
+  "lng": 103.697732,
+  "address": "762 JURONG WEST STREET 75 GEK POH SHOPPING CENTRE SINGAPORE 640762",
+  "postal": "640762"
+ },
+ {
+  "name": "GOLDHILL PLAZA",
+  "lat": 1.318199,
+  "lng": 103.842936,
+  "address": "51 GOLDHILL PLAZA GOLDHILL PLAZA SINGAPORE 308900",
+  "postal": "308900"
+ },
+ {
+  "name": "GRANTRAL MALL",
+  "lat": 1.31427,
+  "lng": 103.765147,
+  "address": "3151 COMMONWEALTH AVENUE WEST GRANTRAL MALL @ CLEMENTI SINGAPORE 129581",
+  "postal": "129581"
+ },
+ {
+  "name": "GREAT WORLD",
+  "lat": 1.293423,
+  "lng": 103.832022,
+  "address": "1 KIM SENG PROMENADE GREAT WORLD CITY SINGAPORE 237994",
+  "postal": "237994"
+ },
+ {
+  "name": "GREENRIDGE SHOPPING CENTRE",
+  "lat": 1.385171,
+  "lng": 103.76598,
+  "address": "524A JELAPANG ROAD CHOON KIT TRADING GREENRIDGE SHOPPING CENTRE",
+  "postal": "NIL"
+ },
+ {
+  "name": "GREENWICH V",
+  "lat": 1.387395,
+  "lng": 103.869136,
+  "address": "1 SELETAR ROAD GREENWICH V SINGAPORE 807011",
+  "postal": "807011"
+ },
+ {
+  "name": "GUOCO TOWER",
+  "lat": 1.2768,
+  "lng": 103.845618,
+  "address": "1 WALLICH STREET GUOCO TOWER SINGAPORE 078881",
+  "postal": "078881"
+ },
+ {
+  "name": "HARBOURFRONT CENTRE",
+  "lat": 1.263776,
+  "lng": 103.818562,
+  "address": "5 HARBOURFRONT AVENUE HARBOURFRONT CENTRE CHECKPOINT",
+  "postal": "NIL"
+ },
+ {
+  "name": "HDB HUB",
+  "lat": 1.332055,
+  "lng": 103.848508,
+  "address": "480 LORONG 6 TOA PAYOH HDB HUB SINGAPORE 310480",
+  "postal": "310480"
+ },
+ {
+  "name": "HEARTLAND MALL",
+  "lat": 1.359542,
+  "lng": 103.885167,
+  "address": "205 HOUGANG STREET 21 HEARTLAND MALL-KOVAN SINGAPORE 530205",
+  "postal": "530205"
+ },
+ {
+  "name": "HILLION MALL",
+  "lat": 1.378431,
+  "lng": 103.762843,
+  "address": "17 PETIR ROAD HILLION MALL SINGAPORE 678278",
+  "postal": "678278"
+ },
+ {
+  "name": "HILLV2",
+  "lat": 1.362675,
+  "lng": 103.764173,
+  "address": "4 HILLVIEW RISE HILLV2 SINGAPORE 667979",
+  "postal": "667979"
+ },
+ {
+  "name": "HOLLAND ROAD SHOPPING CENTRE",
+  "lat": 1.310277,
+  "lng": 103.795371,
+  "address": "211 HOLLAND AVENUE HOLLAND ROAD SHOPPING CENTRE SINGAPORE 278967",
+  "postal": "278967"
+ },
+ {
+  "name": "HONG LIM COMPLEX",
+  "lat": 1.284392,
+  "lng": 103.846101,
+  "address": "531 UPPER CROSS STREET HONG LIM COMPLEX SINGAPORE 050531",
+  "postal": "050531"
+ },
+ {
+  "name": "HOUGANG 1",
+  "lat": 1.375715,
+  "lng": 103.879472,
+  "address": "1 HOUGANG STREET 91 HOUGANG 1 SINGAPORE 538692",
+  "postal": "538692"
+ },
+ {
+  "name": "HOUGANG GREEN SHOPPING MALL",
+  "lat": 1.379245,
+  "lng": 103.887832,
+  "address": "21 HOUGANG STREET 51 HOUGANG GREEN SHOPPING MALL SINGAPORE 538719",
+  "postal": "538719"
+ },
+ {
+  "name": "HOUGANG MALL",
+  "lat": 1.372491,
+  "lng": 103.893774,
+  "address": "90 HOUGANG AVENUE 10 HOUGANG MALL SINGAPORE 538766",
+  "postal": "538766"
+ },
+ {
+  "name": "IMM BUILDING",
+  "lat": 1.334875,
+  "lng": 103.746895,
+  "address": "2 JURONG EAST STREET 21 IMM BUILDING SINGAPORE 609601",
+  "postal": "609601"
+ },
+ {
+  "name": "ION ORCHARD",
+  "lat": 1.30398,
+  "lng": 103.832032,
+  "address": "2 ORCHARD TURN ION ORCHARD SINGAPORE 238801",
+  "postal": "238801"
+ },
+ {
+  "name": "JALAN BESAR PLAZA",
+  "lat": 1.308658,
+  "lng": 103.858067,
+  "address": "101 KITCHENER ROAD JALAN BESAR PLAZA SINGAPORE 208511",
+  "postal": "208511"
+ },
+ {
+  "name": "JELITA MALL",
+  "lat": 1.317627,
+  "lng": 103.785694,
+  "address": "COLD STORAGE JELITA SHOPPING CENTRE (CAR PARK ENTRANCE)",
+  "postal": "NIL"
+ },
+ {
+  "name": "JEM",
+  "lat": 1.333293,
+  "lng": 103.743279,
+  "address": "50 JURONG GATEWAY ROAD JEM SINGAPORE 608549",
+  "postal": "608549"
+ },
+ {
+  "name": "JEWEL CHANGI AIRPORT",
+  "lat": 1.360341,
+  "lng": 103.989078,
+  "address": "78 AIRPORT BOULEVARD JEWEL CHANGI AIRPORT SINGAPORE 819666",
+  "postal": "819666"
+ },
+ {
+  "name": "JOO CHIAT COMPLEX",
+  "lat": 1.316061,
+  "lng": 103.898041,
+  "address": "1 JOO CHIAT ROAD GOLDEN CITY JOO CHIAT COMPLEX",
+  "postal": "NIL"
+ },
+ {
+  "name": "JUBILEE SQUARE",
+  "lat": 1.371786,
+  "lng": 103.847838,
+  "address": "61 ANG MO KIO AVENUE 8 JUBILEE SQUARE",
+  "postal": "NIL"
+ },
+ {
+  "name": "JUNCTION 8",
+  "lat": 1.350481,
+  "lng": 103.84876,
+  "address": "9 BISHAN PLACE JUNCTION 8 SINGAPORE 579837",
+  "postal": "579837"
+ },
+ {
+  "name": "JUNCTION NINE",
+  "lat": 1.433123,
+  "lng": 103.841661,
+  "address": "18 YISHUN AVENUE 9 JUNCTION NINE SINGAPORE 768897",
+  "postal": "768897"
+ },
+ {
+  "name": "JURONG POINT",
+  "lat": 1.339453,
+  "lng": 103.706685,
+  "address": "1 JURONG WEST CENTRAL 2 JURONG POINT SINGAPORE 648886",
+  "postal": "648886"
+ },
+ {
+  "name": "KALLANG WAVE MALL",
+  "lat": 1.303075,
+  "lng": 103.87315,
+  "address": "1 STADIUM PLACE KALLANG WAVE MALL SINGAPORE 397628",
+  "postal": "397628"
+ },
+ {
+  "name": "KAMPUNG ADMIRALTY",
+  "lat": 1.43975,
+  "lng": 103.800721,
+  "address": "676 WOODLANDS DRIVE 71 KAMPUNG ADMIRALTY SINGAPORE 730676",
+  "postal": "730676"
+ },
+ {
+  "name": "KAP",
+  "lat": 1.336842,
+  "lng": 103.779314,
+  "address": "11 KING ALBERT PARK KAP SINGAPORE 598292",
+  "postal": "598292"
+ },
+ {
+  "name": "KATONG SHOPPING CENTRE",
+  "lat": 1.304097,
+  "lng": 103.901516,
+  "address": "865 MOUNTBATTEN ROAD KATONG SHOPPING CENTRE SINGAPORE 437844",
+  "postal": "437844"
+ },
+ {
+  "name": "KATONG V",
+  "lat": 1.303947,
+  "lng": 103.902826,
+  "address": "30 EAST COAST ROAD KATONG V SINGAPORE 428751",
+  "postal": "428751"
+ },
+ {
+  "name": "KINEX",
+  "lat": 1.314618,
+  "lng": 103.894738,
+  "address": "11 TANJONG KATONG ROAD KINEX SINGAPORE 437157",
+  "postal": "437157"
+ },
+ {
+  "name": "LE QUEST",
+  "lat": 1.355942,
+  "lng": 103.741127,
+  "address": "4 BUKIT BATOK STREET 41 LE QUEST SINGAPORE 657991",
+  "postal": "657991"
+ },
+ {
+  "name": "LEISURE PARK KALLANG",
+  "lat": 1.302301,
+  "lng": 103.876474,
+  "address": "5 STADIUM WALK LEISURE PARK KALLANG SINGAPORE 397693",
+  "postal": "397693"
+ },
+ {
+  "name": "LIMBANG SHOPPING CENTRE",
+  "lat": 1.392068,
+  "lng": 103.743102,
+  "address": "533 CHOA CHU KANG STREET 51 LIMBANG SHOPPING CENTRE SINGAPORE 680533",
+  "postal": "680533"
+ },
+ {
+  "name": "LOT ONE SHOPPERS' MALL",
+  "lat": 1.384975,
+  "lng": 103.745012,
+  "address": "21 CHOA CHU KANG AVENUE 4 LOT ONE, SHOPPERS' MALL SINGAPORE 689812",
+  "postal": "689812"
+ },
+ {
+  "name": "LOYANG POINT",
+  "lat": 1.367001,
+  "lng": 103.964618,
+  "address": "258 PASIR RIS STREET 21 7 ELEVEN LOYANG POINT",
+  "postal": "NIL"
+ },
+ {
+  "name": "LUCKY PLAZA",
+  "lat": 1.304506,
+  "lng": 103.833962,
+  "address": "304 ORCHARD ROAD LUCKY PLAZA SINGAPORE 238863",
+  "postal": "238863"
+ },
+ {
+  "name": "MACPHERSON MALL",
+  "lat": 1.331771,
+  "lng": 103.879295,
+  "address": "401 MACPHERSON ROAD MACPHERSON MALL SINGAPORE 368125",
+  "postal": "368125"
+ },
+ {
+  "name": "MANDARIN GALLERY",
+  "lat": 1.302005,
+  "lng": 103.836584,
+  "address": "333A ORCHARD ROAD MANDARIN GALLERY",
+  "postal": "NIL"
+ },
+ {
+  "name": "MARINA BAY LINK MALL",
+  "lat": 1.280238,
+  "lng": 103.85337,
+  "address": "8A MARINA BOULEVARD MARINA BAY LINK MALL SINGAPORE 018984",
+  "postal": "018984"
+ },
+ {
+  "name": "MARINA SQUARE",
+  "lat": 1.291855,
+  "lng": 103.858578,
+  "address": "6 RAFFLES BOULEVARD MARINA SQUARE SINGAPORE 039594",
+  "postal": "039594"
+ },
+ {
+  "name": "MARSILING MALL",
+  "lat": 1.433543,
+  "lng": 103.779882,
+  "address": "4 WOODLANDS STREET 12 MARSILING MALL HAWKER CENTRE SINGAPORE 738623",
+  "postal": "738623"
+ },
+ {
+  "name": "MIDPOINT ORCHARD",
+  "lat": 1.301788,
+  "lng": 103.83866,
+  "address": "220 ORCHARD ROAD MIDPOINT ORCHARD SINGAPORE 238852",
+  "postal": "238852"
+ },
+ {
+  "name": "MILLENIA WALK",
+  "lat": 1.292605,
+  "lng": 103.859725,
+  "address": "9 RAFFLES BOULEVARD MILLENIA WALK SINGAPORE 039596",
+  "postal": "039596"
+ },
+ {
+  "name": "MUSTAFA CENTRE",
+  "lat": 1.310112,
+  "lng": 103.855291,
+  "address": "145 SYED ALWI ROAD MUSTAFA CENTRE SINGAPORE 207704",
+  "postal": "207704"
+ },
+ {
+  "name": "MYVILLAGE AT SERANGOON GARDEN",
+  "lat": 1.365115,
+  "lng": 103.86516,
+  "address": "1 MAJU AVENUE MYVILLAGE AT SERANGOON GARDEN SINGAPORE 556679",
+  "postal": "556679"
+ },
+ {
+  "name": "NEX",
+  "lat": 1.350769,
+  "lng": 103.872296,
+  "address": "23 SERANGOON CENTRAL NEX SINGAPORE 556083",
+  "postal": "556083"
+ },
+ {
+  "name": "NGEE ANN CITY",
+  "lat": 1.302242,
+  "lng": 103.835182,
+  "address": "391 ORCHARD ROAD NGEE ANN CITY SINGAPORE 238872",
+  "postal": "238872"
+ },
+ {
+  "name": "NORTHPOINT CITY",
+  "lat": 1.429698,
+  "lng": 103.835776,
+  "address": "930 YISHUN AVENUE 2 NORTHPOINT CITY SINGAPORE 769098",
+  "postal": "769098"
+ },
+ {
+  "name": "NORTHSHORE PLAZA",
+  "lat": 1.416758,
+  "lng": 103.902077,
+  "address": "407 NORTHSHORE DRIVE NORTHSHORE PLAZA I SINGAPORE 820407",
+  "postal": "820407"
+ },
+ {
+  "name": "OASIS TERRACES",
+  "lat": 1.402865,
+  "lng": 103.913374,
+  "address": "681 PUNGGOL DRIVE CHATERAISE OASIS TERRACES",
+  "postal": "NIL"
+ },
+ {
+  "name": "ONE PUNGGOL",
+  "lat": 1.408728,
+  "lng": 103.905155,
+  "address": "1 PUNGGOL DRIVE ONE PUNGGOL SINGAPORE 828629",
+  "postal": "828629"
+ },
+ {
+  "name": "ORCHARD CENTRAL",
+  "lat": 1.300839,
+  "lng": 103.839435,
+  "address": "181 ORCHARD ROAD ORCHARD CENTRAL SINGAPORE 238896",
+  "postal": "238896"
+ },
+ {
+  "name": "ORCHARD PLAZA",
+  "lat": 1.301257,
+  "lng": 103.84115,
+  "address": "150 ORCHARD ROAD ORCHARD PLAZA SINGAPORE 238841",
+  "postal": "238841"
+ },
+ {
+  "name": "ORCHARD SHOPPING CENTRE",
+  "lat": 1.3015,
+  "lng": 103.837888,
+  "address": "321 ORCHARD ROAD ORCHARD SHOPPING CENTRE SINGAPORE 238866",
+  "postal": "238866"
+ },
+ {
+  "name": "ORCHARDGATEWAY",
+  "lat": 1.300489,
+  "lng": 103.839325,
+  "address": "277 ORCHARD ROAD JEN SINGAPORE ORCHARDGATEWAY BY SHANGRI-LA SINGAPORE 238858",
+  "postal": "238858"
+ },
+ {
+  "name": "OUR TAMPINES HUB",
+  "lat": 1.353134,
+  "lng": 103.940408,
+  "address": "1 TAMPINES WALK OUR TAMPINES HUB SINGAPORE 528523",
+  "postal": "528523"
+ },
+ {
+  "name": "PALAIS RENAISSANCE",
+  "lat": 1.306655,
+  "lng": 103.829588,
+  "address": "390 ORCHARD ROAD PALAIS RENAISSANCE SINGAPORE 238871",
+  "postal": "238871"
+ },
+ {
+  "name": "PARKLANE SHOPPING MALL",
+  "lat": 1.300645,
+  "lng": 103.849449,
+  "address": "35 SELEGIE ROAD PARKLANE SHOPPING MALL SINGAPORE 188307",
+  "postal": "188307"
+ },
+ {
+  "name": "PARKWAY PARADE",
+  "lat": 1.30107,
+  "lng": 103.905279,
+  "address": "80 MARINE PARADE ROAD PARKWAY PARADE SINGAPORE 449269",
+  "postal": "449269"
+ },
+ {
+  "name": "PASIR RIS WEST PLAZA",
+  "lat": 1.379768,
+  "lng": 103.936646,
+  "address": "735 PASIR RIS STREET 72 DONGLIN PASIR RIS WEST PLAZA",
+  "postal": "NIL"
+ },
+ {
+  "name": "PAYA LEBAR QUARTER",
+  "lat": 1.317709,
+  "lng": 103.893415,
+  "address": "10 PAYA LEBAR ROAD PAYA LEBAR QUARTER SINGAPORE 409057",
+  "postal": "409057"
+ },
+ {
+  "name": "PAYA LEBAR SQUARE",
+  "lat": 1.318815,
+  "lng": 103.892581,
+  "address": "60 PAYA LEBAR ROAD PAYA LEBAR SQUARE SINGAPORE 409051",
+  "postal": "409051"
+ },
+ {
+  "name": "PENINSULA PLAZA",
+  "lat": 1.292317,
+  "lng": 103.850803,
+  "address": "111 NORTH BRIDGE ROAD PENINSULA PLAZA SINGAPORE 179098",
+  "postal": "179098"
+ },
+ {
+  "name": "PENINSULA SHOPPING COMPLEX",
+  "lat": 1.291808,
+  "lng": 103.850273,
+  "address": "3 COLEMAN STREET PENINSULA SHOPPING COMPLEX SINGAPORE 179804",
+  "postal": "179804"
+ },
+ {
+  "name": "PEOPLE'S PARK CENTRE",
+  "lat": 1.28577,
+  "lng": 103.84398,
+  "address": "101 UPPER CROSS STREET PEOPLE'S PARK CENTRE SINGAPORE 058357",
+  "postal": "058357"
+ },
+ {
+  "name": "PEOPLE'S PARK COMPLEX",
+  "lat": 1.284134,
+  "lng": 103.84252,
+  "address": "1 PARK ROAD PEOPLE'S PARK COMPLEX SINGAPORE 059108",
+  "postal": "059108"
+ },
+ {
+  "name": "PIONEER MALL",
+  "lat": 1.341915,
+  "lng": 103.697357,
+  "address": "638 JURONG WEST STREET 61 7-11 PIONEER MALL",
+  "postal": "NIL"
+ },
+ {
+  "name": "PLAZA SINGAPURA",
+  "lat": 1.300748,
+  "lng": 103.845048,
+  "address": "68 ORCHARD ROAD PLAZA SINGAPURA SINGAPORE 238839",
+  "postal": "238839"
+ },
+ {
+  "name": "PUNGGOL PLAZA",
+  "lat": 1.394237,
+  "lng": 103.913047,
+  "address": "168 PUNGGOL FIELD PUNGGOL PLAZA SINGAPORE 820168",
+  "postal": "820168"
+ },
+ {
+  "name": "QUEENSWAY SHOPPING CENTRE",
+  "lat": 1.287595,
+  "lng": 103.803397,
+  "address": "1 QUEENSWAY QUEENSWAY SHOPPING CENTRE SINGAPORE 149053",
+  "postal": "149053"
+ },
+ {
+  "name": "RAFFLES CITY SHOPPING CENTRE",
+  "lat": 1.293894,
+  "lng": 103.85312,
+  "address": "252 NORTH BRIDGE ROAD RAFFLES CITY SHOPPING CENTRE",
+  "postal": "NIL"
+ },
+ {
+  "name": "RAFFLES HOLLAND V",
+  "lat": 1.310564,
+  "lng": 103.796107,
+  "address": "118 HOLLAND AVENUE RAFFLES HOLLAND V SINGAPORE 278997",
+  "postal": "278997"
+ },
+ {
+  "name": "RIVERVALE MALL",
+  "lat": 1.392198,
+  "lng": 103.904472,
+  "address": "11 RIVERVALE CRESCENT RIVERVALE MALL SINGAPORE 545082",
+  "postal": "545082"
+ },
+ {
+  "name": "RIVERVALE PLAZA",
+  "lat": 1.385573,
+  "lng": 103.902396,
+  "address": "118 RIVERVALE DRIVE BARBER SHOP RIVERVALE PLAZA",
+  "postal": "NIL"
+ },
+ {
+  "name": "ROCHESTER MALL",
+  "lat": 1.305408,
+  "lng": 103.788447,
+  "address": "35 ROCHESTER DRIVE ROCHESTER MALL",
+  "postal": "NIL"
+ },
+ {
+  "name": "ROXY SQUARE",
+  "lat": 1.304326,
+  "lng": 103.904051,
+  "address": "50 EAST COAST ROAD ROXY SQUARE SINGAPORE 428769",
+  "postal": "428769"
+ },
+ {
+  "name": "SCOTTS SQUARE",
+  "lat": 1.305799,
+  "lng": 103.833075,
+  "address": "6 SCOTTS ROAD SCOTTS SQUARE SINGAPORE 228209",
+  "postal": "228209"
+ },
+ {
+  "name": "SEMBAWANG SHOPPING CENTRE",
+  "lat": 1.441825,
+  "lng": 103.824845,
+  "address": "604 SEMBAWANG ROAD SEMBAWANG SHOPPING CENTRE SINGAPORE 758459",
+  "postal": "758459"
+ },
+ {
+  "name": "SENGKANG GRAND MALL",
+  "lat": 1.382982,
+  "lng": 103.892721,
+  "address": "70 COMPASSVALE BOW SENGKANG GRAND MALL SINGAPORE 544692",
+  "postal": "544692"
+ },
+ {
+  "name": "SERENE CENTRE",
+  "lat": 1.322525,
+  "lng": 103.813707,
+  "address": "10 JALAN SERENE SERENE CENTRE SINGAPORE 258748",
+  "postal": "258748"
+ },
+ {
+  "name": "SHAW CENTRE",
+  "lat": 1.306113,
+  "lng": 103.831971,
+  "address": "1 SCOTTS ROAD SHAW CENTRE SINGAPORE 228208",
+  "postal": "228208"
+ },
+ {
+  "name": "SHAW PLAZA",
+  "lat": 1.324974,
+  "lng": 103.851427,
+  "address": "352 BALESTIER ROAD SHAW PLAZA - TWIN HEIGHTS SINGAPORE 329780",
+  "postal": "329780"
+ },
+ {
+  "name": "SIM LIM SQUARE",
+  "lat": 1.303024,
+  "lng": 103.853038,
+  "address": "1 ROCHOR CANAL ROAD SIM LIM SQUARE SINGAPORE 188504",
+  "postal": "188504"
+ },
+ {
+  "name": "SIM LIM TOWER",
+  "lat": 1.303772,
+  "lng": 103.854661,
+  "address": "10 JALAN BESAR SIM LIM TOWER SINGAPORE 208787",
+  "postal": "208787"
+ },
+ {
+  "name": "SINGAPORE POST CENTRE",
+  "lat": 1.318997,
+  "lng": 103.894895,
+  "address": "10 EUNOS ROAD 8 SINGAPORE POST CENTRE SINGAPORE 408600",
+  "postal": "408600"
+ },
+ {
+  "name": "SINGAPORE SHOPPING CENTRE",
+  "lat": 1.298153,
+  "lng": 103.844111,
+  "address": "190 CLEMENCEAU AVENUE SINGAPORE SHOPPING CENTRE SINGAPORE 239924",
+  "postal": "239924"
+ },
+ {
+  "name": "SQUARE 2",
+  "lat": 1.320705,
+  "lng": 103.844161,
+  "address": "10 SINARAN DRIVE SQUARE 2 SINGAPORE 307506",
+  "postal": "307506"
+ },
+ {
+  "name": "SUN PLAZA",
+  "lat": 1.448195,
+  "lng": 103.819502,
+  "address": "30 SEMBAWANG DRIVE SUN PLAZA SINGAPORE 757713",
+  "postal": "757713"
+ },
+ {
+  "name": "SUNSHINE PLACE",
+  "lat": 1.378041,
+  "lng": 103.739159,
+  "address": "475 CHOA CHU KANG AVENUE 3 BAKEINC SUNSHINE PLACE",
+  "postal": "NIL"
+ },
+ {
+  "name": "SUNTEC CITY",
+  "lat": 1.295467,
+  "lng": 103.858585,
+  "address": "SUNTEC CITY",
+  "postal": "NIL"
+ },
+ {
+  "name": "TAMAN JURONG SHOPPING CENTRE",
+  "lat": 1.335237,
+  "lng": 103.720365,
+  "address": "399 YUNG SHENG ROAD 7 ELEVEN TAMAN JURONG SHOPPING CENTRE",
+  "postal": "NIL"
+ },
+ {
+  "name": "TAMPINES MALL",
+  "lat": 1.352527,
+  "lng": 103.944699,
+  "address": "4 TAMPINES CENTRAL 5 TAMPINES MALL SINGAPORE 529510",
+  "postal": "529510"
+ },
+ {
+  "name": "TAMPINES ONE",
+  "lat": 1.354256,
+  "lng": 103.945072,
+  "address": "10 TAMPINES CENTRAL 1 TAMPINES ONE SINGAPORE 529536",
+  "postal": "529536"
+ },
+ {
+  "name": "TANGLIN MALL",
+  "lat": 1.304843,
+  "lng": 103.823853,
+  "address": "163 TANGLIN ROAD TANGLIN MALL SINGAPORE 247933",
+  "postal": "247933"
+ },
+ {
+  "name": "TANJONG KATONG COMPLEX",
+  "lat": 1.316394,
+  "lng": 103.894359,
+  "address": "845 GEYLANG ROAD TANJONG KATONG COMPLEX SINGAPORE 400845",
+  "postal": "400845"
+ },
+ {
+  "name": "TEKKA PLACE",
+  "lat": 1.304629,
+  "lng": 103.852227,
+  "address": "2 SERANGOON ROAD TEKKA PLACE SINGAPORE 218227",
+  "postal": "218227"
+ },
+ {
+  "name": "THE CATHAY",
+  "lat": 1.299206,
+  "lng": 103.847827,
+  "address": "2 HANDY ROAD THE CATHAY SINGAPORE 229233",
+  "postal": "229233"
+ },
+ {
+  "name": "THE CENTRAL",
+  "lat": 1.288839,
+  "lng": 103.846558,
+  "address": "6 EU TONG SEN STREET THE CENTRAL SINGAPORE 059817",
+  "postal": "059817"
+ },
+ {
+  "name": "THE CENTREPOINT",
+  "lat": 1.302093,
+  "lng": 103.839721,
+  "address": "176 ORCHARD ROAD ECLADO THE CENTREPOINT",
+  "postal": "NIL"
+ },
+ {
+  "name": "THE CLEMENTI MALL",
+  "lat": 1.314896,
+  "lng": 103.764423,
+  "address": "3155 COMMONWEALTH AVENUE WEST THE CLEMENTI MALL SINGAPORE 129588",
+  "postal": "129588"
+ },
+ {
+  "name": "THE GRANDSTAND",
+  "lat": 1.336628,
+  "lng": 103.792929,
+  "address": "210 TURF CLUB ROAD THE GRANDSTAND SINGAPORE 287995",
+  "postal": "287995"
+ },
+ {
+  "name": "THE MIDTOWN",
+  "lat": 1.370504,
+  "lng": 103.895292,
+  "address": "1187 UPPER SERANGOON ROAD THE MIDTOWN SINGAPORE 533971",
+  "postal": "533971"
+ },
+ {
+  "name": "THE PARAGON",
+  "lat": 1.303872,
+  "lng": 103.835858,
+  "address": "290 ORCHARD ROAD THE PARAGON SINGAPORE 238859",
+  "postal": "238859"
+ },
+ {
+  "name": "THE POIZ CENTRE",
+  "lat": 1.331497,
+  "lng": 103.868214,
+  "address": "51 UPPER SERANGOON ROAD THE POIZ CENTRE SINGAPORE 347697",
+  "postal": "347697"
+ },
+ {
+  "name": "THE RAIL MALL",
+  "lat": 1.357811,
+  "lng": 103.768081,
+  "address": "384 UPPER BUKIT TIMAH ROAD THE RAIL MALL SINGAPORE 678042",
+  "postal": "678042"
+ },
+ {
+  "name": "THE SELETAR MALL",
+  "lat": 1.39147,
+  "lng": 103.876126,
+  "address": "33 SENGKANG WEST AVENUE THE SELETAR MALL SINGAPORE 797653",
+  "postal": "797653"
+ },
+ {
+  "name": "THE SHOPPES AT MARINA BAY SANDS",
+  "lat": 1.284235,
+  "lng": 103.858982,
+  "address": "2 BAYFRONT AVENUE THE SHOPPES AT MARINA BAY SANDS SINGAPORE 018972",
+  "postal": "018972"
+ },
+ {
+  "name": "THE STAR VISTA",
+  "lat": 1.30697,
+  "lng": 103.78842,
+  "address": "1 VISTA EXCHANGE GREEN THE STAR VISTA",
+  "postal": "NIL"
+ },
+ {
+  "name": "THOMSON PLAZA",
+  "lat": 1.354669,
+  "lng": 103.83092,
+  "address": "301 UPPER THOMSON ROAD THOMSON PLAZA SINGAPORE 574408",
+  "postal": "574408"
+ },
+ {
+  "name": "TIONG BAHRU PLAZA",
+  "lat": 1.286459,
+  "lng": 103.827015,
+  "address": "302 TIONG BAHRU ROAD TIONG BAHRU PLAZA SINGAPORE 168732",
+  "postal": "168732"
+ },
+ {
+  "name": "UE SQUARE",
+  "lat": 1.292804,
+  "lng": 103.842907,
+  "address": "83 CLEMENCEAU AVENUE UE SQUARE SINGAPORE 239920",
+  "postal": "239920"
+ },
+ {
+  "name": "UNITED SQUARE",
+  "lat": 1.317195,
+  "lng": 103.843611,
+  "address": "101 THOMSON ROAD UNITED SQUARE SINGAPORE 307591",
+  "postal": "307591"
+ },
+ {
+  "name": "UPPER SERANGOON SHOPPING CENTRE",
+  "lat": 1.353481,
+  "lng": 103.878828,
+  "address": "756 UPPER SERANGOON ROAD UPPER SERANGOON SHOPPING CENTRE SINGAPORE 534626",
+  "postal": "534626"
+ },
+ {
+  "name": "VALLEY POINT",
+  "lat": 1.293018,
+  "lng": 103.826941,
+  "address": "491 RIVER VALLEY ROAD VALLEY POINT SHOPPING CENTRE",
+  "postal": "NIL"
+ },
+ {
+  "name": "VELOCITY @ NOVENA SQUARE",
+  "lat": 1.319789,
+  "lng": 103.844034,
+  "address": "238 THOMSON ROAD VELOCITY @ NOVENA SQUARE",
+  "postal": "NIL"
+ },
+ {
+  "name": "VISTA POINT",
+  "lat": 1.431297,
+  "lng": 103.793775,
+  "address": "548 WOODLANDS DRIVE 44 7 ELEVEN VISTA POINT",
+  "postal": "NIL"
+ },
+ {
+  "name": "VIVOCITY",
+  "lat": 1.264293,
+  "lng": 103.822305,
+  "address": "1 HARBOURFRONT WALK VIVOCITY SINGAPORE 098585",
+  "postal": "098585"
+ },
+ {
+  "name": "WATERWAY POINT",
+  "lat": 1.406485,
+  "lng": 103.902106,
+  "address": "83 PUNGGOL CENTRAL WATERWAY POINT SINGAPORE 828761",
+  "postal": "828761"
+ },
+ {
+  "name": "WEST COAST PLAZA",
+  "lat": 1.303697,
+  "lng": 103.766131,
+  "address": "154 WEST COAST ROAD WEST COAST PLAZA SINGAPORE 127371",
+  "postal": "127371"
+ },
+ {
+  "name": "WEST MALL",
+  "lat": 1.350021,
+  "lng": 103.749216,
+  "address": "1 BUKIT BATOK CENTRAL LINK WEST MALL SINGAPORE 658713",
+  "postal": "658713"
+ },
+ {
+  "name": "WESTGATE",
+  "lat": 1.334158,
+  "lng": 103.742766,
+  "address": "3 GATEWAY DRIVE WESTGATE SINGAPORE 608532",
+  "postal": "608532"
+ },
+ {
+  "name": "WHITE SANDS",
+  "lat": 1.37245,
+  "lng": 103.949716,
+  "address": "1 PASIR RIS CENTRAL STREET 3 WHITE SANDS SINGAPORE 518457",
+  "postal": "518457"
+ },
+ {
+  "name": "WISMA ATRIA",
+  "lat": 1.303705,
+  "lng": 103.833206,
+  "address": "435 ORCHARD ROAD WISMA ATRIA SINGAPORE 238877",
+  "postal": "238877"
+ },
+ {
+  "name": "WISTERIA MALL",
+  "lat": 1.417953,
+  "lng": 103.841269,
+  "address": "598 YISHUN RING ROAD WISTERIA MALL SINGAPORE 768698",
+  "postal": "768698"
+ },
+ {
+  "name": "WOODLANDS MART",
+  "lat": 1.445692,
+  "lng": 103.798657,
+  "address": "768 WOODLANDS AVE 6 BUZZ WOODLANDS MART",
+  "postal": "NIL"
+ },
+ {
+  "name": "WOODLEIGH MALL",
+  "lat": 1.338731,
+  "lng": 103.87167,
+  "address": "11 BIDADARI PARK DRIVE THE WOODLEIGH MALL SINGAPORE 367803",
+  "postal": "367803"
+ },
+ {
+  "name": "YEW TEE SQUARE",
+  "lat": 1.398047,
+  "lng": 103.747085,
+  "address": "624 CHOA CHU KANG STREET 62 YEW TEE SQUARE SINGAPORE 680624",
+  "postal": "680624"
+ },
+ {
+  "name": "YEWTEE POINT",
+  "lat": 1.39697,
+  "lng": 103.746443,
+  "address": "21 CHOA CHU KANG NORTH 6 YEWTEE POINT SINGAPORE 689578",
+  "postal": "689578"
+ },
+ {
+  "name": "ZHONGSHAN MALL",
+  "lat": 1.326945,
+  "lng": 103.846554,
+  "address": "20 AH HOOD ROAD ZHONGSHAN MALL",
+  "postal": "NIL"
+ }
+]

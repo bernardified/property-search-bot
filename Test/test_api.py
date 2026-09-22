@@ -557,15 +557,44 @@ class TestExploreEncoding(unittest.TestCase):
         ]), "99")
 
     def test_nearest_mrt_uses_cached_station_coords(self):
-        from api import station_coords, nearest_mrt_m
+        from api import station_coords, nearest_m
         coords = station_coords({
             "A": {"lat": 1.3000, "lng": 103.9000},
             "B": {"lat": 1.4000, "lng": 103.9000},
             "BROKEN": {"name": "no coords"},
         })
         self.assertEqual(len(coords), 2)  # coordless station skipped
-        self.assertEqual(nearest_mrt_m(1.3001, 103.9000, coords), 11)
-        self.assertIsNone(nearest_mrt_m(1.3, 103.9, []))
+        self.assertEqual(nearest_m(1.3001, 103.9000, coords), 11)
+        self.assertIsNone(nearest_m(1.3, 103.9, []))
+
+    def test_mall_register_feeds_the_same_distance_loop(self):
+        """The nearest-mall filter is the MRT one over a different register:
+        a static list of coordinates, and no distance when it is empty."""
+        from cache.mall_cache import load_malls, mall_coords
+        malls = load_malls()
+        self.assertGreater(len(malls), 100)
+        self.assertEqual(len(mall_coords()), len(malls))
+        for m in malls:
+            self.assertTrue(1.15 <= m["lat"] <= 1.48, m)     # inside Singapore
+            self.assertTrue(103.6 <= m["lng"] <= 104.1, m)
+
+    def test_remaining_lease_from_ura_tenure_string(self):
+        from datetime import datetime
+        from api import lease_remaining_years
+        now = datetime(2026, 9, 22)
+        self.assertEqual(
+            lease_remaining_years([{"tenure": "99 yrs lease commencing from 2012"}], now),
+            round(99 - (14 + 8 / 12), 1))
+        # A freehold project has no lease to quote, even when a stray
+        # 999-year transaction sits inside it (7 real projects do).
+        self.assertIsNone(lease_remaining_years(
+            [{"tenure": "Freehold"}] * 6 + [{"tenure": "999 yrs lease commencing from 1966"}],
+            now))
+        # An expired lease reads as expired, never negative.
+        self.assertEqual(
+            lease_remaining_years([{"tenure": "99 yrs lease commencing from 1900"}], now), 0)
+        self.assertIsNone(lease_remaining_years([{"tenure": ""}], now))
+        self.assertIsNone(lease_remaining_years([], now))
 
     def test_build_developments_adds_encoding_fields(self):
         from api import build_developments, build_rent_index
@@ -579,11 +608,14 @@ class TestExploreEncoding(unittest.TestCase):
             ]}]
         devs = build_developments(
             projects, {}, rent_index=build_rent_index(self._rentals(), now=datetime(2026, 9, 1)),
-            mrt_coords=[(1.366666, 103.833333)], now=datetime(2026, 9, 1))
+            mrt_coords=[(1.366666, 103.833333)], mall_coords=[(1.3, 103.9)],
+            now=datetime(2026, 9, 1))
         a = devs[0]
         self.assertEqual(a["tenure"], "freehold")
+        self.assertIsNone(a["lease_years"])              # freehold: nothing to run down
         self.assertEqual(a["last_txn"], "Aug 2026")      # newest across ALL txns
         self.assertLess(a["mrt_m"], 20)                  # station sits on the project
+        self.assertGreater(a["mall_m"], 1000)            # the only mall is 8km away
         self.assertEqual(a["avg_psf"], 1858)
         self.assertAlmostEqual(a["yield_pct"], round(60 / 1858 * 100, 2), places=2)
 
@@ -1295,4 +1327,17 @@ class TestHDBExploreLayer(unittest.TestCase):
             self.assertIsNone(explore_cache.hdb_source_key())
         with patch("cache.explore_cache.hdb_meta_timestamp", return_value=123.0), \
              patch("cache.explore_cache.hdb_is_fresh", return_value=True):
-            self.assertEqual(explore_cache.hdb_source_key(), (123.0,))
+            self.assertEqual(explore_cache.hdb_source_key(),
+                             (explore_cache.LAYER_SCHEMA, 123.0))
+
+    def test_source_key_carries_the_row_schema(self):
+        """A deploy that adds a field to the dots invalidates the stored blob:
+        the cache timestamps have not moved, so only the schema can say the
+        rows are of the wrong shape."""
+        from cache import explore_cache
+        with patch("cache.explore_cache.ura_meta_timestamp", return_value=1.0), \
+             patch("cache.explore_cache.rental_meta_timestamp", return_value=2.0), \
+             patch("cache.explore_cache.is_ura_transactions_stale", return_value=False), \
+             patch("cache.explore_cache.is_rental_stale", return_value=False):
+            self.assertEqual(explore_cache.source_key(),
+                             (explore_cache.LAYER_SCHEMA, 1.0, 2.0))

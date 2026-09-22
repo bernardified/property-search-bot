@@ -1478,7 +1478,18 @@ const psfLine = (d) =>
   d.avg_psf
     ? `${fmtMoney(d.avg_psf)} psf · ${d.txns_12mo} txn${d.txns_12mo === 1 ? "" : "s"}`
     : "<span class='muted'>none in last 12 mo</span>";
-const mrtLine = (d) => (d.mrt_m != null ? `${d.mrt_m.toLocaleString("en-SG")} m` : "–");
+const metres = (v) => (v != null ? `${v.toLocaleString("en-SG")} m` : "–");
+const mrtLine = (d) => metres(d.mrt_m);
+const mallLine = (d) => metres(d.mall_m);
+// A private development's remaining lease, from URA's own tenure string. A
+// freehold one has none to show and says so rather than reading as missing
+// data — the tenure line right above it is where "Freehold" is stated.
+const privateLeaseLine = (d) =>
+  d.lease_years != null
+    ? `${Math.round(d.lease_years)} yrs`
+    : d.tenure === "freehold"
+      ? "<span class='muted'>no expiry</span>"
+      : "–";
 // The popup knows which market drew it, so the search it starts is routed
 // rather than re-guessed by looksLikeHdb — the same reason a picked
 // type-ahead row carries its market.
@@ -1526,7 +1537,9 @@ const MARKETS = {
         line("12-mo avg", psfLine(d)) +
         line("Gross yield", d.yield_pct ? d.yield_pct.toFixed(2) + "%" : "<span class='muted'>–</span>") +
         line("Tenure", TENURE_LABELS[d.tenure] || "–") +
+        line("Remaining lease", privateLeaseLine(d)) +
         line("Nearest MRT", mrtLine(d)) +
+        line("Nearest mall", mallLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
         viewLink(d.project, "private")
       );
@@ -1578,6 +1591,7 @@ const MARKETS = {
         line("Remaining lease", d.lease_years != null ? `${Math.round(d.lease_years)} yrs` : "–") +
         line("Flat types", (d.flat_types || []).map(flatLabel).join(", ") || "–") +
         line("Nearest MRT", mrtLine(d)) +
+        line("Nearest mall", mallLine(d)) +
         line("Last transaction", d.last_txn ? esc(d.last_txn) : "–") +
         viewLink(`${d.block} ${d.street}`, "hdb")
       );
@@ -1664,9 +1678,10 @@ function newClusterLayer() {
 
 // ── Filters (all client-side — the full list is already in the browser) ──────
 //
-// Three of them mean the same thing in both markets (a recent transaction, a
-// walk to the MRT, a price per square foot) and are read here; everything else
-// is market-specific and lives in that market's own `matches`.
+// Four of them mean the same thing in both markets (a recent transaction, a
+// walk to the MRT, a walk to a mall, a price per square foot) and are read
+// here; everything else is market-specific and lives in that market's own
+// `matches`.
 
 function readFilters() {
   const num = (id) => {
@@ -1676,6 +1691,7 @@ function readFilters() {
   return {
     activeOnly: el("f-active").checked,
     mrt: parseInt(el("f-mrt").value, 10) || null,
+    mall: parseInt(el("f-mall").value, 10) || null,
     psfMin: num("f-psf-min"),
     psfMax: num("f-psf-max"),
   };
@@ -1684,6 +1700,7 @@ function readFilters() {
 function matches(dev, f) {
   if (f.activeOnly && !dev.txns_12mo) return false;
   if (f.mrt && (dev.mrt_m == null || dev.mrt_m > f.mrt)) return false;
+  if (f.mall && (dev.mall_m == null || dev.mall_m > f.mall)) return false;
   if (f.psfMin != null && (dev.avg_psf == null || dev.avg_psf < f.psfMin)) return false;
   if (f.psfMax != null && (dev.avg_psf == null || dev.avg_psf > f.psfMax)) return false;
   return market.matches(dev);
@@ -1747,18 +1764,26 @@ function setMetric(name) {
   renderLegend();
 }
 
-// mrt_m comes from the cached station coords; if that cache is empty (no Mongo,
-// no OneMap token) every dot has mrt_m = null and each distance option would
-// match nothing — blanking the map. Offer the filter only when it can work.
-function syncMrtAvailability() {
-  const sel = el("f-mrt");
-  const usable = market.dots.some((d) => d.dev.mrt_m != null);
+// Both distances are measured server-side against a register — 123 cached MRT
+// stations, 183 malls — and either register can come back empty (no Mongo, no
+// OneMap token, a missing malls.json). Every dot then has a null distance and
+// each option would match nothing, blanking the map, so a filter is offered
+// only when it can work. It also covers a stored explore payload built before
+// the field existed, which is exactly what a deploy serves for a moment.
+function syncDistanceFilter(selId, labelId, field, what) {
+  const sel = el(selId);
+  const usable = market.dots.some((d) => d.dev[field] != null);
   sel.disabled = !usable;
   if (!usable) {
     sel.value = "";
-    sel.title = "Nearest-MRT data is unavailable right now";
+    sel.title = `${what} data is unavailable right now`;
   }
-  el("mrt-label").classList.toggle("disabled", !usable);
+  el(labelId).classList.toggle("disabled", !usable);
+}
+
+function syncDistanceFilters() {
+  syncDistanceFilter("f-mrt", "mrt-label", "mrt_m", "Nearest-MRT");
+  syncDistanceFilter("f-mall", "mall-label", "mall_m", "Nearest-mall");
 }
 
 // One chip cloud builder for districts, towns and flat types: same markup,
@@ -1828,7 +1853,7 @@ async function enterExplore(target = market) {
     syncFilterPanels();
     renderMetricToggle();
     renderLegend();
-    syncMrtAvailability();
+    syncDistanceFilters();
     map.addLayer(market.layer);
     applyFilters();
     // A market switch keeps the camera: the user has usually zoomed somewhere
@@ -1887,7 +1912,7 @@ el("metric-toggle").addEventListener("click", (e) => {
   if (b) setMetric(b.dataset.metric);
 });
 
-for (const id of ["f-active", "f-mrt", "f-psf-min", "f-psf-max", "f-lease"]) {
+for (const id of ["f-active", "f-mrt", "f-mall", "f-psf-min", "f-psf-max", "f-lease"]) {
   el(id).addEventListener("input", applyFilters);
 }
 
@@ -1912,6 +1937,7 @@ panel.addEventListener("click", (e) => {
 el("reset-filters").addEventListener("click", () => {
   el("f-active").checked = false;
   el("f-mrt").value = "";
+  el("f-mall").value = "";
   el("f-psf-min").value = "";
   el("f-psf-max").value = "";
   for (const set of Object.values(market.sel)) set.clear();

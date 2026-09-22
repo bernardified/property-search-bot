@@ -46,6 +46,7 @@ from cache.cache_hdb import (
 from cache import explore_cache
 from cache.cache_ura import get_ura_data, get_project_index, oldest_contract_date
 from cache.cache_rental import get_rental_data
+from cache.mall_cache import mall_coords as mall_register_coords
 from cache.onemap_mrt import build_mrt_cache
 from storage import get_recent_searches
 from utils import (
@@ -604,6 +605,44 @@ def classify_tenure(txns: list) -> str | None:
     return max(sorted(votes), key=lambda k: votes[k])
 
 
+LEASE_RE = re.compile(r"(\d+)\s*yrs?\s+lease\s+commencing\s+from\s+(\d{4})", re.I)
+
+
+def lease_remaining_years(txns: list, now: datetime) -> float | None:
+    """A development's remaining lease in years, or None when it has none to
+    remain (freehold) or none that parses.
+
+    URA writes the term and its start into every transaction's tenure string
+    ("99 yrs lease commencing from 2012") — the same string `classify_tenure`
+    buckets — so this needs no extra data, only the arithmetic the HDB side
+    already does off `remaining_lease`. The majority string wins, for the same
+    reason and with the same alphabetical tie-break: a project split 1:1 must
+    not flip between cache refreshes.
+
+    That vote runs over EVERY tenure string, "Freehold" included, and not just
+    the ones that parse as a lease. Seven projects are freehold with a stray
+    999-year transaction in them; counting only the leases would have handed
+    each of those a remaining lease its own tenure line denies.
+
+    URA gives the commencement YEAR and no month, so the answer is good to
+    about a year; it is quoted rounded, never to a decimal, and 0 is the
+    floor (an expired lease reads as expired, not as negative).
+    """
+    votes: dict[str, int] = {}
+    for t in txns:
+        tenure = (t.get("tenure") or "").strip()
+        if tenure:
+            votes[tenure] = votes.get(tenure, 0) + 1
+    if not votes:
+        return None
+    winner = LEASE_RE.match(max(sorted(votes), key=lambda k: votes[k]))
+    if not winner:
+        return None                      # freehold, or a string we cannot read
+    term, start = winner.groups()
+    elapsed = (now.year - int(start)) + (now.month - 1) / 12
+    return round(max(int(term) - elapsed, 0), 1)
+
+
 def station_coords(stations: dict) -> list:
     """MRT cache → [(lat, lng)]. Coords are already cached (123 stations), so
     distance-to-MRT costs a haversine loop, not an API call."""
@@ -611,14 +650,18 @@ def station_coords(stations: dict) -> list:
             if s.get("lat") and s.get("lng")]
 
 
-def nearest_mrt_m(lat: float, lng: float, coords: list):
+def nearest_m(lat: float, lng: float, coords: list):
+    """Straight-line metres to the closest of `coords`, or None when the
+    register behind them is empty. Used for both the MRT and the mall
+    distance: each is a small fixed list of coordinates, so the whole thing is
+    a haversine loop rather than a lookup per dot."""
     if not coords:
         return None
     return round(min(haversine_m(lat, lng, a, b) for a, b in coords))
 
 
 def build_developments(project_dicts: list, fallback_coords: dict, rent_index=None,
-                       mrt_coords=None, now=None) -> list:
+                       mrt_coords=None, mall_coords=None, now=None) -> list:
     """One dot per non-landed development for the explore map (pure — tested).
 
     Coordinates come from URA's own x/y (SVY21 → WGS84) — authoritative and
@@ -629,9 +672,10 @@ def build_developments(project_dicts: list, fallback_coords: dict, rent_index=No
     to 0m median across 2,376 projects.
 
     Beyond position, each dot carries what the map colours and filters on:
-    avg_psf and yield_pct (the two colour metrics), tenure, mrt_m and
-    last_txn. All of it is derived from data already in memory — the rental
-    index and MRT coords are injected, so this stays pure and does no IO.
+    avg_psf and yield_pct (the two colour metrics), tenure, lease_years,
+    mrt_m, mall_m and last_txn. All of it is derived from data already in
+    memory — the rental index and the MRT/mall coordinates are injected, so
+    this stays pure and does no IO.
     """
     now = now or datetime.now()
     cutoff = now.replace(day=1) - relativedelta(months=12)
@@ -690,7 +734,11 @@ def build_developments(project_dicts: list, fallback_coords: dict, rent_index=No
             "txns_12mo": len(psf_list),
             "yield_pct": yield_pct,
             "tenure": classify_tenure(strata),
-            "mrt_m": nearest_mrt_m(lat, lng, mrt_coords),
+            # None for a freehold project: it has no lease to run down, which
+            # the tenure beside it already says.
+            "lease_years": lease_remaining_years(strata, now),
+            "mrt_m": nearest_m(lat, lng, mrt_coords),
+            "mall_m": nearest_m(lat, lng, mall_coords),
             "last_txn": latest.strftime("%b %Y") if latest else None,
         })
 
@@ -811,6 +859,14 @@ def _mrt_coords() -> list:
         return []
 
 
+def _mall_coords() -> list:
+    """The checked-in mall register, or [] — same contract as _mrt_coords."""
+    try:
+        return mall_register_coords()
+    except Exception:
+        return []
+
+
 def _build_developments() -> dict:
     """Derive the private layer from the transaction and rental caches.
 
@@ -823,6 +879,7 @@ def _build_developments() -> dict:
     devs = build_developments(
         transactions, _load_fallback_coords(),
         rent_index=build_rent_index(rentals), mrt_coords=_mrt_coords(),
+        mall_coords=_mall_coords(),
     )
     # District estate names ride along with the dots (28 short strings, and
     # the payload is already gzipped) rather than costing the frontend a
@@ -839,8 +896,9 @@ developments_layer = _DerivedLayer(
 def developments_payload() -> dict:
     """Every non-landed development with a coordinate — the explore-map layer.
     ~2.4k rows of {project, street, district, lat, lng, avg_psf, txns_12mo,
-    yield_pct, tenure, mrt_m, last_txn}: the last four drive the colour
-    metrics and the client-side filters, and cost no extra IO. Plus
+    yield_pct, tenure, lease_years, mrt_m, mall_m, last_txn}: the last six
+    drive the colour metrics and the client-side filters, and cost no extra
+    IO. Plus
     `districts`, the district -> estate-name table the dots label against.
 
     Served from the persisted payload (cache/explore_cache.py) whenever it is
@@ -887,7 +945,7 @@ def _hdb_block_coords() -> dict:
         return {}
 
 
-def build_hdb_blocks(records: list, coords: dict, mrt_coords=None,
+def build_hdb_blocks(records: list, coords: dict, mrt_coords=None, mall_coords=None,
                      window_months: int = HDB_EXPLORE_WINDOW_MONTHS,
                      now=None) -> list:
     """One dot per HDB block for the explore map (pure — tested).
@@ -944,7 +1002,8 @@ def build_hdb_blocks(records: list, coords: dict, mrt_coords=None,
             "txns_12mo": len(recent),
             "lease_years": _lease_today(latest, now),
             "flat_types": types,
-            "mrt_m": nearest_mrt_m(lat, lng, mrt_coords),
+            "mrt_m": nearest_m(lat, lng, mrt_coords),
+            "mall_m": nearest_m(lat, lng, mall_coords),
             "last_txn": latest["month_dt"].strftime("%b %Y") if latest else None,
         })
 
@@ -975,7 +1034,8 @@ def _build_hdb_blocks() -> dict:
     """
     with _hdb_lock:
         records = get_hdb_resale_data()
-    blocks = build_hdb_blocks(records, _hdb_block_coords(), mrt_coords=_mrt_coords())
+    blocks = build_hdb_blocks(records, _hdb_block_coords(), mrt_coords=_mrt_coords(),
+                              mall_coords=_mall_coords())
     return {"blocks": blocks, "count": len(blocks),
             "flat_types": FLAT_TYPES, "window_months": HDB_EXPLORE_WINDOW_MONTHS}
 
@@ -989,7 +1049,7 @@ def hdb_blocks_payload() -> dict:
     """Every HDB block with a warmed coordinate — the HDB explore layer.
 
     ~9.6k rows of {block, street, town, lat, lng, avg_psf, med_price,
-    txns_12mo, lease_years, flat_types, mrt_m, last_txn}. Bigger than the
+    txns_12mo, lease_years, flat_types, mrt_m, mall_m, last_txn}. Bigger than the
     private layer (~216KB gzipped against ~77KB) because there are four times
     as many blocks as developments, which is why it is fetched only when the
     user actually switches markets — the landing state is still private.

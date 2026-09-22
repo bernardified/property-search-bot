@@ -13,8 +13,8 @@ when a cache actually refreshes, which is exactly when the dots change.
 Two layers live here, one document each, because they are derived from
 different caches and refresh on different schedules:
 
-  developments  private dots, keyed (ura_ts, rental_ts)   — Tue/Fri + the 15th
-  hdb_blocks    HDB block dots, keyed (hdb_ts,)           — roughly monthly
+  developments  private dots, keyed (schema, ura_ts, rental_ts)  — Tue/Fri + 15th
+  hdb_blocks    HDB block dots, keyed (schema, hdb_ts)            — ~monthly
 
 Keying them separately is the point: a URA refresh must not invalidate a
 payload built from HDB resale data, and vice versa.
@@ -42,9 +42,18 @@ COLLECTION = "explore_cache"
 DOC_ID = "developments"
 HDB_DOC_ID = "hdb_blocks"
 
+# The shape of the rows inside a stored payload. It leads every key because a
+# blob is only current if it was built by code that agrees with this one: the
+# cache timestamps say nothing about a deploy that ADDS a field to the dots
+# (mall_m, lease_years), and without this a new build would keep serving the
+# old rows until URA next refreshed — a filter with no data behind it. Bump it
+# whenever build_developments or build_hdb_blocks changes what a row carries.
+LAYER_SCHEMA = 2
 
-def source_key() -> tuple[float, float] | None:
-    """`(ura_ts, rental_ts)` — what a stored payload is keyed on — or None.
+
+def source_key() -> tuple | None:
+    """`(LAYER_SCHEMA, ura_ts, rental_ts)` — what a stored payload is keyed
+    on — or None.
 
     None means "do not use the store": either cache is missing, or one is
     stale and therefore due a refresh, and refreshing is what the full
@@ -56,11 +65,12 @@ def source_key() -> tuple[float, float] | None:
         return None
     if is_ura_transactions_stale(ura) or is_rental_stale(rental):
         return None
-    return (ura, rental)
+    return (LAYER_SCHEMA, ura, rental)
 
 
-def hdb_source_key() -> tuple[float] | None:
-    """`(hdb_ts,)` for the HDB block layer, or None to force the slow path.
+def hdb_source_key() -> tuple | None:
+    """`(LAYER_SCHEMA, hdb_ts)` for the HDB block layer, or None to force the
+    slow path.
 
     Same contract as `source_key()`, against the one cache that layer comes
     from. `is_cache_fresh()` rather than a staleness check on the timestamp
@@ -71,7 +81,7 @@ def hdb_source_key() -> tuple[float] | None:
     ts = hdb_meta_timestamp()
     if ts is None or not hdb_is_fresh():
         return None
-    return (ts,)
+    return (LAYER_SCHEMA, ts)
 
 
 def load(doc_id: str = DOC_ID) -> tuple[dict | None, tuple | None]:
@@ -104,7 +114,8 @@ def save(payload: dict, key: tuple, doc_id: str = DOC_ID) -> None:
     here only costs the next process a rebuild, so it never propagates.
 
     The key is stored as a plain list so one shape serves both layers — the
-    private one is two timestamps and the HDB one is a single timestamp.
+    schema version plus two cache timestamps on the private side, and the
+    schema version plus one on the HDB side.
     """
     db = get_mongo_db()
     if db is None:
