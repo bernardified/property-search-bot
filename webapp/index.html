@@ -26,6 +26,10 @@
         <div id="suggest" role="listbox" aria-label="Matching developments" hidden></div>
       </div>
       <button id="nearby-btn" class="side-btn" type="button" hidden>📌 Search nearby (within 1 km)</button>
+      <!-- Drilling into a neighbour from a 1 km ring is the one search with an
+           earlier view to come back to. The ring's rows are still in hand, so
+           this return redraws them without a request. -->
+      <button id="back-to-nearby" class="side-btn" type="button" hidden>←&nbsp;Back to 1 km around <span id="back-to-nearby-name"></span></button>
       <!-- Explore is the landing state, so there is no button to enter it.
            This returns from a search result, the one place it is reachable
            from — it stays hidden while explore is already on screen. -->
@@ -198,6 +202,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-  <script src="map.js?v=10"></script>
+  <script src="map.js?v=11"></script>
 </body>
 </html>
