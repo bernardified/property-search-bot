@@ -567,6 +567,14 @@ class TestExploreEncoding(unittest.TestCase):
         self.assertEqual(nearest_m(1.3001, 103.9000, coords), 11)
         self.assertIsNone(nearest_m(1.3, 103.9, []))
 
+    def test_mall_register_is_read_once_and_fingerprinted(self):
+        """The fingerprint is content-addressed: a checkout rewrites mtime
+        without changing a mall, and that must not rebuild both layers."""
+        from cache import mall_cache
+        fp = mall_cache.register_fingerprint()
+        self.assertEqual(len(fp), 12)
+        self.assertEqual(fp, mall_cache.register_fingerprint())   # memoized
+
     def test_mall_register_feeds_the_same_distance_loop(self):
         """The nearest-mall filter is the MRT one over a different register:
         a static list of coordinates, and no distance when it is empty."""
@@ -1328,7 +1336,7 @@ class TestHDBExploreLayer(unittest.TestCase):
         with patch("cache.explore_cache.hdb_meta_timestamp", return_value=123.0), \
              patch("cache.explore_cache.hdb_is_fresh", return_value=True):
             self.assertEqual(explore_cache.hdb_source_key(),
-                             (explore_cache.LAYER_SCHEMA, 123.0))
+                             explore_cache._build_key() + (123.0,))
 
     def test_source_key_carries_the_row_schema(self):
         """A deploy that adds a field to the dots invalidates the stored blob:
@@ -1340,4 +1348,25 @@ class TestHDBExploreLayer(unittest.TestCase):
              patch("cache.explore_cache.is_ura_transactions_stale", return_value=False), \
              patch("cache.explore_cache.is_rental_stale", return_value=False):
             self.assertEqual(explore_cache.source_key(),
-                             (explore_cache.LAYER_SCHEMA, 1.0, 2.0))
+                             explore_cache._build_key() + (1.0, 2.0))
+            self.assertEqual(explore_cache._build_key()[0], explore_cache.LAYER_SCHEMA)
+
+    def test_build_key_tracks_the_mall_register(self):
+        """Editing the register must invalidate both payloads on its own: the
+        dots carry mall_m, and nothing else in the key would ever notice a
+        checked-in file changing."""
+        from cache import explore_cache
+        before = explore_cache._build_key()
+        with patch("cache.explore_cache.mall_fingerprint", return_value="deadbeef"):
+            after = explore_cache._build_key()
+        self.assertNotEqual(before, after)
+        with patch("cache.explore_cache.mall_fingerprint", return_value="deadbeef"), \
+             patch("cache.explore_cache.hdb_meta_timestamp", return_value=123.0), \
+             patch("cache.explore_cache.hdb_is_fresh", return_value=True), \
+             patch("cache.explore_cache.ura_meta_timestamp", return_value=1.0), \
+             patch("cache.explore_cache.rental_meta_timestamp", return_value=2.0), \
+             patch("cache.explore_cache.is_ura_transactions_stale", return_value=False), \
+             patch("cache.explore_cache.is_rental_stale", return_value=False):
+            # both layers, since both carry the field
+            self.assertEqual(explore_cache.hdb_source_key(), after + (123.0,))
+            self.assertEqual(explore_cache.source_key(), after + (1.0, 2.0))
