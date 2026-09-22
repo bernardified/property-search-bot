@@ -420,7 +420,19 @@ def get_mongo_db():
             server_api=ServerApi('1'),
             serverSelectionTimeoutMS=10000,
             connectTimeoutMS=10000,
-            socketTimeoutMS=10000,
+            # 10s was a timeout for small documents. The transaction cache is
+            # ~31MB read as a handful of ~16MB cursor batches, and a container
+            # whose link to Atlas runs at a couple of MB/s spends ~8s on one of
+            # them — inside the old budget by luck, and a load that trips it
+            # comes back as an empty cache rather than an error.
+            socketTimeoutMS=60000,
+            # Wire compression, because the same 31MB otherwise crosses
+            # uncompressed on every cold load: these are repetitive JSON-ish
+            # documents and they deflate several-fold (measured: the transaction
+            # cache loads in ~5s instead of ~9s). zstd is the better codec and
+            # needs the `zstandard` package; zlib is built in, so it stays as
+            # the fallback and this works even if that wheel is missing.
+            compressors="zstd,zlib",
         )
         _mongo_db = _mongo_client['property_bot']
         logger.info("[MongoDB] Connected")

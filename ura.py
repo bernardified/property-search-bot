@@ -4,7 +4,8 @@ import logging
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
-from cache.cache_ura import get_ura_data
+from cache.cache_ura import (get_ura_data, get_project_index, get_projects_at,
+                             get_pipeline, oldest_contract_date)
 from utils import (SIZE_BANDS, get_band, sqm_to_sqft, parse_float, parse_mmyy_date,
                    format_mmyy_date, fit_price_trend)
 
@@ -112,13 +113,23 @@ def score_name_match(search_name: str, project_name: str) -> float:
     return difflib.SequenceMatcher(None, sn, pn).ratio()
 
 
-def _collect_matched_transactions(development_name: str) -> dict:
+def _collect_matched_transactions(development_name: str,
+                                  from_index: bool = False) -> dict:
     """
     Fuzzy-match a development name against the URA cache and collect every
     transaction across all matched blocks.
 
     Shared by search_property() and price_trend() so the matching/ambiguity
     logic lives in exactly one place.
+
+    `from_index` picks where the projects come from, not what is returned —
+    both paths score the same names by the same rules and answer identically.
+    Default (False) is the whole cache via get_ura_data(): what the bot has
+    loaded anyway for browse-by-district, and what tests inject by patching
+    that one function. True reads cache_ura's name index and then only the
+    winner's own document — ~1MB against ~31MB on the wire and ~240MB of
+    Python. The webapp passes it because its container cannot afford the
+    latter; see cache_ura's lean-read note.
 
     Returns one of:
       {"error": str}                      — no usable match
@@ -127,8 +138,16 @@ def _collect_matched_transactions(development_name: str) -> dict:
        "matched_project_name": str, "street": str,
        "fuzzy_match": str|None, "alternatives": [...]}
     """
-    all_results, _pipeline_data = get_ura_data()
-    if not all_results:
+    # Scoring only ever reads a project's NAME, so the index is enough to do
+    # it with; each row also carries where its project sits, so the winner's
+    # transactions are one document further on. A stale or missing index falls
+    # back to the full load — which is also the path that refreshes it.
+    index = get_project_index() if from_index else None
+    if index is not None:
+        candidates = index
+    else:
+        candidates, _pipeline_data = get_ura_data()
+    if not candidates:
         return {"error": "Could not load URA transaction data. Please try again later."}
 
     search_name = development_name.upper().strip()
@@ -137,7 +156,7 @@ def _collect_matched_transactions(development_name: str) -> dict:
     # Score each project against the search term using the shared matcher
     # (see score_name_match for the tier breakdown). Collect all above threshold.
     scored = []
-    for project in all_results:
+    for project in candidates:
         project_name = project.get("project", "").upper().strip()
         if not project_name:
             continue
@@ -179,6 +198,13 @@ def _collect_matched_transactions(development_name: str) -> dict:
     else:
         # Take single best match
         top_projects = [scored[0][1]]
+
+    # Index rows hold no transactions — fetch the winners' own documents now
+    # that scoring has picked them (one read per chunk they sit in).
+    if index is not None:
+        top_projects = get_projects_at(top_projects)
+        if not top_projects:
+            return {"error": "Could not load URA transaction data. Please try again later."}
 
     for project in top_projects:
         for txn in project.get("transaction", []):
@@ -261,14 +287,15 @@ def _txn_entry(item: dict) -> tuple[str, dict] | None:
     }
 
 
-def band_transactions(development_name: str, band_label: str) -> dict:
+def band_transactions(development_name: str, band_label: str,
+                      from_index: bool = False) -> dict:
     """Every transaction in one size band, newest first.
 
     search_property() keeps only the latest sale per band — enough for the
     summary chart, but it can't answer "what else traded in this band?".
     This is that list, fetched on demand so the property payload stays small.
     """
-    matched = _collect_matched_transactions(development_name)
+    matched = _collect_matched_transactions(development_name, from_index)
     if "error" in matched or "ambiguous" in matched:
         return matched
 
@@ -290,19 +317,30 @@ def band_transactions(development_name: str, band_label: str) -> dict:
     }
 
 
-def search_property(development_name: str) -> dict:
+def search_property(development_name: str, from_index: bool = False) -> dict:
     """
     Search for the latest transaction per size band for a given development.
     Uses local cache — instant response after first load.
     """
-    matched = _collect_matched_transactions(development_name)
+    matched = _collect_matched_transactions(development_name, from_index)
     if "error" in matched or "ambiguous" in matched:
         return matched
 
     matched_transactions = matched["matched_transactions"]
     fuzzy_name = matched["fuzzy_match"]
     alternatives = matched["alternatives"]
-    _all_results, pipeline_data = get_ura_data()
+    # Function-local, as liquidity.py's own orchestrator does it: the pure
+    # math there stays importable without dragging the cache stack in.
+    from liquidity import cache_oldest_date, resolve_total_units
+    if from_index:
+        # One document each rather than the whole cache: the project's
+        # under-construction status, and the start of URA's window (the trust
+        # anchor the unit-count tiers need). Its transactions are already read.
+        pipeline_data = get_pipeline()
+        oldest_txn_date = oldest_contract_date()
+    else:
+        all_results, pipeline_data = get_ura_data()
+        oldest_txn_date = cache_oldest_date(all_results)
 
     # Find the latest transaction per size band
     band_latest = {}
@@ -348,12 +386,11 @@ def search_property(development_name: str) -> dict:
 
     expected_top = pipeline_info.get("expected_top")
 
-    from liquidity import resolve_total_units
     total_units, units_source = resolve_total_units(
         matched_project_name,
         [item["txn"] for item in matched_transactions],
         pipeline_info.get("total_units"),
-        _all_results,
+        oldest_txn_date,
     )
 
     # Compute average PSF per band
@@ -422,7 +459,7 @@ TREND_SALE_TYPES = {"2", "3"}        # sub-sale + resale only
 HALF_YEAR_TXN_THRESHOLD = 40         # >= this many txns over >= 2 yrs → half-yearly buckets
 
 
-def price_trend(development_name: str) -> dict:
+def price_trend(development_name: str, from_index: bool = False) -> dict:
     """
     Build an over-time average-PSF trend for a development.
 
@@ -442,7 +479,7 @@ def price_trend(development_name: str) -> dict:
     it is NOT the headline any more, because those two endpoint means are the
     thinnest numbers on the chart.
     """
-    matched = _collect_matched_transactions(development_name)
+    matched = _collect_matched_transactions(development_name, from_index)
     if "error" in matched or "ambiguous" in matched:
         return matched
 

@@ -44,7 +44,7 @@ from cache.cache_hdb import (
     is_hdb_residential_block,
 )
 from cache import explore_cache
-from cache.cache_ura import get_ura_data
+from cache.cache_ura import get_ura_data, get_project_index, oldest_contract_date
 from cache.cache_rental import get_rental_data
 from cache.onemap_mrt import build_mrt_cache
 from storage import get_recent_searches
@@ -260,6 +260,13 @@ def api_list():
 # concurrency guard — fine for the bot (Telegram updates are serial), but
 # concurrent web requests would each launch a full URA refresh. Serialize
 # the cache-touching section here rather than modifying the cache modules.
+#
+# Every ura.py call from this module passes `from_index=True`, which is not an
+# optimisation but the difference between answering and not: the full load is
+# ~31MB over the wire and ~240MB of Python, and on a 512MB container
+# /api/property simply stopped returning (>300s, while every small-read
+# endpoint stayed at 0.2s). The index path reads ~1MB. The bot keeps the full
+# load — it needs every project for browse-by-district anyway.
 _search_lock = threading.Lock()
 
 
@@ -267,7 +274,7 @@ def _search_with_rental(query: str):
     """The locked search+rental section shared by name and postal searches.
     Returns either a passthrough dict (ambiguous/error) or (ura_result, rental)."""
     with _search_lock:
-        ura_result = search_property(query)
+        ura_result = search_property(query, from_index=True)
 
         if ura_result.get("ambiguous"):
             return {"ambiguous": True, "candidates": ura_result["candidates"]}
@@ -287,8 +294,16 @@ def _search_with_rental(query: str):
 
 
 def _project_dicts() -> list:
-    """The cached URA project list, read under the same lock as the search
-    (get_ura_data() refreshes in-line when stale)."""
+    """The rows `project_xy_coords` scans: project name plus URA's x/y.
+
+    The name index carries exactly those fields, so this is a ~250KB projected
+    read rather than the whole ~31MB cache — which is the difference between a
+    pin lookup and a second full load on the same request. Only a stale or
+    missing index falls back to get_ura_data(), under the search's own lock
+    because that call refreshes in-line."""
+    index = get_project_index()
+    if index is not None:
+        return index
     with _search_lock:
         transactions, _pipeline = get_ura_data()
     return transactions
@@ -991,13 +1006,18 @@ def _warm_caches() -> None:
     """Boot-time warm — see `_lifespan`.
 
     Three steps, in the order a visitor needs them. The private dots come
-    first and are cheap (the persisted payload), then the transaction and
-    rental caches, which are the ~31MB load that every *search* needs —
-    serving the dots from the blob means the landing page no longer drags
-    those caches in as a side effect, so the first search would otherwise
-    inherit the whole wait. The HDB layer comes last: nobody sees it until
-    they switch markets, and warming it is a small read unless its blob is
-    cold, in which case this thread is a better place to pay than a request.
+    first and are cheap (the persisted payload), then what a *search* reads:
+    the project name index, the window anchor and the rental cache. The HDB
+    layer comes last: nobody sees it until they switch markets, and warming it
+    is a small read unless its blob is cold, in which case this thread is a
+    better place to pay than a request.
+
+    Note what is NOT warmed: the full transaction cache. A search no longer
+    touches it (cache_ura's index + one chunk), and pulling all ~31MB in would
+    put ~240MB of Python in this container's steady state for nothing — which
+    is what made /api/property stop answering on a 512MB instance. The only
+    thing that still wants the whole cache is the explore-layer rebuild, and
+    that runs in its own thread twice a week at most.
 
     Every step swallows its errors: a failed warm only means the first request
     takes the slow path, as before.
@@ -1008,7 +1028,8 @@ def _warm_caches() -> None:
         logger.warning(f"[Explore] Warm-up failed, first request will rebuild: {e}")
     try:
         with _search_lock:
-            get_ura_data()
+            get_project_index()
+            oldest_contract_date()
             get_rental_data()
     except Exception as e:
         logger.warning(f"[Cache] Warm-up failed, first search will load: {e}")
@@ -1131,7 +1152,7 @@ def api_trend(q: str = Query(..., min_length=1)):
     already-resolved development name, same re-query pattern as the bot's trend
     button. Returns price_trend's dict unchanged (error/ambiguous passthrough)."""
     with _search_lock:
-        return price_trend(q)
+        return price_trend(q, from_index=True)
 
 
 # The street list is the search box's routing table, so it is memoized on the
@@ -1283,7 +1304,7 @@ def api_transactions(
     one a phone waits on) stays small. Called with the already-resolved
     development name, same re-query pattern as /api/trend."""
     with _search_lock:
-        return band_transactions(q, band)
+        return band_transactions(q, band, from_index=True)
 
 
 @app.get("/api/amenities")

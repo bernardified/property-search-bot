@@ -83,6 +83,21 @@ def main():
     else:
         logger.error("❌ Rental refresh failed")
 
+    # 5. Explore-map dots. Derived from the two caches just refreshed, so
+    # their new timestamps have invalidated the stored payload. Rebuilding it
+    # here is nearly free — this process is already holding every transaction
+    # — and it keeps the ~240MB build out of the webapp container, which is
+    # the one place it cannot be afforded. The webapp's own background rebuild
+    # stays as the fallback if this step is skipped or fails.
+    if ura_ok or rental_ok:
+        logger.info("Rebuilding explore dots...")
+        try:
+            from api import developments_layer      # local: pulls in FastAPI
+            dots = developments_layer.rebuild()
+            logger.info(f"✅ Explore dots — {dots.get('count', '?')} developments")
+        except Exception as e:
+            logger.error(f"❌ Explore rebuild failed, webapp will rebuild: {e}")
+
     logger.info("=== Cache Refresh Job Done ===")
 
 

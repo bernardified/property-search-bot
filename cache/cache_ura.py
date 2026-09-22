@@ -5,7 +5,7 @@ import threading
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from utils import get_mongo_db, is_ura_transactions_stale
+from utils import get_mongo_db, is_ura_transactions_stale, parse_mmyy_date
 from cache.unit_counts import harvest_pipeline_counts
 
 load_dotenv()
@@ -82,17 +82,33 @@ def _fetch_pipeline(token: str) -> list:
 
 # ── Cache read/write ──────────────────────────────────────────────────────────
 
+# The freshness key is read on the way into every cached read below, so the
+# lean search path asked for it three times per request — three round trips to
+# Atlas to check a number that changes twice a week. A few seconds of memo
+# collapses them into one and costs at most that long to notice a refresh,
+# which is nothing against a Tue/Fri release. Same trick as hawker_cache's
+# MEMO_TTL_S; deliberately short, since this is what invalidates everything.
+META_TTL_S = 5
+_meta_memo: dict = {"ts": None, "at": 0.0}
+
+
 def _meta_timestamp() -> float | None:
     """Last-refresh timestamp from the meta doc, or None if unavailable."""
+    now = time.time()
+    if _meta_memo["ts"] is not None and now - _meta_memo["at"] < META_TTL_S:
+        return _meta_memo["ts"]
     db = get_mongo_db()
     if db is None:
         return None
     try:
         doc = db['ura_cache'].find_one({"_id": "meta"}, {"timestamp": 1})
-        return doc.get("timestamp", 0) if doc else None
+        ts = doc.get("timestamp", 0) if doc else None
     except Exception as e:
         logger.error(f"[URA Cache] Freshness check failed: {e}")
         return None
+    if ts is not None:
+        _meta_memo.update(ts=ts, at=now)
+    return ts
 
 
 def meta_timestamp() -> float | None:
@@ -190,13 +206,20 @@ def _save_cache(transactions: list, pipeline: list):
         # completed developments.
         harvest_pipeline_counts(pipeline)
 
+        # The oldest contract date in the whole feed: the start of URA's
+        # rolling window, and the trust anchor liquidity needs to decide
+        # whether a launch sits far enough inside it to derive unit counts
+        # from. Free here (this process is holding every transaction) and it
+        # saves every later reader a scan of all of them.
+        oldest = _oldest_contract_date(transactions)
         db['ura_cache'].replace_one(
             {"_id": "meta"},
             {
                 "_id": "meta",
                 "timestamp": current_time,
                 "project_count": len(transactions),
-                "chunk_count": len(chunks)
+                "chunk_count": len(chunks),
+                "oldest_contract_date": oldest.isoformat() if oldest else None,
             },
             upsert=True
         )
@@ -245,6 +268,194 @@ def get_ura_data() -> tuple[list, list]:
         return data
 
     return transactions, pipeline
+
+
+# ── Lean reads: the index, a project, the pipeline ──────────────────────────
+#
+# A name search wants two things out of this cache: every project's NAME, to
+# match the query against, and then ONE project's transactions. Getting that
+# from get_ura_data() means all 39 chunks — ~31MB over the wire and ~240MB of
+# Python objects — which a 512MB container cannot do at all: on Railway the
+# webapp's /api/property stopped answering entirely (>300s) while every
+# endpoint that reads something small stayed instant.
+#
+# So the name list is read with a PROJECTION, leaving the transactions in
+# Mongo (~250KB instead of 31MB), and every row carries the chunk and offset
+# it sits at so fetching the winner is one document. A search costs ~1MB.
+#
+# Positions, not names: a name is not unique here (a multi-block development
+# repeats it, and so does a "(DEMOLISHED)" pair), so re-matching by name on
+# the second read would be guesswork about which row won the first.
+#
+# Every reader below returns None/[] on a stale or missing cache, which sends
+# the caller back to get_ura_data(). That matters: get_ura_data() is what
+# *refreshes* a stale cache, and these reads deliberately cannot.
+
+_index_lock = threading.Lock()
+_index_ts: float | None = None
+_index_rows: list | None = None
+
+_pipeline_lock = threading.Lock()
+_pipeline_ts: float | None = None
+_pipeline_data: list | None = None
+
+_oldest_lock = threading.Lock()
+_oldest_ts: float | None = None
+_oldest_date = None
+
+
+def _read_project_index() -> list:
+    """The projected name list. Chunk number comes from the document `_id` and
+    the offset from the array position, so this assumes nothing about how many
+    projects a chunk holds."""
+    db = get_mongo_db()
+    if db is None:
+        return []
+    try:
+        docs = db['ura_cache'].find(
+            {"_id": {"$regex": r"^data_chunk_\d+$"}},
+            {"transactions.project": 1, "transactions.street": 1,
+             "transactions.x": 1, "transactions.y": 1},
+            batch_size=200,
+        )
+        rows = []
+        for doc in sorted(docs, key=lambda d: int(d["_id"].rsplit("_", 1)[1])):
+            chunk = int(doc["_id"].rsplit("_", 1)[1])
+            for offset, proj in enumerate(doc.get("transactions", [])):
+                rows.append({
+                    "project": proj.get("project", ""),
+                    "street": proj.get("street", ""),
+                    "x": proj.get("x"),
+                    "y": proj.get("y"),
+                    "chunk": chunk,
+                    "offset": offset,
+                })
+        return rows
+    except Exception as e:
+        logger.error(f"[URA Cache] Index read failed: {e}")
+        return []
+
+
+def get_project_index() -> list | None:
+    """`[{project, street, x, y, chunk, offset}]` for every cached project, or
+    None when the cache is stale, missing or empty — in which case the caller
+    must fall back to get_ura_data().
+
+    Memoized on the meta timestamp, like get_ura_data's own memo, so a refresh
+    from any process invalidates it. Treat the rows as READ-ONLY.
+    """
+    global _index_ts, _index_rows
+    ts = _meta_timestamp()
+    if ts is None or is_ura_transactions_stale(ts):
+        return None
+    with _index_lock:
+        if _index_ts == ts and _index_rows is not None:
+            return _index_rows
+    rows = _read_project_index()
+    if not rows:
+        return None
+    with _index_lock:
+        _index_ts, _index_rows = ts, rows
+    return rows
+
+
+def get_projects_at(refs: list) -> list:
+    """Full project dicts (transactions included) for index rows, one read per
+    distinct chunk. Order follows `refs`; a row whose chunk has since been
+    rewritten is skipped rather than guessed at."""
+    db = get_mongo_db()
+    if db is None or not refs:
+        return []
+    try:
+        ids = {f"data_chunk_{r['chunk']}" for r in refs}
+        chunks = {}
+        for doc in db['ura_cache'].find({"_id": {"$in": sorted(ids)}}):
+            chunks[int(doc["_id"].rsplit("_", 1)[1])] = doc.get("transactions", [])
+        out = []
+        for r in refs:
+            arr = chunks.get(r["chunk"], [])
+            if r["offset"] < len(arr):
+                out.append(arr[r["offset"]])
+        return out
+    except Exception as e:
+        logger.error(f"[URA Cache] Chunk read failed: {e}")
+        return []
+
+
+def _oldest_contract_date(projects: list):
+    """Oldest MMYY contract date across project dicts, or None."""
+    oldest = None
+    for proj in projects or []:
+        for txn in proj.get("transaction", []):
+            dt = parse_mmyy_date(txn.get("contractDate", ""))
+            if dt and (oldest is None or dt < oldest):
+                oldest = dt
+    return oldest
+
+
+def oldest_contract_date():
+    """Start of URA's rolling transaction window, as a datetime, or None.
+
+    Read from the meta document, which `_save_cache` fills in. A cache written
+    before that field existed falls back to a projection over just the contract
+    dates — ~1s and a fraction of the memory, where scanning the loaded cache
+    for it costs the full ~31MB/240MB load. Memoized on the meta timestamp.
+    """
+    global _oldest_ts, _oldest_date
+    ts = _meta_timestamp()
+    with _oldest_lock:
+        if _oldest_ts == ts and _oldest_date is not None:
+            return _oldest_date
+    db = get_mongo_db()
+    if db is None:
+        return None
+    try:
+        meta = db['ura_cache'].find_one({"_id": "meta"}, {"oldest_contract_date": 1})
+        stored = (meta or {}).get("oldest_contract_date")
+        if stored:
+            date = datetime.fromisoformat(stored)
+        else:
+            docs = db['ura_cache'].find(
+                {"_id": {"$regex": r"^data_chunk_\d+$"}},
+                {"transactions.transaction.contractDate": 1},
+                batch_size=200,
+            )
+            date = _oldest_contract_date([p for d in docs
+                                          for p in d.get("transactions", [])])
+    except Exception as e:
+        logger.error(f"[URA Cache] Window anchor read failed: {e}")
+        return None
+    if date is not None:
+        with _oldest_lock:
+            _oldest_ts, _oldest_date = ts, date
+    return date
+
+
+def get_pipeline() -> list:
+    """Just the pipeline document — the only other thing a property search
+    needs from this cache, and 39 chunks lighter than get_ura_data() for it.
+
+    Callers reach here after the search itself, which has already refreshed a
+    stale cache through get_ura_data(), so this never has to.
+    """
+    global _pipeline_ts, _pipeline_data
+    ts = _meta_timestamp()
+    with _pipeline_lock:
+        if _pipeline_ts == ts and _pipeline_data is not None:
+            return _pipeline_data
+    db = get_mongo_db()
+    if db is None:
+        return []
+    try:
+        doc = db['ura_cache'].find_one({"_id": "pipeline"})
+    except Exception as e:
+        logger.error(f"[URA Cache] Pipeline read failed: {e}")
+        return []
+    data = (doc or {}).get("pipeline", []) or []
+    if data:
+        with _pipeline_lock:
+            _pipeline_ts, _pipeline_data = ts, data
+    return data
 
 
 def force_refresh() -> bool:
