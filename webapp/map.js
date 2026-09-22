@@ -514,6 +514,10 @@ function renderProperty(d) {
   if (d.total_units) metaBits.push(`${d.total_units} units`);
   if (d.expected_top) metaBits.push(`Expected TOP: ${esc(d.expected_top)}`);
   if (d.under_construction) metaBits.push("Under construction");
+  // The same tenure and lease the map popup shows for this project, from the
+  // same voted tenure strings. Freehold says so instead of showing a blank:
+  // a missing lease and no lease at all are different answers.
+  if (d.tenure) metaBits.push(`${TENURE_LABELS[d.tenure]}${leaseSuffix(d)}`);
   if (d.overall_avg_psf)
     metaBits.push(`12-mo avg: ${fmtMoney(d.overall_avg_psf)} psf (${d.overall_psf_count} txns)`);
 
@@ -589,6 +593,12 @@ function renderHdbResult(d) {
   if (d.postal) metaBits.push(`Postal ${esc(d.postal)}`);
   if (d.town) metaBits.push(esc(d.town.replace(/\b\w/g, (c) => c.toUpperCase())));
   metaBits.push(`${d.total_txns} resale transaction${d.total_txns === 1 ? "" : "s"}`);
+  // A block's lease decay is the number an HDB buyer is really asking about,
+  // so it is a headline and not only a column in the table below. It is read
+  // off the newest sale and aged to today, hence "about" — and never to a
+  // decimal, which would claim a precision the month-level data has not got.
+  if (d.lease_years != null)
+    metaBits.push(`About ${Math.round(d.lease_years)} yrs lease remaining`);
 
   let html = `<h2>${esc(d.development)}</h2>`;
   html += `<p class="street">${esc(d.street)} · <span class="market-tag">HDB resale</span></p>`;
@@ -604,7 +614,11 @@ function renderHdbResult(d) {
   html += `<div class="chart-box"><canvas id="flats-chart" height="${40 + types.length * 34}"></canvas></div>`;
 
   html += "<details open><summary>Latest sale in each flat type</summary>";
-  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease left</th></tr>";
+  // "Lease at sale", not "Lease left": typical_lease is the median of the
+  // readings those sales carried, which run up to five years back — it is
+  // NOT aged to today, and the headline above it is. Labelling both the same
+  // put 94 yrs in this column beside 90 in the header of the same block.
+  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease at sale</th></tr>";
   for (const [ft, v] of types) {
     const latest = v.latest || {};
     html +=
@@ -1564,6 +1578,13 @@ const privateLeaseLine = (d) =>
     : d.tenure === "freehold"
       ? "<span class='muted'>no expiry</span>"
       : "–";
+// The property page's version of the line above: the tenure label carries the
+// sentence, so this only adds what the label cannot say.
+const leaseSuffix = (d) =>
+  d.lease_years != null
+    ? ` · about ${Math.round(d.lease_years)} yrs remaining`
+    : d.tenure === "freehold" ? " · no expiry" : "";
+
 // The popup knows which market drew it, so the search it starts is routed
 // rather than re-guessed by looksLikeHdb — the same reason a picked
 // type-ahead row carries its market.
