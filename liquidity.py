@@ -418,17 +418,22 @@ def resolve_total_units(development: str, txns: list, pipeline_total,
     return None, None
 
 
-def liquidity_for_project(project_name: str) -> dict:
+def liquidity_for_project(project_name: str, from_index: bool = False) -> dict:
     """Resolve a development name and assemble its liquidity summary.
 
     Returns {"summary": dict, "development": str} or {"error": str}. Imports
     stay function-local so the pure math above is testable without the cache
     stack, and `get_ura_data` resolves through the `ura` module (one patch
     target covers both the matcher and this loader).
-    """
-    from ura import _collect_matched_transactions, get_project_info, get_ura_data
 
-    matched = _collect_matched_transactions(project_name)
+    `from_index` is `ura.search_property`'s switch: the project's transactions
+    come off the lean index read, and the pipeline and the window anchor are
+    one document each — the webapp's container cannot afford the full load.
+    """
+    from ura import (_collect_matched_transactions, get_project_info, get_ura_data,
+                     get_pipeline, oldest_contract_date)
+
+    matched = _collect_matched_transactions(project_name, from_index)
     if "error" in matched:
         return {"error": matched["error"]}
     if "ambiguous" in matched:
@@ -439,13 +444,16 @@ def liquidity_for_project(project_name: str) -> dict:
     development = matched["matched_project_name"]
     txns = [item["txn"] for item in matched["matched_transactions"]]
 
-    all_results, pipeline = get_ura_data()
+    if from_index:
+        pipeline, oldest = get_pipeline(), oldest_contract_date()
+    else:
+        all_results, pipeline = get_ura_data()
+        oldest = cache_oldest_date(all_results)
     pipeline_info = get_project_info(development, pipeline)
     under_construction = pipeline_info.get("expected_top") is not None
 
     total_units, units_source = resolve_total_units(
-        development, txns, pipeline_info.get("total_units"),
-        cache_oldest_date(all_results)
+        development, txns, pipeline_info.get("total_units"), oldest
     )
 
     summary = liquidity_summary(txns, total_units, units_source, under_construction)

@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 
 import hdb
 from ura import search_property, price_trend, band_transactions
+from liquidity import liquidity_for_project, liquidity_verdict, _format_gap
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from district_search import DISTRICT_NAMES
@@ -1405,6 +1406,52 @@ def api_hdb_trend(
     block = (block or "").strip() or None
     street = street.strip()
     return hdb.price_trend(block, street, _hdb_street_records(street))
+
+
+# The verdict emoji is a Telegram rendering; the page wants a class name.
+_LIQ_LEVELS = {"🟢": "fast", "🟡": "typical", "🔴": "slow", "⚪": "none"}
+
+
+def shape_liquidity(result: dict) -> dict:
+    """Add what the page needs on top of `liquidity_summary`, without changing
+    anything it already carries: a `level` beside every verdict, a per-band
+    verdict (the bot works that out while formatting, from the same
+    thresholds — computing it here keeps them in one place), and the
+    days-between-sales fallback as the bot's own '~N months' labels.
+    Error/ambiguous results pass through untouched."""
+    s = result.get("summary")
+    if not s:
+        return result
+    s = {**s, "bands": {b: dict(v) for b, v in s["bands"].items()}}
+    if s["overall"]:
+        s["overall"] = {**s["overall"], "level": _LIQ_LEVELS[s["overall"]["verdict_emoji"]]}
+    for info in s["bands"].values():
+        if s["mode"] == "take_up":
+            emoji, label = liquidity_verdict("take_up", None, info["rate_6m_pct"])
+        else:
+            emoji, label = liquidity_verdict("turnover", info["annualised_pct"])
+        info["verdict"], info["level"] = label, _LIQ_LEVELS[emoji]
+    fb = s["fallback"]
+    if fb:
+        s["fallback"] = {
+            **fb,
+            "overall_label": _format_gap(fb["overall"]) if fb.get("overall") else None,
+            "band_labels": {b: _format_gap(d) for b, d in (fb.get("bands") or {}).items() if d},
+        }
+    return {**result, "summary": s}
+
+
+@app.get("/api/liquidity")
+def api_liquidity(q: str = Query(..., min_length=1)):
+    """How fast units in a development sell — take-up while under
+    construction, annualised turnover once completed, days-between-sales when
+    no unit count exists. Called with the already-resolved development name
+    (same re-query pattern as /api/trend and the bot's Liquidity button);
+    `liquidity_for_project`'s dict comes back with `shape_liquidity`'s
+    additions and nothing removed."""
+    with _search_lock:
+        result = liquidity_for_project(q, from_index=True)
+    return shape_liquidity(result)
 
 
 @app.get("/api/transactions")

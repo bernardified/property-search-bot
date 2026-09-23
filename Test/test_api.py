@@ -292,6 +292,38 @@ class TestEndpoints(_NoProjectCoords):
         self.assertEqual(data["pct_change"], 12)
         mock_trend.assert_called_once_with("PARC ESTA", from_index=True)
 
+    @patch("api.liquidity_for_project", return_value={"error": "No transactions found"})
+    def test_liquidity_passthrough(self, mock_liq):
+        data = client.get("/api/liquidity", params={"q": "PARC ESTA"}).json()
+        self.assertEqual(data, {"error": "No transactions found"})
+        mock_liq.assert_called_once_with("PARC ESTA", from_index=True)
+
+    def test_shape_liquidity_adds_levels_and_keeps_the_summary(self):
+        import api
+        summary = {
+            "mode": "turnover", "window_months": 6, "total_units": 100,
+            "overall": {"count_6m": 3, "rate_6m_pct": 3.0, "annualised_pct": 6.0,
+                        "verdict_emoji": "🟢", "verdict": "Trades often — liquid"},
+            "bands": {"<= 600 sqft": {"count_6m": 0, "est_units": 20, "rate_6m_pct": 0.0,
+                                      "annualised_pct": 0.0, "all_time_count": 4}},
+            "fallback": None,
+        }
+        out = api.shape_liquidity({"development": "X", "summary": summary})
+        self.assertEqual(out["summary"]["overall"]["level"], "fast")
+        self.assertEqual(out["summary"]["bands"]["<= 600 sqft"]["level"], "slow")
+        self.assertNotIn("level", summary["overall"])  # the input is not mutated
+
+    def test_shape_liquidity_labels_the_fallback_gaps(self):
+        import api
+        summary = {"mode": "turnover", "overall": None,
+                   "bands": {"<= 600 sqft": {"rate_6m_pct": None, "annualised_pct": None}},
+                   "fallback": {"overall": 90.0, "bands": {"<= 600 sqft": None},
+                                "window_months": 24}}
+        s = api.shape_liquidity({"summary": summary})["summary"]
+        self.assertEqual(s["fallback"]["overall_label"], "~3 months")
+        self.assertEqual(s["fallback"]["band_labels"], {})
+        self.assertEqual(s["bands"]["<= 600 sqft"]["level"], "none")
+
     @patch("api.geocode_building")
     @patch("api.get_rental_by_band", return_value=RENTAL_RESULT)
     @patch("api.search_property", return_value=URA_RESULT)
@@ -1203,6 +1235,17 @@ class TestLeanURAReads(unittest.TestCase):
         band = "801 – 900 sqft"
         self.assertEqual(self._lean(band_transactions, "bravo gardens", band)["count"],
                          self._full(band_transactions, "bravo gardens", band)["count"])
+
+    def test_liquidity_matches_the_full_load(self):
+        """/api/liquidity takes the lean path too — its pipeline and window
+        anchor are one document each, never the whole cache."""
+        from liquidity import liquidity_for_project
+        with patch("cache.unit_counts.get_unit_count",
+                   return_value={"total_units": 100, "source": "pipeline"}):
+            lean = self._lean(liquidity_for_project, "alpha court")
+            full = self._full(liquidity_for_project, "alpha court")
+        self.assertEqual(lean["development"], "ALPHA COURT")
+        self.assertEqual(lean["summary"], full["summary"])
 
     def test_ambiguity_and_misses_still_come_from_the_index(self):
         """The index carries project and street, which is everything the

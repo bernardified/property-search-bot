@@ -193,6 +193,38 @@ body {
 /* The interval the rate is quoted with: present, but never louder than it. */
 .trend-headline .ci { color: #7a8494; font-variant-numeric: tabular-nums; }
 
+/* ── Liquidity ────────────────────────────────────────────────────────────
+   Verdicts are ordinal (fast → typical → slow), so they wear the familiar
+   green/amber/red — but always beside their words, never colour alone. */
+.liq-headline { margin: 2px 0 2px; font-size: 0.86rem; color: #1e2430; }
+.liq-sub { margin: 0 0 4px; font-size: 0.78rem; color: #5b6472; }
+.liq-src { color: #7a8494; }
+.liq-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  margin-right: 4px;
+}
+.liq-pill.liq-fast { background: #dcfce7; color: #166534; }
+.liq-pill.liq-typical { background: #fef3c7; color: #92400e; }
+.liq-pill.liq-slow { background: #fee2e2; color: #991b1b; }
+.liq-pill.liq-none { background: #eef0f3; color: #5b6472; }
+.liq-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.liq-dot.liq-fast { background: #16a34a; }
+.liq-dot.liq-typical { background: #d97706; }
+.liq-dot.liq-slow { background: #dc2626; }
+.liq-dot.liq-none { background: #c3c8d0; }
+#results .liq-foot { color: #7a8494; font-size: 0.72rem; margin: 6px 0 0; }
+
 #results details { margin-top: 8px; }
 #results summary {
   cursor: pointer;

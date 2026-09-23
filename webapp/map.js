@@ -68,6 +68,7 @@ let propertyMarker = null;
 let schoolRing = null;     // {circle, key} — one 1 km ring at a time
 let amenityAbort = null;   // cancels stale amenity fetches when a new search starts
 let trendAbort = null;
+let liqAbort = null;       // cancels a stale liquidity fetch
 let bandsChart = null;     // Chart.js instances — destroyed on each new search
 let trendChart = null;
 let amenitiesShown = false;  // did the amenity pins land? (legend state across views)
@@ -95,6 +96,7 @@ function destroyCharts() {
 function resetMap() {
   if (amenityAbort) amenityAbort.abort();
   if (trendAbort) trendAbort.abort();
+  if (liqAbort) liqAbort.abort();
   markerLayer.clearLayers();
   if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);  // nearby mode detaches it
   clearNearbyLayer();
@@ -274,6 +276,7 @@ async function runSearch(q, market) {
       renderProperty(data);
       placePropertyPin(data);
       loadAmenities(data);
+      loadLiquidity(data);
     }
     loadTrend(data);
   } catch (err) {
@@ -548,6 +551,9 @@ function renderProperty(d) {
 
   // Price trend — filled in async by loadTrend()
   html += "<h3>Price trend</h3><div id='trend-area'><p class='note'>Loading trend…</p></div>";
+
+  // Liquidity — filled in async by loadLiquidity()
+  html += "<h3>Liquidity</h3><div id='liq-area'><p class='note'>Loading liquidity…</p></div>";
 
   html += "<h3>Rental &amp; yield (last 12 months)</h3>";
   const rental = d.rental || {};
@@ -895,6 +901,100 @@ function trendUrl(d) {
   let url = "/api/hdb/trend?street=" + encodeURIComponent(d.street);
   if (d.block) url += "&block=" + encodeURIComponent(d.block);
   return url;
+}
+
+// ── Liquidity: how fast units in this development sell ─────────────────────
+//
+// The same numbers as the bot's 📊 Liquidity button (liquidity.py), private
+// only — HDB resale has no take-up and no per-block unit count. The metric
+// switches on construction status: take-up of the launch while it is being
+// built, annualised resale turnover once it is done, and sales pace when no
+// unit count exists at all. Verdicts and gap labels arrive computed
+// (api.shape_liquidity), so the thresholds live in one place.
+
+const UNITS_SOURCES = {
+  pipeline: "URA pipeline",
+  pipeline_history: "URA pipeline archive",
+  derived: "summed from new-sale records — approximate",
+  seed: "public project records",
+};
+
+async function loadLiquidity(d) {
+  liqAbort = new AbortController();
+  const { signal } = liqAbort;
+  let t;
+  try {
+    const r = await fetch("/api/liquidity?q=" + encodeURIComponent(d.development), { signal });
+    t = await r.json();
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    t = { error: "Liquidity failed to load: " + err.message };
+  }
+  const area = el("liq-area");
+  if (!area || signal.aborted) return; // panel was replaced by a newer search
+  area.innerHTML = t.summary ? liquidityHtml(t.summary)
+    : `<p class='note'>${esc(t.error || "No liquidity data for this development.")}</p>`;
+}
+
+const liqPill = (level, text) => `<span class="liq-pill liq-${level}">${esc(text)}</span>`;
+const pct = (n) => n.toFixed(1) + "%";
+
+function liquidityHtml(s) {
+  const takeUp = s.mode === "take_up";
+  const win = s.window_months;
+  let html = "";
+
+  if (s.total_units) {
+    const o = s.overall;
+    const rate = takeUp
+      ? `${pct(o.rate_6m_pct)} of the project sold in ${win} months`
+      : `≈${pct(o.annualised_pct)} of units change hands a year`;
+    html +=
+      `<p class="liq-headline">${liqPill(o.level, o.verdict)} ${rate}</p>` +
+      `<p class="liq-sub">${o.count_6m} unit${o.count_6m === 1 ? "" : "s"} ` +
+      (takeUp ? "sold by the developer" : "resold") + ` in the last ${win} months · ` +
+      `${s.units_estimated ? "~" : ""}${s.total_units.toLocaleString("en-SG")} total units ` +
+      `<span class="liq-src">(${esc(UNITS_SOURCES[s.units_source] || "source unknown")})</span></p>`;
+
+    const rows = Object.entries(s.bands).filter(([, b]) => b.est_units);
+    if (rows.length) {
+      html +=
+        "<table><tr><th>Band</th><th class='num'>Sold · " + win + " mo</th>" +
+        `<th class='num'>${takeUp ? "Taken up" : "Per year"}</th></tr>`;
+      for (const [band, b] of rows) {
+        const r = takeUp ? b.rate_6m_pct : b.annualised_pct;
+        html +=
+          `<tr><td>${esc(band)}</td>` +
+          `<td class="num">${b.count_6m} <span class="popup-line">of ~${b.est_units.toLocaleString("en-SG")}</span></td>` +
+          `<td class="num"><span class="liq-dot liq-${b.level}" title="${esc(b.verdict)}"></span>${pct(r)}</td></tr>`;
+      }
+      html += "</table>";
+    }
+    html +=
+      `<p class="liq-foot">${takeUp
+        ? "Take-up = share of the project sold by the developer."
+        : "Turnover = share of units changing hands (resale + sub-sale); ≥5%/yr reads as liquid, under 2% as tightly held."} ` +
+      `Band unit counts are estimated from the transaction mix.</p>`;
+  } else {
+    const fb = s.fallback || {};
+    const fwin = fb.window_months;
+    html +=
+      `<p class="liq-headline">` +
+      (fb.overall_label
+        ? `A unit sells every <strong>${esc(fb.overall_label)}</strong>`
+        : `Fewer than 2 sales — very rarely traded`) +
+      `</p><p class="liq-sub">Total units unknown, so this is the sales pace over the last ${fwin} months instead.</p>`;
+    const rows = Object.entries(s.bands).filter(([, b]) => b.all_time_count);
+    if (rows.length) {
+      html += "<table><tr><th>Band</th><th class='num'>One sale every</th></tr>";
+      for (const [band] of rows) {
+        const gap = (fb.band_labels || {})[band];
+        html += `<tr><td>${esc(band)}</td><td class="num">${gap ? esc(gap) : "<span class='popup-line'>too few to gauge</span>"}</td></tr>`;
+      }
+      html += "</table>";
+    }
+  }
+  return html + "<p class='liq-foot'>From URA-registered transactions — sales, not asking listings.</p>";
 }
 
 async function loadTrend(d) {
