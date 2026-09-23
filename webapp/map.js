@@ -580,18 +580,7 @@ function renderProperty(d) {
     }
   }
 
-  // PropertyGuru search links, one row per bedroom type. Links only — the
-  // listings are never fetched (propertyguru.py); PropertyGuru runs the search.
-  if ((d.pg_links || []).length) {
-    html += "<h3>Listings on PropertyGuru</h3><table class='pg-table'>";
-    for (const l of d.pg_links) {
-      html +=
-        `<tr><td>${esc(l.label)}</td>` +
-        `<td class="num"><a class="pg-link" href="${esc(l.sale)}" target="_blank" rel="noopener">For sale ↗</a></td>` +
-        `<td class="num"><a class="pg-link" href="${esc(l.rent)}" target="_blank" rel="noopener">For rent ↗</a></td></tr>`;
-    }
-    html += "</table><p class='liq-foot'>Opens PropertyGuru's own search for this development — a bedroom type with no units lands on an empty page.</p>";
-  }
+  html += pgLinksHtml(d.pg_links, "bedroom type");
 
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;
@@ -608,6 +597,21 @@ function renderProperty(d) {
   };
   closeBandDetail();  // the #band-detail slot above is a fresh, empty element
   renderBandsChart(d);
+}
+
+// PropertyGuru search links, one row per bedroom type (private) or flat type
+// (HDB). Links only — the listings are never fetched (propertyguru.py);
+// PropertyGuru runs the search.
+function pgLinksHtml(links, unit) {
+  if (!(links || []).length) return "";
+  let html = "<h3>Listings on PropertyGuru</h3><table class='pg-table'>";
+  for (const l of links) {
+    html +=
+      `<tr><td>${esc(l.label)}</td>` +
+      `<td class="num"><a class="pg-link" href="${esc(l.sale)}" target="_blank" rel="noopener">For sale ↗</a></td>` +
+      `<td class="num"><a class="pg-link" href="${esc(l.rent)}" target="_blank" rel="noopener">For rent ↗</a></td></tr>`;
+  }
+  return html + `</table><p class='liq-foot'>Opens PropertyGuru's own search — a ${unit} with nothing listed lands on an empty page.</p>`;
 }
 
 // ── HDB results ──────────────────────────────────────────────────────────────
@@ -687,6 +691,8 @@ function renderHdbResult(d) {
   html += "<h3>Rental &amp; yield</h3>";
   html += "<p class='note'>Not available for HDB — the rental data behind the " +
           "private figures is URA's, which covers private housing only.</p>";
+
+  html += pgLinksHtml(d.pg_links, "flat type");
 
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;

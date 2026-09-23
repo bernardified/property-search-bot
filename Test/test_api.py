@@ -963,6 +963,32 @@ class TestHDBPayloads(unittest.TestCase):
                                        {"block": "236", "count": 4}])
 
 
+class TestHDBPropertyGuruLinks(unittest.TestCase):
+    """PropertyGuru's query-string flat-type filter is ignored, so the links
+    use its per-flat-type landing pages, which do filter."""
+
+    def test_a_row_per_flat_type_held_then_all_types(self):
+        from api import hdb_pg_links
+        links = hdb_pg_links("BISHAN ST 22", {"5 ROOM": {}, "4 ROOM": {}}, block="257")
+        self.assertEqual([l["label"] for l in links], ["4 Room", "5 Room", "All flat types"])
+        self.assertEqual(links[0]["sale"],
+                         "https://www.propertyguru.com.sg/hdb-4-room-flat-for-sale?freetext=257+Bishan+Street+22")
+        self.assertEqual(links[0]["rent"],
+                         "https://www.propertyguru.com.sg/hdb-4-room-flat-for-rent?freetext=257+Bishan+Street+22")
+        self.assertIn("/hdb-for-sale?freetext=257+Bishan+Street+22", links[-1]["sale"])
+
+    def test_executive_is_two_pages_and_multigen_has_none(self):
+        from propertyguru import hdb_listing_links
+        labels = [r[0] for r in hdb_listing_links("Tampines Street 11", ["EXECUTIVE", "MULTI-GENERATION"])]
+        self.assertEqual(labels, ["Executive apartment", "Executive maisonette", "All flat types"])
+
+    def test_street_payload_links_the_street(self):
+        from api import build_hdb_street_payload
+        p = build_hdb_street_payload({"street": "BISHAN ST 22", "flat_types": {}, "blocks": []})
+        self.assertEqual(p["pg_links"][-1]["sale"],
+                         "https://www.propertyguru.com.sg/hdb-for-sale?freetext=Bishan+Street+22")
+
+
 class TestHDBFlatTypeDrilldown(unittest.TestCase):
     """The list behind a row of the flat-type table must hold as many rows as
     the count beside it: a block's whole window, a street's recent one."""
