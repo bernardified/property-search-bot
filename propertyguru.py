@@ -43,3 +43,38 @@ def listing_links(project_name: str) -> list[tuple[str, str, str]]:
         )
         for label, beds in BED_BUCKETS
     ]
+
+
+# ── HDB ──────────────────────────────────────────────────────────────────────
+#
+# PropertyGuru's generic search drops a flat-type filter passed in the query
+# string (propertyTypeCode is normalised back to every HDB type), but it has a
+# landing page per flat type that does filter and still takes freetext — so
+# HDB links are built on those slugs rather than on a bedroom count. EXECUTIVE
+# is two pages there (apartments `EA`, maisonettes `EM`) where resale data has
+# one type; there is no multi-generation page at all, which the "All flat
+# types" row covers. Freetext is address-near, not exact: a block search also
+# lists its neighbours, which for someone comparing flats is no bad thing.
+
+HDB_SLUGS = {
+    "1 ROOM": [("1 Room", "hdb-1-room-flat")],
+    "2 ROOM": [("2 Room", "hdb-2-room-flat")],
+    "3 ROOM": [("3 Room", "hdb-3-room-flat")],
+    "4 ROOM": [("4 Room", "hdb-4-room-flat")],
+    "5 ROOM": [("5 Room", "hdb-5-room-flat")],
+    "EXECUTIVE": [("Executive apartment", "hdb-executive-apartment"),
+                  ("Executive maisonette", "hdb-executive-maisonette")],
+}
+
+
+def hdb_listing_links(address: str, flat_types: list[str]) -> list[tuple[str, str, str]]:
+    """[(label, sale_url, rent_url), ...] for the flat types a block or street
+    actually has (in the order given), then one all-types row for the address."""
+    q = quote_plus(address)
+    rows = [
+        (label, f"{BASE}/{slug}-for-sale?freetext={q}", f"{BASE}/{slug}-for-rent?freetext={q}")
+        for ft in flat_types for label, slug in HDB_SLUGS.get(ft, [])
+    ]
+    rows.append(("All flat types", f"{BASE}/hdb-for-sale?freetext={q}",
+                 f"{BASE}/hdb-for-rent?freetext={q}"))
+    return rows

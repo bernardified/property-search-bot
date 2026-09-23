@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 import hdb
 from ura import search_property, price_trend, band_transactions
 from liquidity import liquidity_for_project, liquidity_verdict, _format_gap
+from propertyguru import listing_links, hdb_listing_links
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from district_search import DISTRICT_NAMES
@@ -180,6 +181,9 @@ def build_property_payload(ura_result: dict, rental_result: dict, coords: dict |
         # explore dots use (lease_summary) — the page and the map popup for
         # one project must never quote different leases.
         **lease_summary(ura_result.get("bands")),
+        # Search links only, built from the name — PropertyGuru is never
+        # fetched (see propertyguru.py), so this costs nothing.
+        "pg_links": _pg_rows(listing_links(ura_result["development"])),
     }
 
 
@@ -249,6 +253,20 @@ def block_lease_years(flat_types: dict, now=None) -> float | None:
     return _lease_today(latest, now or datetime.now())
 
 
+def _pg_rows(rows: list) -> list:
+    return [{"label": label, "sale": sale, "rent": rent} for label, sale, rent in rows]
+
+
+def hdb_pg_links(street: str, flat_types: dict, block: str | None = None) -> list:
+    """PropertyGuru links for a block (or a street) — the flat types it has,
+    in FLAT_TYPES order. The street goes out spelled in full ("BISHAN STREET
+    22"), the way PropertyGuru writes its own addresses."""
+    address = hdb.expand_street(street).title()
+    if block:
+        address = f"{block} {address}"
+    return _pg_rows(hdb_listing_links(address, list(order_by_flat_type(flat_types or {}))))
+
+
 def build_hdb_block_payload(result: dict, coords: dict | None) -> dict:
     """One block's detail — the HDB answer to build_property_payload.
 
@@ -274,6 +292,7 @@ def build_hdb_block_payload(result: dict, coords: dict | None) -> dict:
         # block, aged to today the way the map's dots are.
         "lease_years": block_lease_years(result.get("flat_types")),
         "total_txns": result.get("total_txns", 0),
+        "pg_links": hdb_pg_links(street, result.get("flat_types"), result["block"]),
         "lat": coords["lat"] if coords else None,
         "lng": coords["lng"] if coords else None,
     }
@@ -301,6 +320,7 @@ def build_hdb_street_payload(result: dict) -> dict:
         "blocks": [{"block": b, "count": n} for b, n in result.get("blocks", [])],
         "total_txns": result.get("total_txns", 0),
         "window_months": result.get("window_months"),
+        "pg_links": hdb_pg_links(street, result.get("flat_types")),
         "lat": None,
         "lng": None,
     }
@@ -1406,6 +1426,20 @@ def api_hdb_trend(
     block = (block or "").strip() or None
     street = street.strip()
     return hdb.price_trend(block, street, _hdb_street_records(street))
+
+
+@app.get("/api/hdb/transactions")
+def api_hdb_transactions(
+    street: str = Query(..., min_length=1),
+    flat_type: str = Query(..., min_length=1),
+    block: str | None = None,
+):
+    """Every resale of one flat type in a block (or across a street when no
+    block is given), newest first — the HDB counterpart of /api/transactions,
+    fetched when a row of the flat-type table is tapped."""
+    block = (block or "").strip() or None
+    street = street.strip()
+    return hdb.flat_type_transactions(block, street, flat_type, _hdb_street_records(street))
 
 
 # The verdict emoji is a Telegram rendering; the page wants a class name.

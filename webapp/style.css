@@ -193,6 +193,10 @@ body {
 /* The interval the rate is quoted with: present, but never louder than it. */
 .trend-headline .ci { color: #7a8494; font-variant-numeric: tabular-nums; }
 
+/* ── PropertyGuru links ────────────────────────────────────────────────── */
+.pg-link { color: #2563eb; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.pg-link:hover { text-decoration: underline; }
+
 /* ── Liquidity ────────────────────────────────────────────────────────────
    Verdicts are ordinal (fast → typical → slow), so they wear the familiar
    green/amber/red — but always beside their words, never colour alone. */

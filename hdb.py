@@ -303,6 +303,45 @@ def block_detail(block: str, street: str, records: list | None = None) -> dict:
     }
 
 
+# ── Flat-type drill-down (parallel to ura.band_transactions) ────────────────
+
+def flat_type_transactions(block: str | None, street: str, flat_type: str,
+                           records: list | None = None,
+                           months: int = DEFAULT_WINDOW_MONTHS,
+                           now: datetime | None = None) -> dict:
+    """Every resale of one flat type, newest first — the list behind a row of
+    the flat-type table.
+
+    Scoped the way the table it drills into is: a block uses its whole cached
+    window (block_detail), a street (`block=None`) its recent window
+    (street_summary, via the same `_recent`), so the list always has as many
+    rows as the count beside it says."""
+    s, ft = street.strip().upper(), flat_type.strip().upper()
+    b = block.strip().upper() if block else None
+    rows = [r for r in _normalise_all(records)
+            if r["street"] == s and (b is None or r["block"] == b)]
+    if b is None:
+        rows = _recent(rows, months, now)  # windowed before the type filter, as the summary is
+    rows = [r for r in rows if r["flat_type"] == ft]
+    rows.sort(key=lambda r: r["month_dt"] or datetime.min, reverse=True)
+    return {
+        "block": b,
+        "street": s,
+        "flat_type": ft,
+        "count": len(rows),
+        "transactions": [{
+            "block": r["block"],
+            "month": r["month"],
+            "price": r["price"],
+            "psf": r["psf"],
+            "area_sqft": round(r["area_sqft"]),
+            "storey_range": r["storey_range"],
+            "flat_model": r["flat_model"],
+            "lease_years": r["lease_years"],
+        } for r in rows],
+    }
+
+
 # ── Price trend (parallel to ura.price_trend) ───────────────────────────────
 #
 # Average resale PSF over time for one block (or a whole street). PSF is already
