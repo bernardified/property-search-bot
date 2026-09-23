@@ -527,21 +527,24 @@ function renderProperty(d) {
   // PSF by size band — chart first, full transaction table behind a toggle
   html += "<h3>PSF by size band</h3>";
   html += `<div class="chart-box"><canvas id="bands-chart" height="${40 + Object.keys(d.bands || {}).length * 34}"></canvas></div>`;
-  html += `<p class="hint">Tap a band for every transaction in it.</p>`;
+  html += `<p class="hint band-hint">👆 Tap a band — on the chart or in the table — to see every transaction in it.</p>`;
   html += `<div id="band-detail" hidden></div>`;
   // The table below is the LATEST sale per band, not the full history — that
-  // lives behind a band tap, so the summary label has to say which it is.
-  html += "<details><summary>Latest sale in each band</summary>";
-  html += "<table><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
+  // lives behind a band tap, so the heading has to say which it is. Shown
+  // open: it is four rows, and hiding them behind a toggle hid the tap
+  // targets too. Every row is a trigger, not just the band name in it.
+  html += "<h4 class='sub-head'>Latest sale in each band</h4>";
+  html += "<table class='band-table'><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
   for (const [band, txn] of Object.entries(d.bands || {})) {
     html +=
-      `<tr><td><button type="button" class="band-cell" data-band="${esc(band)}">${esc(band)}</button>` +
+      `<tr class="band-row" data-band="${esc(band)}">` +
+      `<td><button type="button" class="band-cell" data-band="${esc(band)}">${esc(band)}<span class="band-chev" aria-hidden="true">›</span></button>` +
       `<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft · ${esc(txn.type_of_sale)}</span></td>` +
       `<td class="num">${fmtMoney(txn.price)}</td>` +
       `<td class="num">${txn.psf ? fmtMoney(txn.psf) : "–"}</td>` +
       `<td>${esc(txn.contract_date_display)}</td></tr>`;
   }
-  html += "</table></details>";
+  html += "</table>";
 
   // Price trend — filled in async by loadTrend()
   html += "<h3>Price trend</h3><div id='trend-area'><p class='note'>Loading trend…</p></div>";
@@ -808,7 +811,7 @@ function closeBandDetail() {
 
 // Keep the table's band buttons showing which one is open.
 function syncBandSelection() {
-  for (const b of resultsBox.querySelectorAll(".band-cell")) {
+  for (const b of resultsBox.querySelectorAll(".band-cell, .band-row")) {
     b.classList.toggle("on", b.dataset.band === openBand);
   }
 }
@@ -879,7 +882,7 @@ function renderBandDetail(box, band, t) {
 
 // Band buttons live in HTML rebuilt on every search, so delegate from the panel.
 resultsBox.addEventListener("click", (e) => {
-  const b = e.target.closest(".band-cell");
+  const b = e.target.closest(".band-row");
   if (b) toggleBandDetail(b.dataset.band);
 });
 
