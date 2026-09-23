@@ -17,10 +17,12 @@ import api
 import hdb
 from api import (
     app,
+    block_lease_years,
     build_hdb_block_payload,
     build_hdb_street_index,
     build_hdb_street_payload,
     build_property_payload,
+    lease_summary,
     order_by_band,
     order_by_flat_type,
     project_xy_coords,
@@ -125,6 +127,60 @@ class TestPayloadShaping(unittest.TestCase):
         self.assertEqual(p["rental"], RENTAL_RESULT)
         self.assertEqual(p["total_units"], 1399)
         self.assertIn("<= 600 sqft", p["bands"])
+
+    def test_lease_summary_reads_uras_own_tenure_string(self):
+        # The same strings the explore dots vote on, off the latest sale in
+        # each band — so a popup and the page behind it cannot disagree.
+        bands = {
+            "<= 600 sqft": {"tenure": "99 yrs lease commencing from 2012"},
+            "601 - 800 sqft": {"tenure": "99 yrs lease commencing from 2012"},
+        }
+        out = lease_summary(bands, now=datetime(2026, 9, 1))
+        self.assertEqual(out["tenure"], "99")
+        self.assertAlmostEqual(out["lease_years"], 84.3, places=1)
+
+    def test_lease_summary_freehold_has_no_lease_to_run_down(self):
+        out = lease_summary({"<= 600 sqft": {"tenure": "Freehold"}},
+                            now=datetime(2026, 9, 1))
+        self.assertEqual(out["tenure"], "freehold")
+        self.assertIsNone(out["lease_years"])
+
+    def test_lease_summary_without_tenure_strings(self):
+        # URA_RESULT's own bands carry none — both answers are simply absent,
+        # never a zero or a guess.
+        for bands in ({}, None, URA_RESULT["bands"]):
+            out = lease_summary(bands, now=datetime(2026, 9, 1))
+            self.assertIsNone(out["tenure"])
+            self.assertIsNone(out["lease_years"])
+
+    def test_build_property_payload_carries_tenure_and_lease(self):
+        ura = {**URA_RESULT, "bands": {
+            "<= 600 sqft": {**URA_RESULT["bands"]["<= 600 sqft"],
+                            "tenure": "99 yrs lease commencing from 2012"},
+        }}
+        p = build_property_payload(ura, RENTAL_RESULT, None)
+        self.assertEqual(p["tenure"], "99")
+        self.assertIsNotNone(p["lease_years"])
+
+    def test_block_lease_years_ages_the_newest_reading(self):
+        # Two flat types, two readings: the OLDER sale carries the LARGER
+        # number, which is exactly the trap — the newest one wins and is then
+        # aged to today.
+        flat_types = {
+            "3 ROOM": {"latest": {"lease_years": 70.0, "month_dt": datetime(2024, 9, 1)}},
+            "4 ROOM": {"latest": {"lease_years": 65.0, "month_dt": datetime(2026, 8, 1)}},
+        }
+        self.assertAlmostEqual(
+            block_lease_years(flat_types, now=datetime(2026, 9, 1)), 64.9, places=1)
+
+    def test_block_lease_years_without_a_dated_reading(self):
+        self.assertIsNone(block_lease_years({}, now=datetime(2026, 9, 1)))
+        self.assertIsNone(block_lease_years(
+            {"4 ROOM": {"latest": {"lease_years": 65.0}}}, now=datetime(2026, 9, 1)))
+
+    def test_hdb_block_payload_carries_the_blocks_lease(self):
+        p = build_hdb_block_payload(HDB_BLOCK, None)
+        self.assertIsNotNone(p["lease_years"])
 
     def test_order_by_band_uses_size_bands_order(self):
         from utils import SIZE_BANDS

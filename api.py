@@ -126,6 +126,33 @@ def project_xy_coords(project_dicts: list, project_name: str) -> dict | None:
     return None
 
 
+def lease_summary(bands: dict, now=None) -> dict:
+    """Tenure + remaining lease for the property page (pure, no IO).
+
+    Every URA transaction carries the project's tenure string ("99 yrs lease
+    commencing from 2012"), and `bands` already holds the latest sale in each
+    size band — so this needs no extra read: it votes the same strings through
+    the same two functions that give the explore dots their `tenure` and
+    `lease_years`, which is what keeps a popup and the page behind it from
+    quoting different leases.
+
+    The sample is those up-to-four transactions rather than every one. That
+    only matters for the handful of projects whose own transactions disagree
+    about their tenure (a freehold project with a stray 999-year sale in it),
+    where a wider vote would be steadier; against it, this costs nothing and
+    cannot drag the transaction cache into a request.
+
+    `lease_years` is None for freehold — there is no lease to run down, which
+    is exactly what the tenure beside it says — and for a string that does not
+    parse.
+    """
+    txns = [t for t in (bands or {}).values() if isinstance(t, dict)]
+    return {
+        "tenure": classify_tenure(txns),
+        "lease_years": lease_remaining_years(txns, now or datetime.now()),
+    }
+
+
 def build_property_payload(ura_result: dict, rental_result: dict, coords: dict | None) -> dict:
     """Combine the three sources into the /api/property response.
 
@@ -148,6 +175,10 @@ def build_property_payload(ura_result: dict, rental_result: dict, coords: dict |
         "under_construction": ura_result.get("under_construction", False),
         "fuzzy_match": ura_result.get("fuzzy_match"),
         "rental": rental_result,
+        # Tenure and remaining lease, voted off the same tenure strings the
+        # explore dots use (lease_summary) — the page and the map popup for
+        # one project must never quote different leases.
+        **lease_summary(ura_result.get("bands")),
     }
 
 
@@ -196,6 +227,27 @@ def shape_flat_types(flat_types: dict) -> dict:
     return out
 
 
+def block_lease_years(flat_types: dict, now=None) -> float | None:
+    """One block's remaining lease as of today, or None.
+
+    Every flat in a block shares a lease start, so any sale in it answers for
+    the whole block — but a lease reading is only true on the day it was
+    recorded, and these run up to five years back. So the NEWEST sale across
+    the flat types is taken and aged to today (`_lease_today`), exactly as the
+    explore layer's dots are: the decay is a year per year, so ageing the
+    newest reading is arithmetic, not an estimate, while quoting the largest
+    reading would quote the oldest one.
+    """
+    latest = None
+    for agg in (flat_types or {}).values():
+        row = (agg or {}).get("latest") or {}
+        if not row.get("month_dt"):
+            continue
+        if latest is None or row["month_dt"] > latest["month_dt"]:
+            latest = row
+    return _lease_today(latest, now or datetime.now())
+
+
 def build_hdb_block_payload(result: dict, coords: dict | None) -> dict:
     """One block's detail — the HDB answer to build_property_payload.
 
@@ -217,6 +269,9 @@ def build_hdb_block_payload(result: dict, coords: dict | None) -> dict:
         "street": street,
         "town": result.get("town"),
         "flat_types": shape_flat_types(result.get("flat_types")),
+        # The headline the per-flat-type column cannot give: one number for the
+        # block, aged to today the way the map's dots are.
+        "lease_years": block_lease_years(result.get("flat_types")),
         "total_txns": result.get("total_txns", 0),
         "lat": coords["lat"] if coords else None,
         "lng": coords["lng"] if coords else None,

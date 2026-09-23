@@ -276,19 +276,44 @@ body {
    the row height for no gain. The sub-line under the date may wrap. */
 .band-scroll td, .band-scroll th { white-space: nowrap; }
 
-/* The band name in the summary table doubles as the drill-down trigger. */
+/* Heading for the always-visible latest-sale table (was a <details> toggle). */
+#results .sub-head {
+  margin: 12px 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #444d5c;
+}
+
+/* The hint is the one line that says the chart and table are tappable, so it
+   reads as an instruction, not a footnote. */
+#results .band-hint { color: #2563eb; font-size: 0.76rem; }
+
+/* Every row of the latest-sale table is a drill-down trigger: the band name
+   wears a pill with a chevron (the affordance), and the whole row lights up
+   on hover so the tap target is visibly the row, not just the word. */
+.band-row { cursor: pointer; }
+.band-row:hover td { background: #f3f6fc; }
+.band-row.on td { background: #e8effc; }
 .band-cell {
-  padding: 0;
-  border: none;
-  background: none;
-  color: #2563eb;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid #c9d7f5;
+  border-radius: 999px;
+  background: #eef3fd;
+  color: #1d4ed8;
   font: inherit;
   font-weight: 600;
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
-.band-cell:hover { text-decoration: underline; }
-.band-cell.on { color: #1e2430; text-decoration: underline; }
+.band-chev { font-size: 1rem; line-height: 1; transition: transform 0.15s; }
+.band-row:hover .band-cell { background: #dfe8fb; border-color: #9fb9ee; }
+.band-cell.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+.band-cell.on .band-chev { transform: rotate(90deg); }
+.band-cell:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 
 .candidates button {
   display: block;

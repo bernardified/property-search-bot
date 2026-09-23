@@ -195,7 +195,14 @@ async function runSearch(q, market) {
   searchActive = true;
   backBtn.hidden = false;
   if (exploreOn) exitExplore();
-  if (nearbyOn) exitNearby(false);   // a new search replaces the view to go back to
+  // Drilling into a neighbour is the one search that has somewhere to come
+  // back to: keep that ring whole — rows, origin, market — so the neighbour's
+  // own view can offer a free return into it. Any other search leaves no ring
+  // behind, and clears the one a previous drill-in did.
+  nearbyReturn = nearbyOn && currentProperty
+    ? { property: currentProperty, market: nearbyMarket, data: nearbyData, origin: nearbyOrigin }
+    : null;
+  if (nearbyOn) exitNearby(false);   // the property view is replaced either way
   currentProperty = null;
   nearbyBtn.hidden = true;
   input.value = q;
@@ -274,6 +281,7 @@ async function runSearch(q, market) {
   } finally {
     clearTimeout(slowTimer);
     searchBtn.disabled = false;
+    syncNearbyReturn();
   }
 }
 
@@ -506,6 +514,10 @@ function renderProperty(d) {
   if (d.total_units) metaBits.push(`${d.total_units} units`);
   if (d.expected_top) metaBits.push(`Expected TOP: ${esc(d.expected_top)}`);
   if (d.under_construction) metaBits.push("Under construction");
+  // The same tenure and lease the map popup shows for this project, from the
+  // same voted tenure strings. Freehold says so instead of showing a blank:
+  // a missing lease and no lease at all are different answers.
+  if (d.tenure) metaBits.push(`${TENURE_LABELS[d.tenure]}${leaseSuffix(d)}`);
   if (d.overall_avg_psf)
     metaBits.push(`12-mo avg: ${fmtMoney(d.overall_avg_psf)} psf (${d.overall_psf_count} txns)`);
 
@@ -515,21 +527,24 @@ function renderProperty(d) {
   // PSF by size band — chart first, full transaction table behind a toggle
   html += "<h3>PSF by size band</h3>";
   html += `<div class="chart-box"><canvas id="bands-chart" height="${40 + Object.keys(d.bands || {}).length * 34}"></canvas></div>`;
-  html += `<p class="hint">Tap a band for every transaction in it.</p>`;
+  html += `<p class="hint band-hint">👆 Tap a band — on the chart or in the table — to see every transaction in it.</p>`;
   html += `<div id="band-detail" hidden></div>`;
   // The table below is the LATEST sale per band, not the full history — that
-  // lives behind a band tap, so the summary label has to say which it is.
-  html += "<details><summary>Latest sale in each band</summary>";
-  html += "<table><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
+  // lives behind a band tap, so the heading has to say which it is. Shown
+  // open: it is four rows, and hiding them behind a toggle hid the tap
+  // targets too. Every row is a trigger, not just the band name in it.
+  html += "<h4 class='sub-head'>Latest sale in each band</h4>";
+  html += "<table class='band-table'><tr><th>Band</th><th class='num'>Price</th><th class='num'>PSF</th><th>Date</th></tr>";
   for (const [band, txn] of Object.entries(d.bands || {})) {
     html +=
-      `<tr><td><button type="button" class="band-cell" data-band="${esc(band)}">${esc(band)}</button>` +
+      `<tr class="band-row" data-band="${esc(band)}">` +
+      `<td><button type="button" class="band-cell" data-band="${esc(band)}">${esc(band)}<span class="band-chev" aria-hidden="true">›</span></button>` +
       `<br><span class="popup-line">${esc(txn.floor_range)} flr · ${txn.area_sqft} sqft · ${esc(txn.type_of_sale)}</span></td>` +
       `<td class="num">${fmtMoney(txn.price)}</td>` +
       `<td class="num">${txn.psf ? fmtMoney(txn.psf) : "–"}</td>` +
       `<td>${esc(txn.contract_date_display)}</td></tr>`;
   }
-  html += "</table></details>";
+  html += "</table>";
 
   // Price trend — filled in async by loadTrend()
   html += "<h3>Price trend</h3><div id='trend-area'><p class='note'>Loading trend…</p></div>";
@@ -581,6 +596,12 @@ function renderHdbResult(d) {
   if (d.postal) metaBits.push(`Postal ${esc(d.postal)}`);
   if (d.town) metaBits.push(esc(d.town.replace(/\b\w/g, (c) => c.toUpperCase())));
   metaBits.push(`${d.total_txns} resale transaction${d.total_txns === 1 ? "" : "s"}`);
+  // A block's lease decay is the number an HDB buyer is really asking about,
+  // so it is a headline and not only a column in the table below. It is read
+  // off the newest sale and aged to today, hence "about" — and never to a
+  // decimal, which would claim a precision the month-level data has not got.
+  if (d.lease_years != null)
+    metaBits.push(`About ${Math.round(d.lease_years)} yrs lease remaining`);
 
   let html = `<h2>${esc(d.development)}</h2>`;
   html += `<p class="street">${esc(d.street)} · <span class="market-tag">HDB resale</span></p>`;
@@ -596,7 +617,11 @@ function renderHdbResult(d) {
   html += `<div class="chart-box"><canvas id="flats-chart" height="${40 + types.length * 34}"></canvas></div>`;
 
   html += "<details open><summary>Latest sale in each flat type</summary>";
-  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease left</th></tr>";
+  // "Lease at sale", not "Lease left": typical_lease is the median of the
+  // readings those sales carried, which run up to five years back — it is
+  // NOT aged to today, and the headline above it is. Labelling both the same
+  // put 94 yrs in this column beside 90 in the header of the same block.
+  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease at sale</th></tr>";
   for (const [ft, v] of types) {
     const latest = v.latest || {};
     html +=
@@ -786,7 +811,7 @@ function closeBandDetail() {
 
 // Keep the table's band buttons showing which one is open.
 function syncBandSelection() {
-  for (const b of resultsBox.querySelectorAll(".band-cell")) {
+  for (const b of resultsBox.querySelectorAll(".band-cell, .band-row")) {
     b.classList.toggle("on", b.dataset.band === openBand);
   }
 }
@@ -857,7 +882,7 @@ function renderBandDetail(box, band, t) {
 
 // Band buttons live in HTML rebuilt on every search, so delegate from the panel.
 resultsBox.addEventListener("click", (e) => {
-  const b = e.target.closest(".band-cell");
+  const b = e.target.closest(".band-row");
   if (b) toggleBandDetail(b.dataset.band);
 });
 
@@ -1182,6 +1207,12 @@ let nearbyMarket = "private";   // which market the ring is currently listing
 let nearbyOrigin = null;        // the point the ring is centred on, kept across switches
 let currentProperty = null;     // last successful /api/property payload
 let savedCamera = null;         // property-view centre/zoom, restored on back
+let nearbyData = null;          // the rows behind the ring on screen
+// The ring a drill-in left behind: {property, market, data, origin}. Kept so
+// the neighbour's own view can offer a way back into it, and kept whole so
+// that return needs no request.
+let nearbyReturn = null;
+let nearbyOrphaned = false;     // is the view behind the ring the origin's own?
 
 // Both markets' rows carry `distance_m` and both explore popups already render
 // it, so a neighbour reads the same here as it does on the explore map. What
@@ -1243,6 +1274,37 @@ function clearNearbyLayer() {
 
 nearbyBtn.addEventListener("click", () => enterNearby());
 el("nearby-back").addEventListener("click", () => exitNearby());
+el("back-to-nearby").addEventListener("click", returnToNearby);
+
+// A payload's own search string — a private project name, or an HDB block on
+// its street. The same identity /api/nearby is given, and the same string an
+// explore popup's "View details →" carries.
+const propertyQuery = (p) =>
+  (p.market === "hdb" && p.block ? `${p.block} ${p.street}` : p.development);
+
+// The return button lives in the property view, because it is the neighbour's
+// panel that has a ring to go back to.
+function syncNearbyReturn() {
+  el("back-to-nearby").hidden = !nearbyReturn;
+  if (nearbyReturn)
+    el("back-to-nearby-name").textContent = nearbyReturn.property.development;
+}
+
+// Back into the ring a drill-in left behind. The rows, the origin point and
+// the market were all kept, so nothing is fetched and nothing is recomputed:
+// the ring, its pins and its list are rebuilt from the response that drew them
+// the first time. The property view underneath is still the neighbour's — that
+// is what `orphaned` tells the back button inside the view.
+function returnToNearby() {
+  const r = nearbyReturn;
+  if (!r) return;
+  nearbyReturn = null;
+  currentProperty = r.property;   // the ring's origin owns this view again
+  // The box names the property whose ring is on screen, not the neighbour the
+  // user just left — and it is the query the back button below will re-run.
+  input.value = propertyQuery(r.property);
+  renderNearby(r.property, r.market, r.data, r.origin, true);
+}
 
 // Switching market re-runs the same ring on the other layer. The camera is
 // already where it should be and the origin has not moved, so only the pins
@@ -1300,69 +1362,86 @@ async function enterNearby(market) {
       return;
     }
 
-    if (!nearbyOn) {
-      savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
-      clearSchoolRing();
-      map.removeLayer(markerLayer);    // property view kept intact, just detached
-      el("legend").hidden = true;
-    }
-    clearNearbyLayer();                // a switch replaces the pins, not the view
-    nearbyMarket = market;
-    nearbyOrigin = p;
-    setNearbyMarketButtons(market);
-
-    nearbyLayer = L.layerGroup().addTo(map);
-    // The ring makes "within 1 km" legible instead of implied, and its bounds
-    // are the right frame for the view.
-    const ring = L.circle(p, {
-      radius: NEARBY_RADIUS_M,
-      interactive: false,
-      color: BRAND,
-      weight: 1.5,
-      dashArray: "6 5",
-      fillColor: BRAND,
-      fillOpacity: 0.05,
-    }).addTo(nearbyLayer);
-
-    L.marker(p, { icon: teardrop(BRAND), zIndexOffset: 1000 })
-      .addTo(nearbyLayer)
-      .bindPopup(
-        `<div class="popup-name">${esc(d.development)}</div>` +
-        `<div class="popup-line">${esc(d.street)}</div>` +
-        `<div class="popup-line"><span class="muted">Centre of the 1 km search</span></div>`
-      );
-
-    for (const dev of data.results) {
-      // No 12-month transaction → no PSF and no yield to show: greyed, the same
-      // way explore treats a dot with no value (never a ramp colour).
-      // `limit` caps the pins at 40 on either market — an HDB ring holds
-      // 150-270 blocks where a private one holds 3-36, but only the listed
-      // rows are ever drawn, so the map carries the same weight either way.
-      const fill = dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN;
-      const marker = L.marker([dev.lat, dev.lng], { icon: teardrop(fill) })
-        .addTo(nearbyLayer)
-        .bindPopup(MARKETS[market].popup(dev));
-      nearbyMarkers.set(spec.key(dev), marker);
-    }
-    renderNearbyList(d, data, spec);
-    el("nearby-legend-what").textContent = spec.legend;
-    resultsBox.hidden = true;
-    nearbyView.hidden = false;
-    nearbyBtn.hidden = true;
-    el("nearby-legend").hidden = false;
-    const entering = !nearbyOn;
-    nearbyOn = true;
-    setStatus("");
-    // Only the first entry reframes: a market switch happens under a camera
-    // the user has already placed, and yanking it back would undo their pan.
-    if (entering) {
-      map.invalidateSize();   // the sidebar just changed height (mobile column)
-      map.fitBounds(ring.getBounds(), { padding: [30, 30] });
-    }
+    renderNearby(d, market, data, p);
   } catch (err) {
     setStatus("Nearby search failed: " + err.message, true);
   } finally {
     nearbyBtn.disabled = false;
+  }
+}
+
+// Everything that puts a ring on screen, given rows already in hand. Split
+// from the fetch above so returning from a drilled-into neighbour can replay
+// the rows it kept instead of asking for them again.
+//
+// `orphaned` marks a ring whose origin is no longer the property rendered
+// behind it, which is the one thing the back button has to know.
+function renderNearby(d, market, data, p, orphaned = false) {
+  const spec = NEARBY_MARKETS[market];
+  const entering = !nearbyOn;
+  if (entering) {
+    savedCamera = { center: map.getCenter(), zoom: map.getZoom() };
+    // Whose property view is sitting behind this ring — see exitNearby.
+    nearbyOrphaned = orphaned;
+    clearSchoolRing();
+    map.removeLayer(markerLayer);    // property view kept intact, just detached
+    el("legend").hidden = true;
+  }
+  clearNearbyLayer();                // a switch replaces the pins, not the view
+  nearbyMarket = market;
+  nearbyOrigin = p;
+  // The rows stay in hand: a drill-in into one of them can put this exact
+  // ring back without asking the server for it a second time.
+  nearbyData = data;
+  setNearbyMarketButtons(market);
+
+  nearbyLayer = L.layerGroup().addTo(map);
+  // The ring makes "within 1 km" legible instead of implied, and its bounds
+  // are the right frame for the view.
+  const ring = L.circle(p, {
+    radius: NEARBY_RADIUS_M,
+    interactive: false,
+    color: BRAND,
+    weight: 1.5,
+    dashArray: "6 5",
+    fillColor: BRAND,
+    fillOpacity: 0.05,
+  }).addTo(nearbyLayer);
+
+  L.marker(p, { icon: teardrop(BRAND), zIndexOffset: 1000 })
+    .addTo(nearbyLayer)
+    .bindPopup(
+      `<div class="popup-name">${esc(d.development)}</div>` +
+      `<div class="popup-line">${esc(d.street)}</div>` +
+      `<div class="popup-line"><span class="muted">Centre of the 1 km search</span></div>`
+    );
+
+  for (const dev of data.results) {
+    // No 12-month transaction → no PSF and no yield to show: greyed, the same
+    // way explore treats a dot with no value (never a ramp colour).
+    // `limit` caps the pins at 40 on either market — an HDB ring holds
+    // 150-270 blocks where a private one holds 3-36, but only the listed
+    // rows are ever drawn, so the map carries the same weight either way.
+    const fill = dev.avg_psf == null ? NEAR_PIN_NODATA : NEAR_PIN;
+    const marker = L.marker([dev.lat, dev.lng], { icon: teardrop(fill) })
+      .addTo(nearbyLayer)
+      .bindPopup(MARKETS[market].popup(dev));
+    nearbyMarkers.set(spec.key(dev), marker);
+  }
+  renderNearbyList(d, data, spec);
+  el("nearby-legend-what").textContent = spec.legend;
+  resultsBox.hidden = true;
+  nearbyView.hidden = false;
+  nearbyBtn.hidden = true;
+  el("back-to-nearby").hidden = true;   // this IS the ring it returns to
+  el("nearby-legend").hidden = false;
+  nearbyOn = true;
+  setStatus("");
+  // Only the first entry reframes: a market switch happens under a camera
+  // the user has already placed, and yanking it back would undo their pan.
+  if (entering) {
+    map.invalidateSize();   // the sidebar just changed height (mobile column)
+    map.fitBounds(ring.getBounds(), { padding: [30, 30] });
   }
 }
 
@@ -1401,15 +1480,27 @@ el("nearby-list").addEventListener("click", (e) => {
 // `restore` false when another view is taking over (a new search, explore):
 // the property panel and camera are about to be replaced anyway.
 function exitNearby(restore = true) {
+  // An orphaned ring has no panel to reveal: the property view behind it is
+  // the neighbour the user drilled into, not the origin this button names. So
+  // the origin is searched again — the one step of the loop that costs a
+  // request, against a return *into* a ring, which costs none.
+  const reSearch = restore && nearbyOrphaned ? currentProperty : null;
   clearNearbyLayer();
   nearbyView.hidden = true;
   el("nearby-legend").hidden = true;
   nearbyOn = false;
+  nearbyOrphaned = false;
   nearbyOrigin = null;
+  nearbyData = null;
   if (!map.hasLayer(markerLayer)) map.addLayer(markerLayer);
   if (!restore) return;
+  if (reSearch) {
+    runSearch(propertyQuery(reSearch), reSearch.market === "hdb" ? "hdb" : "private");
+    return;
+  }
   resultsBox.hidden = false;
   nearbyBtn.hidden = false;
+  syncNearbyReturn();   // the ring THIS view was reached from, if there was one
   el("legend").hidden = !amenitiesShown;   // amenities may have landed while away
   map.invalidateSize();
   if (savedCamera) map.setView(savedCamera.center, savedCamera.zoom);
@@ -1490,6 +1581,13 @@ const privateLeaseLine = (d) =>
     : d.tenure === "freehold"
       ? "<span class='muted'>no expiry</span>"
       : "–";
+// The property page's version of the line above: the tenure label carries the
+// sentence, so this only adds what the label cannot say.
+const leaseSuffix = (d) =>
+  d.lease_years != null
+    ? ` · about ${Math.round(d.lease_years)} yrs remaining`
+    : d.tenure === "freehold" ? " · no expiry" : "";
+
 // The popup knows which market drew it, so the search it starts is routed
 // rather than re-guessed by looksLikeHdb — the same reason a picked
 // type-ahead row carries its market.
@@ -1849,6 +1947,8 @@ async function enterExplore(target = market) {
     // nothing for the nearby button to search around or go back to.
     currentProperty = null;
     nearbyBtn.hidden = true;
+    nearbyReturn = null;
+    syncNearbyReturn();
     panel.hidden = false;
     syncFilterPanels();
     renderMetricToggle();
