@@ -128,6 +128,14 @@ class TestPayloadShaping(unittest.TestCase):
         self.assertEqual(p["total_units"], 1399)
         self.assertIn("<= 600 sqft", p["bands"])
 
+    def test_property_payload_carries_a_pg_link_per_bedroom_type(self):
+        p = build_property_payload(URA_RESULT, RENTAL_RESULT, None)
+        self.assertEqual([l["label"] for l in p["pg_links"]],
+                         ["Studio", "1 BR", "2 BR", "3 BR", "4+ BR"])
+        self.assertIn("freetext=PARC+ESTA", p["pg_links"][2]["sale"])
+        self.assertIn("beds[]=2", p["pg_links"][2]["sale"])
+        self.assertIn("property-for-rent", p["pg_links"][2]["rent"])
+
     def test_lease_summary_reads_uras_own_tenure_string(self):
         # The same strings the explore dots vote on, off the latest sale in
         # each band — so a popup and the page behind it cannot disagree.
@@ -953,6 +961,50 @@ class TestHDBPayloads(unittest.TestCase):
         self.assertIsNone(p["lat"])
         self.assertEqual(p["blocks"], [{"block": "257", "count": 5},
                                        {"block": "236", "count": 4}])
+
+
+class TestHDBFlatTypeDrilldown(unittest.TestCase):
+    """The list behind a row of the flat-type table must hold as many rows as
+    the count beside it: a block's whole window, a street's recent one."""
+
+    NOW = datetime(2026, 9, 1)
+
+    @staticmethod
+    def _raw(block, month, flat_type="4 ROOM", price="600000"):
+        return {"block": block, "street_name": "BISHAN ST 22", "town": "BISHAN",
+                "flat_type": flat_type, "month": month, "resale_price": price,
+                "floor_area_sqm": "90", "storey_range": "04 TO 06",
+                "flat_model": "Model A", "remaining_lease": "60 years 02 months"}
+
+    RECORDS = [
+        _raw.__func__("257", "2026-08"), _raw.__func__("257", "2022-01"),
+        _raw.__func__("257", "2026-07", flat_type="5 ROOM"),
+        _raw.__func__("236", "2026-06"),
+    ]
+
+    def test_block_list_uses_the_whole_window_newest_first(self):
+        import hdb
+        r = hdb.flat_type_transactions("257", "bishan st 22", "4 room", self.RECORDS, now=self.NOW)
+        self.assertEqual(r["count"], 2)
+        self.assertEqual([t["month"] for t in r["transactions"]], ["2026-08", "2022-01"])
+        self.assertEqual(r["count"],
+                         hdb.block_detail("257", "BISHAN ST 22", self.RECORDS)["flat_types"]["4 ROOM"]["count"])
+
+    def test_street_list_matches_the_street_summary_window(self):
+        import hdb
+        r = hdb.flat_type_transactions(None, "BISHAN ST 22", "4 ROOM", self.RECORDS, now=self.NOW)
+        self.assertEqual({t["block"] for t in r["transactions"]}, {"257", "236"})
+        summary = hdb.street_summary("BISHAN ST 22", self.RECORDS, now=self.NOW)
+        self.assertEqual(r["count"], summary["flat_types"]["4 ROOM"]["count"])
+
+    @patch("api._hdb_street_records")
+    def test_endpoint_reads_one_street(self, mock_street):
+        mock_street.return_value = self.RECORDS
+        data = client.get("/api/hdb/transactions",
+                          params={"street": "BISHAN ST 22", "block": "257",
+                                  "flat_type": "5 ROOM"}).json()
+        self.assertEqual(data["count"], 1)
+        mock_street.assert_called_once_with("BISHAN ST 22")
 
 
 class TestHDBEndpoints(unittest.TestCase):

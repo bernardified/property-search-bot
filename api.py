@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 import hdb
 from ura import search_property, price_trend, band_transactions
 from liquidity import liquidity_for_project, liquidity_verdict, _format_gap
+from propertyguru import listing_links
 from rental import get_rental_by_band
 from maps import get_nearby_info, geocode_building, resolve_postal_code
 from district_search import DISTRICT_NAMES
@@ -180,6 +181,10 @@ def build_property_payload(ura_result: dict, rental_result: dict, coords: dict |
         # explore dots use (lease_summary) — the page and the map popup for
         # one project must never quote different leases.
         **lease_summary(ura_result.get("bands")),
+        # Search links only, built from the name — PropertyGuru is never
+        # fetched (see propertyguru.py), so this costs nothing.
+        "pg_links": [{"label": label, "sale": sale, "rent": rent}
+                     for label, sale, rent in listing_links(ura_result["development"])],
     }
 
 
@@ -1406,6 +1411,20 @@ def api_hdb_trend(
     block = (block or "").strip() or None
     street = street.strip()
     return hdb.price_trend(block, street, _hdb_street_records(street))
+
+
+@app.get("/api/hdb/transactions")
+def api_hdb_transactions(
+    street: str = Query(..., min_length=1),
+    flat_type: str = Query(..., min_length=1),
+    block: str | None = None,
+):
+    """Every resale of one flat type in a block (or across a street when no
+    block is given), newest first — the HDB counterpart of /api/transactions,
+    fetched when a row of the flat-type table is tapped."""
+    block = (block or "").strip() or None
+    street = street.strip()
+    return hdb.flat_type_transactions(block, street, flat_type, _hdb_street_records(street))
 
 
 # The verdict emoji is a Telegram rendering; the page wants a class name.

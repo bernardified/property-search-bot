@@ -72,7 +72,7 @@ let liqAbort = null;       // cancels a stale liquidity fetch
 let bandsChart = null;     // Chart.js instances — destroyed on each new search
 let trendChart = null;
 let amenitiesShown = false;  // did the amenity pins land? (legend state across views)
-let currentDev = null;     // resolved project name — the band drill-down re-queries by it
+let currentDrill = null;   // {url(key), row(txn), noun} — what a band / flat-type tap fetches and draws
 let openBand = null;       // size band whose full transaction list is showing
 let bandAbort = null;      // cancels a stale drill-down fetch
 
@@ -580,9 +580,32 @@ function renderProperty(d) {
     }
   }
 
+  // PropertyGuru search links, one row per bedroom type. Links only — the
+  // listings are never fetched (propertyguru.py); PropertyGuru runs the search.
+  if ((d.pg_links || []).length) {
+    html += "<h3>Listings on PropertyGuru</h3><table class='pg-table'>";
+    for (const l of d.pg_links) {
+      html +=
+        `<tr><td>${esc(l.label)}</td>` +
+        `<td class="num"><a class="pg-link" href="${esc(l.sale)}" target="_blank" rel="noopener">For sale ↗</a></td>` +
+        `<td class="num"><a class="pg-link" href="${esc(l.rent)}" target="_blank" rel="noopener">For rent ↗</a></td></tr>`;
+    }
+    html += "</table><p class='liq-foot'>Opens PropertyGuru's own search for this development — a bedroom type with no units lands on an empty page.</p>";
+  }
+
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;
-  currentDev = d.development;
+  const dev = d.development;
+  currentDrill = {
+    noun: "band",
+    url: (band) => `/api/transactions?q=${encodeURIComponent(dev)}&band=${encodeURIComponent(band)}`,
+    row: (x) =>
+      `<tr><td>${esc(x.contract_date_display)}` +
+      `<br><span class="popup-line">${x.area_sqft.toLocaleString("en-SG")} sqft · ` +
+      `${esc(x.floor_range)} flr · ${esc(x.type_of_sale)}</span></td>` +
+      `<td class="num">${fmtMoney(x.price)}</td>` +
+      `<td class="num">${x.psf ? fmtMoney(x.psf) : "–"}</td></tr>`,
+  };
   closeBandDetail();  // the #band-detail slot above is a fresh, empty element
   renderBandsChart(d);
 }
@@ -621,24 +644,28 @@ function renderHdbResult(d) {
   html += "<h3>PSF by flat type</h3>";
   const types = Object.entries(d.flat_types || {});
   html += `<div class="chart-box"><canvas id="flats-chart" height="${40 + types.length * 34}"></canvas></div>`;
+  html += `<p class="hint band-hint">👆 Tap a flat type — on the chart or in the table — to see every resale of it.</p>`;
+  html += `<div id="band-detail" hidden></div>`;
 
-  html += "<details open><summary>Latest sale in each flat type</summary>";
+  html += "<h4 class='sub-head'>Latest sale in each flat type</h4>";
   // "Lease at sale", not "Lease left": typical_lease is the median of the
   // readings those sales carried, which run up to five years back — it is
   // NOT aged to today, and the headline above it is. Labelling both the same
   // put 94 yrs in this column beside 90 in the header of the same block.
-  html += "<table><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease at sale</th></tr>";
+  html += "<table class='band-table'><tr><th>Flat type</th><th class='num'>Median</th><th class='num'>PSF</th><th class='num'>Lease at sale</th></tr>";
   for (const [ft, v] of types) {
     const latest = v.latest || {};
     html +=
-      `<tr><td>${esc(ft)}<br><span class="popup-line">${v.count} sold` +
+      `<tr class="band-row" data-band="${esc(ft)}">` +
+      `<td><button type="button" class="band-cell" data-band="${esc(ft)}">${esc(ft)}<span class="band-chev" aria-hidden="true">›</span></button>` +
+      `<br><span class="popup-line">${v.count} sold` +
       (latest.month ? ` · latest ${esc(latest.month)}` : "") + `</span></td>` +
       `<td class="num">${fmtMoney(v.median_price)}` +
       (latest.price ? `<br><span class="popup-line">last ${fmtMoney(latest.price)}</span>` : "") + `</td>` +
       `<td class="num">${v.avg_psf ? fmtMoney(v.avg_psf) : "–"}</td>` +
       `<td class="num">${v.typical_lease != null ? v.typical_lease + " yrs" : "–"}</td></tr>`;
   }
-  html += "</table></details>";
+  html += "</table>";
 
   // Blocks on a street double as the way into block detail — the street view's
   // whole purpose, since only a block has a coordinate and a trend of its own.
@@ -663,7 +690,21 @@ function renderHdbResult(d) {
 
   resultsBox.innerHTML = html;
   resultsBox.hidden = false;
-  currentDev = d.development;
+  // A street's list spans its blocks, so each row says which one it was in.
+  const base = `/api/hdb/transactions?street=${encodeURIComponent(d.street)}` +
+               (isBlock ? `&block=${encodeURIComponent(d.block)}` : "");
+  currentDrill = {
+    noun: "flat type",
+    url: (ft) => `${base}&flat_type=${encodeURIComponent(ft)}`,
+    row: (x) =>
+      `<tr><td>${esc(x.month)}` +
+      `<br><span class="popup-line">${isBlock ? "" : `Blk ${esc(x.block)} · `}` +
+      `${x.area_sqft.toLocaleString("en-SG")} sqft · ${esc(x.storey_range)} flr · ${esc(x.flat_model)}` +
+      `${x.lease_years != null ? ` · ${Math.floor(x.lease_years)} yrs lease` : ""}</span></td>` +
+      `<td class="num">${fmtMoney(x.price)}</td>` +
+      `<td class="num">${x.psf ? fmtMoney(x.psf) : "–"}</td></tr>`,
+  };
+  closeBandDetail();
   resultsBox.querySelectorAll(".hdb-block").forEach((b) => {
     b.onclick = () => runSearch(b.dataset.name);
   });
@@ -712,6 +753,7 @@ function renderFlatTypesChart(d) {
       },
     },
   });
+  wireChartDrill(canvas, entries.map(([ft]) => ft));
 }
 
 function renderBandsChart(d) {
@@ -786,18 +828,23 @@ function renderBandsChart(d) {
   // gutter the labels live in is filtered out before a handler sees it. So
   // listen on the canvas itself and map the y offset back through the
   // category scale, which makes bar, label and the space between them equal.
-  const canvas = el("bands-chart");
-  const bandAt = (offsetY) => {
+  wireChartDrill(el("bands-chart"), rows.map((r) => r.band));
+}
+
+// Both bar charts (size bands, flat types) share it; `keys` are the category
+// labels' drill keys, in the chart's order.
+function wireChartDrill(canvas, keys) {
+  const keyAt = (offsetY) => {
     const y = bandsChart && bandsChart.scales.y;
     if (!y || offsetY < y.top || offsetY > y.bottom) return null;
-    return rows[Math.round(y.getValueForPixel(offsetY))] || null;
+    return keys[Math.round(y.getValueForPixel(offsetY))] ?? null;
   };
   canvas.addEventListener("click", (e) => {
-    const row = bandAt(e.offsetY);
-    if (row) toggleBandDetail(row.band);
+    const key = keyAt(e.offsetY);
+    if (key != null) toggleBandDetail(key);
   });
   canvas.addEventListener("mousemove", (e) => {
-    canvas.style.cursor = bandAt(e.offsetY) ? "pointer" : "default";
+    canvas.style.cursor = keyAt(e.offsetY) != null ? "pointer" : "default";
   });
 }
 
@@ -825,7 +872,8 @@ function syncBandSelection() {
 async function toggleBandDetail(band) {
   if (openBand === band) { closeBandDetail(); return; }  // tap again to close
   const box = el("band-detail");
-  if (!box || !currentDev) return;
+  if (!box || !currentDrill) return;
+  const drill = currentDrill;
 
   if (bandAbort) bandAbort.abort();
   bandAbort = new AbortController();
@@ -839,10 +887,7 @@ async function toggleBandDetail(band) {
 
   let t;
   try {
-    const r = await fetch(
-      `/api/transactions?q=${encodeURIComponent(currentDev)}&band=${encodeURIComponent(band)}`,
-      { signal }
-    );
+    const r = await fetch(drill.url(band), { signal });
     t = await r.json();
   } catch (err) {
     if (err.name === "AbortError") return;
@@ -850,10 +895,10 @@ async function toggleBandDetail(band) {
   }
   if (signal.aborted || openBand !== band) return;  // a newer tap won
 
-  renderBandDetail(box, band, t);
+  renderBandDetail(box, band, t, drill);
 }
 
-function renderBandDetail(box, band, t) {
+function renderBandDetail(box, band, t, drill) {
   const head =
     `<div class="band-head"><span class="band-title">${esc(band)}</span>` +
     `<button type="button" id="band-close" aria-label="Close">✕</button></div>`;
@@ -862,7 +907,7 @@ function renderBandDetail(box, band, t) {
   if (t.error || t.ambiguous || !txns.length) {
     box.innerHTML =
       head +
-      `<p class="note">${esc(t.error || "No transactions recorded in this band.")}</p>`;
+      `<p class="note">${esc(t.error || `No transactions recorded for this ${drill.noun}.`)}</p>`;
   } else {
     // Date / price / PSF are what the eye scans down; size, floor and sale type
     // ride along as a sub-line rather than as columns, which six of would clip
@@ -872,14 +917,7 @@ function renderBandDetail(box, band, t) {
       `<p class="band-count">${txns.length} transaction${txns.length === 1 ? "" : "s"} on record, newest first</p>` +
       `<div class="band-scroll"><table>` +
       "<tr><th>Date</th><th class='num'>Price</th><th class='num'>PSF</th></tr>";
-    for (const x of txns) {
-      html +=
-        `<tr><td>${esc(x.contract_date_display)}` +
-        `<br><span class="popup-line">${x.area_sqft.toLocaleString("en-SG")} sqft · ` +
-        `${esc(x.floor_range)} flr · ${esc(x.type_of_sale)}</span></td>` +
-        `<td class="num">${fmtMoney(x.price)}</td>` +
-        `<td class="num">${x.psf ? fmtMoney(x.psf) : "–"}</td></tr>`;
-    }
+    for (const x of txns) html += drill.row(x);
     box.innerHTML = html + "</table></div>";
   }
   el("band-close").onclick = closeBandDetail;
