@@ -9,6 +9,7 @@ from urllib.parse import quote
 from cache.onemap_mrt import find_nearest_mrts as onemap_find_nearest_mrts
 from mrt_data import get_line_for_exit, LINE_FORMAT
 from utils import haversine_m, get_onemap_token
+from cache import amenity_cache
 
 SGT = ZoneInfo("Asia/Singapore")
 
@@ -525,7 +526,23 @@ def find_nearest_hawkers(lat: float, lng: float) -> list:
 
 # ── Main function ─────────────────────────────────────────────────────────────
 
-def get_nearby_info(address: str, lat: float | None = None, lng: float | None = None) -> dict:
+# The keys of get_nearby_info's bundle (and of its `jobs`); a new category is
+# added in both places.
+AMENITY_CATEGORIES = ("mrts", "malls", "schools", "supermarkets", "hawkers", "coffeeshops")
+
+# How many Places candidates get a walking-distance lookup. Distance Matrix is
+# billed per destination, and this used to be every candidate — up to 8 malls
+# and 15 supermarkets — to keep 3 of each. The nearest 3 by straight line are
+# what gets walked now; the walk still decides their order.
+WALK_CANDIDATES = 3
+
+
+def _nearest_by_straight_line(lat: float, lng: float, places: list, n: int) -> list:
+    return sorted(places, key=lambda p: haversine_m(lat, lng, p["lat"], p["lng"]))[:n]
+
+
+def get_nearby_info(address: str, lat: float | None = None, lng: float | None = None,
+                    categories=None) -> dict:
     """Find nearby amenities (MRT, malls, schools, supermarkets, hawker centres
     and coffee shops) for a location.
 
@@ -535,14 +552,38 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
     skipping Google geocoding — and directions links are routed from those
     coords so the displayed times match the tap-through. Otherwise `address`
     is geocoded by name as before.
+
+    `categories` limits the lookup to those keys of AMENITY_CATEGORIES (the
+    bot asks for the one button that was tapped); omitted means all six. Only
+    the requested keys come back.
+
+    Each category is cached per origin (cache/amenity_cache.py), so a repeat
+    view costs no Google calls — and when every requested category is cached
+    for an address, not even the geocode.
     """
-    if lat is not None and lng is not None:
+    wanted = [c for c in AMENITY_CATEGORIES if categories is None or c in categories]
+    exact = lat is not None and lng is not None
+    cache_origin = amenity_cache.origin_key(address, lat, lng)
+
+    found = {}
+    for key in wanted:
+        hit = amenity_cache.get(key, cache_origin)
+        if hit is not None:
+            found[key] = hit["rows"]
+            if not exact and lat is None:
+                lat, lng = hit["lat"], hit["lng"]
+    missing = [k for k in wanted if k not in found]
+    if not missing:
+        return {"address": address, "lat": lat, "lng": lng, **found}
+
+    if exact:
         origin = (lat, lng)   # route links from the exact coordinate
     else:
-        coords = geocode_address(address)
-        if not coords:
-            return {"error": f'Could not locate "{address}" on Google Maps.'}
-        lat, lng = coords
+        if lat is None:
+            coords = geocode_address(address)
+            if not coords:
+                return {"error": f'Could not locate "{address}" on Google Maps.'}
+            lat, lng = coords
         origin = address      # only the address text is known — geocode by name
 
     def _mrts():
@@ -575,6 +616,7 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
         # ── Mall via Google Places ────────────────────────────────────────────────
         mall_results = []
         mall_candidates = find_nearest_mall(lat, lng)
+        mall_candidates = _nearest_by_straight_line(lat, lng, mall_candidates, WALK_CANDIDATES)
         if mall_candidates:
             distances = get_walking_distances_bulk(lat, lng, mall_candidates)
             combined = []
@@ -621,6 +663,8 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
         # ── Supermarkets via Google Places ──────────────────────────────────────────
         supermarket_results = []
         supermarket_candidates = find_nearest_supermarkets(lat, lng)
+        supermarket_candidates = _nearest_by_straight_line(
+            lat, lng, supermarket_candidates, WALK_CANDIDATES)
         if supermarket_candidates:
             distances = get_walking_distances_bulk(lat, lng, supermarket_candidates)
             combined = []
@@ -710,7 +754,7 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
         "supermarkets": _supermarkets, "hawkers": _hawkers,
         "coffeeshops": _coffeeshops,
     }
-    found = {}
+    jobs = {key: fn for key, fn in jobs.items() if key in missing}
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
         futures = {pool.submit(fn): key for key, fn in jobs.items()}
         for future in as_completed(futures):
@@ -720,5 +764,8 @@ def get_nearby_info(address: str, lat: float | None = None, lng: float | None = 
             except Exception as e:
                 print(f"[Maps] {key} lookup failed: {e}")
                 found[key] = []
+                continue
+            amenity_cache.put(key, cache_origin, found[key], lat, lng)
 
-    return {"address": address, "lat": lat, "lng": lng, **found}
+    return {"address": address, "lat": lat, "lng": lng,
+            **{key: found[key] for key in wanted}}

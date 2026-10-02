@@ -1068,11 +1068,17 @@ async def amenity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Postal searches stash the exact OneMap coordinate — use it as the
             # origin so amenity selection and walk/transit times match the real
             # address; name searches fall back to geocoding `address` by name.
+            #
+            # Only the tapped category is fetched: the bundle bills Google per
+            # destination, and running all six to show one cost six times over
+            # for a user who taps every button.
+            category = {"mrt": "mrts"}.get(amenity, amenity)
             coords = resolve_addr_coords(context, token)
             if coords:
-                maps_result = get_nearby_info(address, coords[0], coords[1])
+                maps_result = get_nearby_info(address, coords[0], coords[1],
+                                              categories=[category])
             else:
-                maps_result = get_nearby_info(address)
+                maps_result = get_nearby_info(address, categories=[category])
 
             if amenity == "mrt":
                 text = format_amenity_list(
