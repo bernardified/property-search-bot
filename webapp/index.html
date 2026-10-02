@@ -110,6 +110,22 @@
             </div>
           </div>
 
+          <!-- Freehold has no lease to run down, so it passes every minimum;
+               the tenure chips above are how to ask for leasehold only. 90 is
+               here and not on the HDB side because private leases spread
+               wider — it is where the recent 99-year launches sit. -->
+          <div class="ctl">
+            <label id="private-lease-label">Remaining lease
+              <select id="f-private-lease">
+                <option value="">Any</option>
+                <option value="60">60 years or more</option>
+                <option value="70">70 years or more</option>
+                <option value="80">80 years or more</option>
+                <option value="90">90 years or more</option>
+              </select>
+            </label>
+          </div>
+
           <div class="ctl">
             <span class="ctl-label">Districts</span>
             <div id="f-districts" class="chips chips-scroll"></div>

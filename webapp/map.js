@@ -1789,6 +1789,11 @@ const MARKETS = {
     matches(d) {
       if (this.sel.tenure.size && !this.sel.tenure.has(d.tenure)) return false;
       if (this.sel.district.size && !this.sel.district.has(d.district)) return false;
+      // Freehold never expires, so it clears any minimum; a leasehold with no
+      // lease reading is unknown, and unknown is not "long enough".
+      const minLease = parseInt(el("f-private-lease").value, 10);
+      if (minLease && d.tenure !== "freehold" &&
+          (d.lease_years == null || d.lease_years < minLease)) return false;
       return true;
     },
   },
@@ -2156,7 +2161,8 @@ el("metric-toggle").addEventListener("click", (e) => {
   if (b) setMetric(b.dataset.metric);
 });
 
-for (const id of ["f-active", "f-mrt", "f-mall", "f-psf-min", "f-psf-max", "f-lease"]) {
+for (const id of ["f-active", "f-mrt", "f-mall", "f-psf-min", "f-psf-max", "f-lease",
+                  "f-private-lease"]) {
   el(id).addEventListener("input", applyFilters);
 }
 
