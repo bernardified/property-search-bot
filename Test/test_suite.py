@@ -2104,6 +2104,17 @@ class TestHDB(unittest.TestCase):
 # HAWKER CENTRES (NEA register, not Google Places)
 # ══════════════════════════════════════════════════════
 
+def _isolate_amenity_cache(tc):
+    """get_nearby_info caches per category per origin. Tests must neither see
+    each other's answers nor write into a real Mongo when .env sets one."""
+    import cache.amenity_cache as ac
+    ac.clear_memo()
+    p = patch.object(ac, "get_mongo_db", return_value=None)
+    p.start()
+    tc.addCleanup(p.stop)
+    tc.addCleanup(ac.clear_memo)
+
+
 class TestHawkerCentres(unittest.TestCase):
     """NEA's hawker-centre register: parsing, nearest-N, and how it joins the
     amenity bundle."""
@@ -2189,6 +2200,7 @@ class TestHawkerCentres(unittest.TestCase):
     def setUp(self):
         import cache.hawker_cache as hc
         hc._memo.update(at=0.0, hawkers=[])
+        _isolate_amenity_cache(self)
 
     def test_one_fetch_serves_the_whole_hour(self):
         """Every amenity lookup used to re-run the freshness check and, with no
@@ -2275,6 +2287,9 @@ class TestCoffeeShops(unittest.TestCase):
     """The one food amenity with no register behind it, so the name filter is
     the whole product. Every string below was returned by a real Places call
     against a real origin."""
+
+    def setUp(self):
+        _isolate_amenity_cache(self)
 
     def test_genuine_coffee_shops_are_kept(self):
         from maps import is_coffeeshop
@@ -2368,6 +2383,9 @@ class TestAmenityConcurrency(unittest.TestCase):
     nothing but the origin, so the cost should be the longest chain, not the
     sum of six."""
 
+    def setUp(self):
+        _isolate_amenity_cache(self)
+
     def _patches(self, **overrides):
         walk = [{"distance_text": "100 m", "duration_text": "2 mins", "distance_m": 100}] * 5
         defaults = {
@@ -2425,6 +2443,146 @@ class TestAmenityConcurrency(unittest.TestCase):
             elapsed = time.perf_counter() - t
 
         self.assertLess(elapsed, 0.35, "the six lookups are running in sequence")
+
+
+class TestAmenityCost(unittest.TestCase):
+    """Distance Matrix bills per destination, and one full amenity bundle was
+    ~45-60 of them (~US$0.35 with the Places searches) every time any
+    property was viewed — including the bot running all six categories to
+    show the one button that was tapped."""
+
+    WALK = [{"distance_text": "100 m", "duration_text": "2 mins", "distance_m": 100}] * 5
+    HAWKER = [{"name": "Tiong Bahru Market", "lat": 1.28, "lng": 103.83,
+               "stalls": 83, "dist": 200.0}]
+
+    def setUp(self):
+        _isolate_amenity_cache(self)
+
+    def _finders(self, es, **overrides):
+        values = {
+            "onemap_find_nearest_mrts": [], "find_nearest_mall": [],
+            "find_nearest_primary_schools": [], "find_nearest_supermarkets": [],
+            "find_nearest_hawkers": self.HAWKER, "find_nearest_coffeeshops": [],
+        }
+        values.update(overrides)
+        return {n: es.enter_context(patch(f"maps.{n}", return_value=v))
+                for n, v in values.items()}
+
+    # ── one category for one button ──────────────────────────────────────────
+
+    def test_categories_runs_only_what_was_asked_for(self):
+        import maps
+        with contextlib.ExitStack() as es:
+            mocks = self._finders(es)
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=self.WALK))
+            out = maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["hawkers"])
+
+        self.assertEqual(len(out["hawkers"]), 1)
+        for key in ("mrts", "malls", "schools", "supermarkets", "coffeeshops"):
+            self.assertNotIn(key, out)
+        for name, m in mocks.items():
+            if name != "find_nearest_hawkers":
+                m.assert_not_called()
+
+    def test_no_categories_still_means_all_six(self):
+        import maps
+        with contextlib.ExitStack() as es:
+            self._finders(es)
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=self.WALK))
+            out = maps.get_nearby_info("X", lat=1.28, lng=103.83)
+        self.assertEqual(set(maps.AMENITY_CATEGORIES) - set(out), set())
+
+    # ── the cache ────────────────────────────────────────────────────────────
+
+    def test_a_repeat_view_makes_no_google_calls(self):
+        import maps
+        with contextlib.ExitStack() as es:
+            mocks = self._finders(es)
+            walk = es.enter_context(patch("maps.get_walking_distances_bulk",
+                                          return_value=self.WALK))
+            first = maps.get_nearby_info("X", lat=1.28, lng=103.83)
+            calls = walk.call_count
+            second = maps.get_nearby_info("X", lat=1.28, lng=103.83)
+
+        self.assertEqual(walk.call_count, calls)
+        self.assertEqual(mocks["find_nearest_hawkers"].call_count, 1)
+        self.assertEqual(first["hawkers"], second["hawkers"])
+
+    def test_the_bot_and_the_webapp_share_entries(self):
+        """Cached per category, so a full bundle answers a later one-button tap."""
+        import maps
+        with contextlib.ExitStack() as es:
+            mocks = self._finders(es)
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=self.WALK))
+            maps.get_nearby_info("X", lat=1.28, lng=103.83)
+            out = maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["hawkers"])
+        self.assertEqual(len(out["hawkers"]), 1)
+        self.assertEqual(mocks["find_nearest_hawkers"].call_count, 1)
+
+    def test_an_empty_category_is_never_cached(self):
+        """A failed Distance Matrix call comes back as an empty list; holding
+        it would hide the amenity for the whole TTL."""
+        import maps
+        with contextlib.ExitStack() as es:
+            mocks = self._finders(es)
+            es.enter_context(patch("maps.get_walking_distances_bulk",
+                                   return_value=[None] * 5))
+            maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["hawkers"])
+            maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["hawkers"])
+        self.assertEqual(mocks["find_nearest_hawkers"].call_count, 2)
+
+    def test_a_cached_address_skips_the_geocode_too(self):
+        import maps
+        with contextlib.ExitStack() as es:
+            self._finders(es)
+            es.enter_context(patch("maps.get_walking_distances_bulk", return_value=self.WALK))
+            geo = es.enter_context(patch("maps.geocode_address", return_value=(1.28, 103.83)))
+            maps.get_nearby_info("Some Condo, Some Road", categories=["hawkers"])
+            out = maps.get_nearby_info("some condo, some road ", categories=["hawkers"])
+        geo.assert_called_once()
+        self.assertEqual((out["lat"], out["lng"]), (1.28, 103.83))
+
+    def test_an_address_and_a_coordinate_are_different_origins(self):
+        """The rows' directions links are routed from whichever origin was
+        used, so the two must not answer for each other."""
+        from cache.amenity_cache import origin_key
+        self.assertEqual(origin_key("A", 1.2800004, 103.83), "xy|1.28000,103.83000")
+        self.assertEqual(origin_key(" a road ", None, None), "addr|A ROAD")
+
+    def test_entries_expire(self):
+        import cache.amenity_cache as ac
+        ac.put("hawkers", "xy|1,2", [{"name": "x"}], 1.0, 2.0, now=1000.0)
+        self.assertIsNotNone(ac.get("hawkers", "xy|1,2", now=1000.0 + ac.TTL_S - 1))
+        self.assertIsNone(ac.get("hawkers", "xy|1,2", now=1000.0 + ac.TTL_S + 1))
+
+    # ── fewer destinations per lookup ────────────────────────────────────────
+
+    def test_only_the_three_nearest_malls_are_walked(self):
+        """Every candidate used to get a walking lookup to keep three."""
+        import maps
+        malls = [{"name": f"Mall {i}", "lat": 1.28 + 0.001 * i, "lng": 103.83}
+                 for i in (5, 1, 7, 2, 8, 3, 6, 4)]
+        with contextlib.ExitStack() as es:
+            self._finders(es, find_nearest_mall=malls)
+            walk = es.enter_context(patch("maps.get_walking_distances_bulk",
+                                          return_value=self.WALK[:3]))
+            es.enter_context(patch("maps._enrich_with_transit", side_effect=lambda *a: a[3]))
+            maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["malls"])
+        dests = walk.call_args[0][2]
+        self.assertEqual([d["name"] for d in dests], ["Mall 1", "Mall 2", "Mall 3"])
+
+    def test_only_the_three_nearest_supermarkets_are_walked(self):
+        import maps
+        shops = [{"name": f"FairPrice {i}", "lat": 1.28 + 0.001 * i, "lng": 103.83}
+                 for i in range(15, 0, -1)]
+        with contextlib.ExitStack() as es:
+            self._finders(es, find_nearest_supermarkets=shops)
+            walk = es.enter_context(patch("maps.get_walking_distances_bulk",
+                                          return_value=self.WALK[:3]))
+            es.enter_context(patch("maps._enrich_with_transit", side_effect=lambda *a: a[3]))
+            maps.get_nearby_info("X", lat=1.28, lng=103.83, categories=["supermarkets"])
+        self.assertEqual(len(walk.call_args[0][2]), 3)
+        self.assertEqual(walk.call_args[0][2][0]["name"], "FairPrice 1")
 
 
 class TestMRTExitLookups(unittest.TestCase):
@@ -2693,6 +2851,7 @@ def run_tests():
         TestHawkerCentres,
         TestCoffeeShops,
         TestAmenityConcurrency,
+        TestAmenityCost,
         TestMRTExitLookups,
         TestShoppingMalls,
     ]
